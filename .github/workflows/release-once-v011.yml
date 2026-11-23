@@ -1,9 +1,11 @@
 name: Publish Paperroom v0.1.1 once
-on: create
+on:
+  push:
+    branches: [release-once/v0.1.1]
 permissions: {}
 jobs:
   publish:
-    if: github.repository == 'yung13yubabie/paperroom' && github.event.ref_type == 'branch' && github.ref == 'refs/heads/release-once/v0.1.1' && github.run_attempt == 1
+    if: github.repository == 'yung13yubabie/paperroom' && github.event.before == 'a971c6a20677831f3b282bd1b304bbca1212a2bf' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -66,7 +68,6 @@ jobs:
               require(obj["type"] == "commit" and obj["sha"] == commit,
                       "Remote release tag does not match the frozen commit.")
 
-          require_no_release()
           require_frozen_tag()
           with tempfile.TemporaryDirectory(prefix="paperroom-release-") as temp:
               root = Path(temp)
@@ -111,22 +112,50 @@ jobs:
               )
 
               require_frozen_tag()
-              require_no_release()
-              gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
-                 "--title", "Paperroom v0.1.1", "--notes-file", str(notes))
-              drafts = [release for page in api("releases?per_page=100", "--paginate", "--slurp")
-                        for release in page]
-              require(len(drafts) == 1 and drafts[0]["tag_name"] == tag and drafts[0]["draft"]
-                      and not drafts[0]["assets"], "Unexpected release state after draft creation. Draft preserved.")
-              draft_id = drafts[0]["id"]
-              gh("release", "upload", tag, *(str(root / name) for name in assets), "--repo", repo)
-              draft = api(f"releases/{draft_id}")
-              actual = {asset["name"]: (asset.get("digest"), asset["state"]) for asset in draft["assets"]}
+              releases = api("releases?per_page=100", "-H", "Cache-Control: no-cache")
+              require(isinstance(releases, list) and len(releases) == 1,
+                      f"Expected exactly one existing draft. Release count: {len(releases)}.")
+              draft = releases[0]
+              draft_id = draft["id"]
+              author = draft.get("author", {}).get("login")
+              candidate_tag = draft.get("tag_name", "")
+              print(f"Candidate release id={draft_id} draft={draft.get('draft')} tag={candidate_tag} "
+                    f"author={author} assets={len(draft.get('assets', []))}", flush=True)
+              require(draft["draft"] and draft["name"] == "Paperroom v0.1.1"
+                      and (draft.get("body") or "").strip() == notes.read_text(encoding="utf-8").strip()
+                      and author == "github-actions[bot]"
+                      and (candidate_tag == tag or not candidate_tag or candidate_tag.startswith("untagged-")),
+                      "Existing record does not match the draft from the first attempt.")
               expected = {name: (f"sha256:{digest}", "uploaded") for name, (_, digest) in assets.items()}
-              require(draft["draft"] and draft["tag_name"] == tag and len(draft["assets"]) == 4
-                      and actual == expected, "Draft asset names/digests differ. Draft preserved.")
+
+              def validate_present(release):
+                  present = {asset["name"]: (asset.get("digest"), asset["state"]) for asset in release["assets"]}
+                  require(len(present) == len(release["assets"])
+                          and all(expected.get(name) == info for name, info in present.items()),
+                          "Unexpected asset in the draft. Preserving existing assets.")
+                  return present
+
+              present = validate_present(draft)
+              for name in assets.keys() - present.keys():
+                  uploaded = json.loads(gh(
+                      "api", "--method", "POST",
+                      f"https://uploads.github.com/repos/{repo}/releases/{draft_id}/assets?name={name}",
+                      "-H", "Content-Type: application/octet-stream", "--input", str(root / name),
+                  ))
+                  require(uploaded["name"] == name and
+                          (uploaded.get("digest"), uploaded["state"]) == expected[name],
+                          f"Failed to verify the uploaded asset: {name}. Draft preserved.")
+                  print(f"Verified {name}", flush=True)
+
+              draft = api(f"releases/{draft_id}")
+              require(draft["draft"] and draft["id"] == draft_id and draft["tag_name"] == candidate_tag
+                      and validate_present(draft) == expected,
+                      "The exact draft and all four digests could not be confirmed.")
               require_frozen_tag()
-              gh("release", "edit", tag, "--repo", repo, "--draft=false")
-              published = api(f"releases/{draft_id}")
-              require(not published["draft"] and published["tag_name"] == tag, "Release publication could not be confirmed.")
+              tag_fields = [] if candidate_tag == tag else ["-f", f"tag_name={tag}"]
+              published = api(f"releases/{draft_id}", "--method", "PATCH",
+                              "-F", "draft=false", *tag_fields)
+              require(not published["draft"] and published["tag_name"] == tag
+                      and validate_present(published) == expected,
+                      "Publication could not be confirmed.")
               print(published["html_url"])

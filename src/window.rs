@@ -126,6 +126,10 @@ unsafe fn label(hwnd: HWND, text: &str) {
     }
 }
 
+unsafe fn load_editor_text(hwnd: HWND, value: &str) -> bool {
+    !value.contains('\0') && unsafe { SetWindowTextW(hwnd, wide(value).as_ptr()) != 0 }
+}
+
 unsafe fn text(hwnd: HWND) -> String {
     unsafe { read_text(hwnd).unwrap_or_default() }
 }
@@ -166,6 +170,25 @@ fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<Path
     let local = local.filter(|path| path.is_absolute())
         .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
     Ok(local.join("Paperroom"))
+}
+
+fn check_workspace_volume(path: &Path, drive_type: impl FnOnce(&Path) -> u32) -> Result<()> {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return Err("工作區需要完整的 Windows 路徑。".into());
+    };
+    let remote = match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            let root = PathBuf::from(format!("{}:\\", char::from(letter)));
+            drive_type(&root) == 4 // Win32 DRIVE_REMOTE
+        }
+        _ => return Err("工作區需要本機磁碟路徑。".into()),
+    };
+    if remote {
+        return Err("工作區使用 SQLite WAL，需要本機磁碟。請將工作區移至本機後再開啟。".into());
+    }
+    Ok(())
 }
 
 pub fn run() {
@@ -222,6 +245,9 @@ unsafe fn start() -> Result<()> {
             std::env::args_os().skip(1).any(|arg| arg == "--portable"),
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         )?;
+        check_workspace_volume(&dir, |root| {
+            windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr())
+        })?;
         std::fs::create_dir_all(&dir)?;
         let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let module = GetModuleHandleW(null());
@@ -717,11 +743,11 @@ impl App {
                     "拖曳卡片調整位置　雙擊開啟筆記　右鍵移出白板　滾輪捲動",
                 );
             } else if let Some(note) = note {
-                label(w.title, &note.row.title);
+                let title_loaded = load_editor_text(w.title, &note.row.title);
                 SendMessageW(w.title, EM_SETREADONLY, usize::from(!editing), 0);
                 if editing {
-                    let body = wide(&note.body.replace('\n', "\r\n"));
-                    self.editor_ready = SetWindowTextW(w.body, body.as_ptr()) != 0;
+                    let body = note.body.replace('\n', "\r\n");
+                    self.editor_ready = load_editor_text(w.body, &body) && title_loaded;
                     EnableWindow(w.title, i32::from(self.editor_ready));
                     EnableWindow(w.body, i32::from(self.editor_ready));
                     SendMessageW(w.body, EM_EMPTYUNDOBUFFER, 0, 0);
@@ -802,8 +828,10 @@ impl App {
             }
             self.dirty = true;
             KillTimer(self.hwnd, SAVE_TIMER);
-            SetTimer(self.hwnd, SAVE_TIMER, 550, None);
             label(self.widgets.status, "有尚未儲存的修改…");
+            if SetTimer(self.hwnd, SAVE_TIMER, 550, None) == 0 {
+                self.flush(false);
+            }
         }
     }
 
@@ -1990,6 +2018,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_workspace_rejects_unc_and_mapped_drives() {
+        for path in [r"\\server\share\notes", r"\\?\UNC\server\share\notes"] {
+            assert!(check_workspace_volume(Path::new(path), |_| unreachable!()).is_err());
+        }
+        assert!(check_workspace_volume(Path::new(r"Z:\notes"), |root| {
+            assert_eq!(root, Path::new(r"Z:\"));
+            4
+        }).is_err());
+        assert!(check_workspace_volume(Path::new(r"\\?\C:\notes"), |_| 3).is_ok());
+    }
+
+    #[test]
     fn data_directory_rejects_cwd_fallback_and_prefers_portable_marker() -> Result<()> {
         let root = std::env::temp_dir().join(format!("paperroom-paths-{}", std::process::id()));
         std::fs::create_dir(&root)?;
@@ -2042,6 +2082,9 @@ mod tests {
             let manuscript = "{\\rtf1 原稿} 📝\r\n第二行";
             assert_ne!(SetWindowTextW(widgets.body, wide(manuscript).as_ptr()), 0);
             assert_eq!(read_text(widgets.body).unwrap(), manuscript);
+            assert!(!load_editor_text(widgets.body, "前段\0後段"));
+            assert_eq!(read_text(widgets.body).unwrap(), manuscript);
+            assert!(!load_editor_text(null_mut(), "標題"));
             SendMessageW(widgets.preview, EM_SETREADONLY, 0, 0);
             set_rtf(widgets.preview, &crate::markdown::preview("## 閱讀標題"));
             SendMessageW(widgets.preview, EM_SETREADONLY, 1, 0);

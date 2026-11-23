@@ -62,6 +62,20 @@ pub fn clean_title(title: &str) -> String {
 
 impl Notebook {
     pub fn open(path: &Path, seed: bool) -> Result<Self> {
+        // The Win32 VFS ultimately opens this UTF-16 name. Use extended
+        // syntax even when Windows has not enabled long paths globally.
+        #[cfg(windows)]
+        let normalized = if path == Path::new(":memory:") {
+            path.to_owned()
+        } else {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            std::fs::canonicalize(parent)?.join(path.file_name().ok_or("找不到筆記檔名。")?)
+        };
+        #[cfg(windows)]
+        let mut connection = Connection::open_with_flags_and_vfs(
+            normalized, rusqlite::OpenFlags::default(), "win32-longpath",
+        )?;
+        #[cfg(not(windows))]
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -214,15 +228,16 @@ impl Notebook {
         Ok(results)
     }
 
-    pub fn add_card(&self, id: i64) -> Result<()> {
-        if self.connection.query_row(
+    pub fn add_card(&mut self, id: i64) -> Result<()> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.query_row(
             "SELECT count(*) >= 128 FROM board_cards WHERE note_id<>?1",
             [id],
             |row| row.get::<_, bool>(0),
         )? {
             return Err("白板最多可放 128 張卡片。".into());
         }
-        self.connection.execute(
+        tx.execute(
             "INSERT INTO board_cards(note_id,x,y)
              SELECT id, 16 + (SELECT count(*) FROM board_cards)%2*260,
                     16 + (SELECT count(*) FROM board_cards)/2*135
@@ -230,6 +245,7 @@ impl Notebook {
              ON CONFLICT(note_id) DO NOTHING",
             [id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -548,6 +564,61 @@ mod tests {
         assert!(db.note(card)?.is_some());
         drop(db);
         std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_card_additions_respect_the_shared_limit() -> Result<()> {
+        let dir = data_dir();
+        let path = dir.join("cards.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        for _ in 0..127 {
+            let id = db.add(None, "卡片", "")?;
+            db.add_card(id)?;
+        }
+        let first = db.add(None, "甲", "")?;
+        let second = db.add(None, "乙", "")?;
+        let mut other = Notebook::open(&path, false)?;
+        let barrier = std::sync::Barrier::new(2);
+        let added = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                barrier.wait();
+                other.add_card(second).is_ok()
+            });
+            barrier.wait();
+            u8::from(db.add_card(first).is_ok()) + u8::from(worker.join().unwrap())
+        });
+        assert_eq!(added, 1);
+        let cards = db.cards()?;
+        assert_eq!(cards.len(), 128);
+        db.add_card(cards[0].id)?;
+        drop(other);
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deep_unicode_destination_preserves_export_and_backup() -> Result<()> {
+        let root = data_dir();
+        let mut dir = root.clone();
+        for _ in 0..12 {
+            dir.push("深層資料夾-01234567890123456789");
+        }
+        std::fs::create_dir_all(&dir)?;
+        let path = root.join("notes.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let id = db.add(None, "中文標題", "保留內文")?;
+        let text = dir.join("作品.md");
+        crate::archive::export_note(&text, "中文標題", "保留內文")?;
+        assert_eq!(crate::archive::markdown(&text)?.body, "保留內文");
+        let path = dir.join("筆記備份.sqlite3");
+        db.backup(&path)?;
+        let restored = Notebook::open(&path, false)?;
+        assert_eq!(restored.note(id)?.unwrap().body, "保留內文");
+        drop(restored);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

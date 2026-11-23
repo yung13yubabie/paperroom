@@ -34,7 +34,7 @@ jobs:
         run: ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
 
   release-assets:
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') || (github.event_name == 'push' && github.ref == 'refs/heads/maintenance/signing-preparation')
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     runs-on: windows-2022
     timeout-minutes: 20
     steps:
@@ -46,7 +46,7 @@ jobs:
       - name: Resolve the tag and verify public downloads
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.1.1' }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           $folder = Join-Path $env:RUNNER_TEMP 'paperroom-release-check'

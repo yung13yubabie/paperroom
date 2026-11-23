@@ -70,3 +70,5 @@ cargo build --locked --release --target x86_64-pc-windows-gnu
 更多細節請參考 [防禦性檢查](docs/AUDIT.md)、[簡易教學](docs/QUICKSTART.md)、[驗證紀錄](docs/VERIFICATION.md)及[官方公開文件索引](docs/PUBLIC-FEATURE-INDEX.tsv)。
 
 ![筆記資料庫、SQLite 復原檔與匯出暫存的位置示意圖](docs/storage-layout.png)
+
+下一版的 [Windows 簽章準備](docs/SIGNING.md) 說明候選檔的來源、審核與簽章後驗證方式；依賴、字型和圖片的來源見 [再散布清單](docs/REDISTRIBUTION.md)。

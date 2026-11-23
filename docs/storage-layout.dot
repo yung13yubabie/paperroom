@@ -1,0 +1,19 @@
+// Regenerate with Graphviz: dot -Tpng storage-layout.dot -o storage-layout.png
+digraph paperroom {
+  graph [rankdir=LR, bgcolor="white", pad=".22", nodesep=".25", ranksep=".40", dpi=130]
+  node [shape=box, style="rounded,filled", color="#bccbc3", fillcolor="#f4f7f3", fontname="Noto Sans CJK TC", fontcolor="#1d312a", fontsize=12, margin=".18,.10"]
+  edge [color="#738b7d", arrowsize=.7]
+
+  default_dir [label="預設工作區\n%LOCALAPPDATA%\\Paperroom"]
+  portable_dir [label="可攜工作區\nEXE 旁的 paperroom-data"]
+  db [label="筆記資料庫\nnotes.sqlite3", fillcolor="#d9eee5"]
+  wal [label="資料庫日誌與共用記憶體\n-wal、-shm、-journal\n交由 SQLite 管理"]
+  dest [label="備份或匯出\n使用者選取的目的地"]
+  partial [label="寫入中的暫存檔\n.paperroom-<PID>-<序號>.partial/output"]
+  saved [label="完整輸出\n工作區備份或 Markdown 檔", fillcolor="#d9eee5"]
+  { rank=same; default_dir; portable_dir; dest }
+  default_dir -> db
+  portable_dir -> db
+  db -> wal [arrowhead=none, style=dashed]
+  dest -> partial -> saved
+}

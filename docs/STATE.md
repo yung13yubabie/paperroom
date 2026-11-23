@@ -23,6 +23,6 @@
 
 目前程式碼使用 Windows 原生控制項、系統 RichEdit 與檔案對話框；SQLite 編入程式。程式本身的筆記與白板操作不需要登入或網路，程式碼中未見應用程式自行發送網路請求。這不是對 Windows、檔案對話框、系統安全軟體、網路磁碟或其他外部元件活動的保證。程式未實作自有的登錄檔設定；Windows 仍可能自行管理對話框及其他系統狀態，程式要求檔案對話框不要改變目前工作目錄或加入最近項目。程式動態查找 DPI 功能；查詢 API 不存在時使用 96 DPI 作為後備值，這不保證所有舊版 Windows 均可執行。
 
-Linux 主機測試通過 13 項；Windows 測試程式在 Wine 10 UTF-8 環境通過 16 項，涵蓋長 Unicode 路徑、Markdown 匯出、SQLite 備份與重開、控制項及工作區路徑。斷網 Wine 測試涵蓋預設及可攜工作區、正常退出與強制結束後重啟、中文筆記與搜尋，以及 Notion ZIP 父頁和子頁匯入。Wine 是相容環境，不能證明原生 Windows 的行為；標準使用者帳戶下的原生 Windows、IME 與 SmartScreen 實測仍待完成；Windows Actions 工作流程已設定但尚未執行。詳細結果與限制見 [驗證紀錄](VERIFICATION.md)。
+Linux 主機測試通過 13 項；Windows 測試程式在 Wine 10 UTF-8 環境通過 16 項，涵蓋長 Unicode 路徑、Markdown 匯出、SQLite 備份與重開、控制項及工作區路徑。斷網 Wine 測試涵蓋預設及可攜工作區、正常退出與強制結束後重啟、中文筆記與搜尋，以及 Notion ZIP 父頁和子頁匯入。同一份 v0.1.1 EXE 也在 GitHub 的 Windows Server 2022 runner 通過預設與可攜模式的首啟、儲存及中斷復原測試。Windows 10／11 標準帳戶、實體中文輸入法與 SmartScreen 提示仍待驗證。詳細結果與限制見 [驗證紀錄](VERIFICATION.md)。
 
 執行檔未經 Authenticode 簽章。下載後若遭 Windows 或組織政策阻擋，可先核對發行頁 SHA-256，再將實際錯誤、Windows 版本與雜湊提供給管理員；雜湊無法代替簽章信任。尚未在原生 Windows 觀察 SmartScreen 的實際提示或阻擋結果，不應假設每台電腦會出現相同畫面。

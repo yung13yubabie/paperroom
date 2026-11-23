@@ -1,0 +1,104 @@
+name: Build unsigned Windows artifact
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Confirm source and install native toolchain
+        run: |
+          $head = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Checkout differs from the event commit.' }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+
+      - name: Run Windows tests with locked dependencies
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Build release EXE
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $env:CARGO_ENCODED_RUSTFLAGS = @(
+            "--remap-path-prefix=$env:GITHUB_WORKSPACE=/paperroom"
+            "--remap-path-prefix=$cargoHome=/cargo"
+            '-C'
+            'link-arg=/PDBALTPATH:%_PDB%'
+          ) -join [char]31
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Verify and exercise the unsigned artifact
+        id: verify
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $package = @((ConvertFrom-Json $metadata).packages | Where-Object name -ceq 'paperroom')
+          if ($package.Count -ne 1) { throw 'Expected one Paperroom package.' }
+          $version = $package[0].version
+          if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Expected a three-part release version.' }
+
+          $built = 'target/x86_64-pc-windows-msvc/release/paperroom.exe'
+          $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+          $folder = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'paperroom-unsigned')
+          $exe = Join-Path $folder.FullName 'Paperroom.exe'
+          Copy-Item -LiteralPath $built -Destination $exe
+          $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          $fixedFile = $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart -join '.'
+          $fixedProduct = $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart -join '.'
+          if ($info.FileVersion -cne $version -or $info.ProductVersion -cne $version -or
+              $fixedFile -ne "$version.0" -or $fixedProduct -ne "$version.0" -or
+              $info.ProductName -cne 'Paperroom' -or $info.OriginalFilename -cne 'Paperroom.exe') {
+            throw 'PE VERSIONINFO differs from the package.'
+          }
+          if ((Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned') {
+            throw 'Expected an unsigned build.'
+          }
+          ./scripts/windows-storage.ps1 -Exe $exe
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          if ($hash -cne $builtHash) { throw 'Staged executable differs from the build.' }
+          $status = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $status) { throw 'Build or tests modified the checkout.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "exe_hash=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Paperroom.exe as the only archive member
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-${{ steps.verify.outputs.version }}-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paperroom-unsigned/Paperroom.exe
+          if-no-files-found: error
+
+      - name: Record source and artifact identities
+        env:
+          VERSION: ${{ steps.verify.outputs.version }}
+          EXE_HASH: ${{ steps.verify.outputs.exe_hash }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARCHIVE_HASH: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:ARCHIVE_HASH -notmatch '^[a-f0-9]{64}$') {
+            throw 'GitHub did not return a valid artifact ID and archive digest.'
+          }
+          @(
+            "Paperroom $env:VERSION unsigned Windows x64 (MSVC)"
+            ''
+            "- Repository: $env:GITHUB_REPOSITORY"
+            "- Source commit: $env:GITHUB_SHA"
+            "- Run: $env:GITHUB_RUN_ID (attempt $env:GITHUB_RUN_ATTEMPT)"
+            "- Paperroom.exe SHA-256: $env:EXE_HASH"
+            "- GitHub artifact ID: $env:ARTIFACT_ID"
+            "- GitHub artifact ZIP SHA-256: $env:ARCHIVE_HASH"
+          ) >> $env:GITHUB_STEP_SUMMARY

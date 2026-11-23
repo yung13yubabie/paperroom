@@ -1931,3 +1931,51 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_markdown_editor_preserves_rtf_like_unicode_text() {
+        unsafe {
+            let module = GetModuleHandleW(null());
+            let rich_edit = LoadLibraryExW(
+                wide("Msftedit.dll").as_ptr(),
+                null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            );
+            assert!(!rich_edit.is_null());
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_TREEVIEW_CLASSES | ICC_STANDARD_CLASSES,
+            };
+            assert_ne!(InitCommonControlsEx(&controls), 0);
+            let host = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                400,
+                300,
+                null_mut(),
+                null_mut(),
+                module,
+                null(),
+            );
+            assert!(!host.is_null());
+            let widgets = Widgets::create(host, module).unwrap();
+            let manuscript = "{\\rtf1 原稿} 📝\r\n第二行";
+            assert_ne!(SetWindowTextW(widgets.body, wide(manuscript).as_ptr()), 0);
+            assert_eq!(read_text(widgets.body).unwrap(), manuscript);
+            SendMessageW(widgets.preview, EM_SETREADONLY, 0, 0);
+            set_rtf(widgets.preview, &crate::markdown::preview("## 閱讀標題"));
+            SendMessageW(widgets.preview, EM_SETREADONLY, 1, 0);
+            assert!(read_text(widgets.preview).unwrap().contains("閱讀標題"));
+            assert_eq!(read_text(widgets.body).unwrap(), manuscript);
+            assert_ne!(DestroyWindow(host), 0);
+        }
+    }
+}

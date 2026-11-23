@@ -266,6 +266,9 @@ impl Notebook {
 
     pub fn save(&self, id: i64, version: i64, title: &str, body: &str) -> Result<i64> {
         validate_body(body)?;
+        if title.trim().chars().count() > MAX_TITLE_CHARS {
+            return Err("標題最多 180 個字。請縮短標題後再次儲存，編輯中的文字仍保留。".into());
+        }
         let changed = self.connection.execute(
             "UPDATE notes SET title=?3,body=?4,version=version+1
              WHERE id=?1 AND version=?2 AND trash_root IS NULL",
@@ -357,11 +360,17 @@ impl Notebook {
     }
 
     pub fn backup(&self, path: &Path) -> Result<()> {
-        if path.exists() {
-            return Err("備份需要新檔名，以保留同名檔案。".into());
-        }
         let filename = path.to_str().ok_or("無法使用這個備份路徑。")?;
-        self.connection.execute("VACUUM INTO ?1", [filename])?;
+        let reserved = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        if let Err(error) = self.connection.execute("VACUUM INTO ?1", [filename]) {
+            drop(reserved);
+            let _ = std::fs::remove_file(path);
+            return Err(error.into());
+        }
+        reserved.sync_all()?;
         Ok(())
     }
 
@@ -377,12 +386,13 @@ impl Notebook {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let root = insert(&tx, None, folder, "")?;
         let mut ids = HashMap::new();
-        for page in files {
+        for page in &files {
+            validate_body(&page.body)?;
             let mut parent = root;
-            for depth in 1..=page.parts.len() {
-                let key = &page.parts[..depth];
-                let last = depth == page.parts.len();
-                if let Some(&existing) = ids.get(key) {
+            for (index, part) in page.parts.iter().enumerate() {
+                let key = (parent, part.as_str());
+                let last = index + 1 == page.parts.len();
+                if let Some(&existing) = ids.get(&key) {
                     parent = existing;
                     if last {
                         tx.execute(
@@ -394,10 +404,13 @@ impl Notebook {
                     let (title, body) = if last {
                         (page.title.clone(), page.body.as_str())
                     } else {
-                        (crate::archive::export_title(&key[depth - 1]), "")
+                        (crate::archive::export_title(part), "")
                     };
+                    if ids.len() >= crate::archive::MAX_ENTRIES {
+                        return Err("匯入產生的總頁數超過 15,000。請分批匯入。".into());
+                    }
                     let id = insert(&tx, Some(parent), &title, body)?;
-                    ids.insert(key.to_vec(), id);
+                    ids.insert(key, id);
                     parent = id;
                 }
             }
@@ -468,6 +481,55 @@ mod tests {
         let reopened = Notebook::open(&path, false)?;
         assert_eq!(reopened.note(id)?.unwrap().body, "新內容");
         drop(reopened);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn incoming_and_outgoing_links_survive_renames_and_ignore_literal_code() -> Result<()> {
+        let mut db = Notebook::open(Path::new(":memory:"), false)?;
+        let target = db.add(None, "連結目標", "")?;
+        let source = db.add(None, "研究筆記", "[[連結目標|縮寫]]")?;
+        let via_id = db.add(None, "固定連結", &format!("[[#{target}|自己的別名]]"))?;
+        db.add(None, "程式碼", "`[[連結目標]]`")?;
+        let links = db.related(&db.note(target)?.unwrap())?.1;
+        assert_eq!(
+            links.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [source, via_id]
+        );
+        assert_eq!(db.related(&db.note(source)?.unwrap())?.0[0].id, target);
+        let duplicate = db.add(None, "連結目標", "")?;
+        assert!(db.related(&db.note(source)?.unwrap())?.0.is_empty());
+        db.save(target, 1, "修訂後標題", "")?;
+        assert_eq!(db.related(&db.note(via_id)?.unwrap())?.0[0].id, target);
+        assert_eq!(db.related(&db.note(source)?.unwrap())?.0[0].id, duplicate);
+        db.trash(target)?;
+        assert!(db.related(&db.note(via_id)?.unwrap())?.0.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn card_positions_persist_and_trash_does_not_destroy_board_layout() -> Result<()> {
+        let dir = data_dir();
+        let path = dir.join("cards.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let card = db.add(None, "卡片", "第一行")?;
+        db.add_card(card)?;
+        db.move_card(card, 32, 98)?;
+        db.add_card(card)?;
+        drop(db);
+        let mut db = Notebook::open(&path, false)?;
+        assert_eq!(db.cards()?.len(), 1);
+        let row = db.cards()?.pop().unwrap();
+        assert_eq!((row.id, row.x, row.y), (card, 32, 98));
+        db.trash(card)?;
+        assert!(db.cards()?.is_empty());
+        db.restore(card)?;
+        assert_eq!(db.cards()?[0].y, 98);
+        db.remove_card(card)?;
+        assert!(db.cards()?.is_empty());
+        assert!(db.note(card)?.is_some());
+        drop(db);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }

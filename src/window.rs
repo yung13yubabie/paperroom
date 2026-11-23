@@ -1,6 +1,6 @@
 use crate::archive;
 use crate::store::{MAX_NOTE_BYTES, MAX_TITLE_CHARS, Note, Notebook, Result, Row, View};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -34,14 +34,17 @@ const EMPTY: u16 = 117;
 const SIDE_STATUS: u16 = 118;
 const BOARD: u16 = 119;
 const LINKS: u16 = 120;
+const PREVIEW: u16 = 121;
+const WM_OPEN_TREE_NOTE: u32 = WM_APP + 1;
 const SAVE_TIMER: usize = 1;
+
+thread_local! {
+    static REPAINT_PENDING: Cell<bool> = const { Cell::new(false) };
+}
 
 const EM_STREAMIN: u32 = WM_USER + 73;
 const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 const EM_EXLIMITTEXT: u32 = WM_USER + 53;
-const EM_SETEVENTMASK: u32 = WM_USER + 69;
-const EM_SETUNDOLIMIT: u32 = WM_USER + 82;
-const ENM_CHANGE: isize = 1;
 const SF_RTF: usize = 2;
 const SS_LEFTNOWORDWRAP: u32 = 0x0000_000c;
 
@@ -63,6 +66,7 @@ struct Widgets {
     tree: HWND,
     title: HWND,
     body: HWND,
+    preview: HWND,
     all: HWND,
     pinned: HWND,
     trash: HWND,
@@ -90,6 +94,7 @@ struct App {
     tree_items: HashMap<i64, HTREEITEM>,
     editing: bool,
     dirty: bool,
+    editor_ready: bool,
     failed: bool,
     view: View,
     dpi: u32,
@@ -122,11 +127,22 @@ unsafe fn label(hwnd: HWND, text: &str) {
 }
 
 unsafe fn text(hwnd: HWND) -> String {
+    unsafe { read_text(hwnd).unwrap_or_default() }
+}
+
+unsafe fn read_text(hwnd: HWND) -> Result<String> {
     unsafe {
+        SetLastError(0);
         let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+        if length == 0 && GetLastError() != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
         let mut buf = vec![0u16; length + 1];
         let read = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
-        String::from_utf16_lossy(&buf[..read])
+        if length > 0 && read == 0 {
+            return Err("無法讀取編輯內容，原始筆記仍保留。".into());
+        }
+        Ok(String::from_utf16(&buf[..read])?)
     }
 }
 
@@ -217,6 +233,7 @@ unsafe fn start() -> Result<()> {
             tree_items: HashMap::new(),
             editing: false,
             dirty: false,
+            editor_ready: false,
             failed: false,
             view: View::All,
             dpi: GetDpiForWindow(hwnd).max(96),
@@ -238,6 +255,9 @@ unsafe fn start() -> Result<()> {
         UpdateWindow(hwnd);
         let mut msg: MSG = std::mem::zeroed();
         loop {
+            if REPAINT_PENDING.replace(false) {
+                RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
+            }
             let result = GetMessageW(&mut msg, null_mut(), 0, 0);
             if result == -1 {
                 return Err(std::io::Error::last_os_error().into());
@@ -310,12 +330,19 @@ impl Widgets {
                 )?,
                 title: control("EDIT", "", TITLE, WS_TABSTOP | ES_AUTOHSCROLL as u32, 0)?,
                 body: control(
-                    "RICHEDIT50W",
+                    "EDIT",
                     "",
                     BODY,
                     WS_TABSTOP
                         | WS_VSCROLL
                         | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32,
+                    0,
+                )?,
+                preview: control(
+                    "RICHEDIT50W",
+                    "",
+                    PREVIEW,
+                    WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
                     0,
                 )?,
                 all: button("全部", ALL)?,
@@ -350,10 +377,16 @@ impl Widgets {
                 wide("未命名筆記").as_ptr() as isize,
             );
             SendMessageW(widgets.title, EM_SETMARGINS, EC_LEFTMARGIN as usize, 0);
-            SendMessageW(widgets.body, EM_EXLIMITTEXT, 0, MAX_NOTE_BYTES as isize);
-            SendMessageW(widgets.body, EM_SETEVENTMASK, 0, ENM_CHANGE);
-            SendMessageW(widgets.body, EM_SETUNDOLIMIT, 150, 0);
-            SendMessageW(widgets.body, EM_SETBKGNDCOLOR, 0, PAPER as isize);
+            // Native EDIT accepts only plain text, including clipboard and WM_SETTEXT input.
+            // CRLF expansion can double the size of an existing LF-only note.
+            SendMessageW(widgets.body, EM_SETLIMITTEXT, MAX_NOTE_BYTES * 2, 0);
+            SendMessageW(
+                widgets.preview,
+                EM_EXLIMITTEXT,
+                0,
+                (MAX_NOTE_BYTES * 2) as isize,
+            );
+            SendMessageW(widgets.preview, EM_SETBKGNDCOLOR, 0, PAPER as isize);
             SendMessageW(widgets.tree, TVM_SETBKCOLOR, 0, SIDEBAR as isize);
             SendMessageW(widgets.tree, TVM_SETTEXTCOLOR, 0, INK as isize);
             SendMessageW(widgets.tree, TVM_SETLINECOLOR, 0, SOFT as isize);
@@ -406,7 +439,7 @@ impl App {
                 (vec![w.title], 1),
                 (vec![w.brand], 2),
                 (vec![w.crumb, w.status, w.side_status], 3),
-                (vec![w.body, w.empty], 4),
+                (vec![w.body, w.preview, w.empty], 4),
             ] {
                 for child in controls {
                     SendMessageW(child, WM_SETFONT, fonts[index] as usize, 1);
@@ -464,6 +497,7 @@ impl App {
             }
             place(w.more, doc_left + 370, 134, 70, 34);
             place(w.body, doc_left, 190, doc_width, height - 241);
+            place(w.preview, doc_left, 190, doc_width, height - 241);
             place(w.status, doc_left, height - 35, doc_width, 23);
             place(w.empty, doc_left, 185, doc_width, 50);
         }
@@ -596,16 +630,18 @@ impl App {
         }
     }
 
-    unsafe fn present(&self) {
+    unsafe fn present(&mut self) {
         unsafe {
             let w = &self.widgets;
             let board = self.extras.board;
             let note = self.current.as_ref().filter(|_| !board);
             let active = note.is_some_and(|n| n.row.trash_root.is_none());
             let editing = active && self.editing;
+            self.editor_ready = false;
             for (item, visible) in [
                 (w.title, note.is_some()),
-                (w.body, note.is_some()),
+                (w.body, editing),
+                (w.preview, note.is_some() && !editing),
                 (w.empty, note.is_none() && !board),
                 (w.edit, active),
                 (w.child, active),
@@ -634,20 +670,25 @@ impl App {
             } else if let Some(note) = note {
                 label(w.title, &note.row.title);
                 SendMessageW(w.title, EM_SETREADONLY, usize::from(!editing), 0);
-                SendMessageW(w.body, EM_SETREADONLY, 0, 0);
                 if editing {
-                    label(w.body, &note.body.replace('\n', "\r\n"));
+                    let body = wide(&note.body.replace('\n', "\r\n"));
+                    self.editor_ready = SetWindowTextW(w.body, body.as_ptr()) != 0;
+                    EnableWindow(w.title, i32::from(self.editor_ready));
+                    EnableWindow(w.body, i32::from(self.editor_ready));
+                    SendMessageW(w.body, EM_EMPTYUNDOBUFFER, 0, 0);
                 } else {
-                    set_rtf(w.body, &crate::markdown::preview(&note.body));
+                    SendMessageW(w.preview, EM_SETREADONLY, 0, 0);
+                    set_rtf(w.preview, &crate::markdown::preview(&note.body));
+                    SendMessageW(w.preview, EM_SETREADONLY, 1, 0);
                 }
-                SendMessageW(w.body, EM_EMPTYUNDOBUFFER, 0, 0);
-                SendMessageW(w.body, EM_SETREADONLY, usize::from(!editing), 0);
                 label(w.crumb, &self.breadcrumb(note));
                 label(w.edit, if editing { "閱讀" } else { "編輯" });
                 label(w.more, if active { "更多" } else { "還原" });
                 label(
                     w.status,
-                    if active {
+                    if editing && !self.editor_ready {
+                        "編輯器載入失敗，原始筆記仍保留。請重新開啟本頁。"
+                    } else if active {
                         "已儲存至此電腦"
                     } else {
                         "此頁在垃圾桶"
@@ -701,6 +742,7 @@ impl App {
     unsafe fn mark_dirty(&mut self) {
         unsafe {
             if !self.editing
+                || !self.editor_ready
                 || self.extras.board
                 || self
                     .current
@@ -725,12 +767,19 @@ impl App {
             let Some(note) = self.current.as_mut() else {
                 return true;
             };
-            let title = crate::store::clean_title(&text(self.widgets.title));
-            let body = text(self.widgets.body)
-                .replace("\r\n", "\n")
-                .replace('\r', "\n");
-            match self.notebook.save(note.row.id, note.version, &title, &body) {
-                Ok(version) => {
+            let read_and_save = || -> Result<_> {
+                let title = read_text(self.widgets.title)?;
+                let body = read_text(self.widgets.body)?
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n");
+                let version = self
+                    .notebook
+                    .save(note.row.id, note.version, &title, &body)?;
+                Ok((version, title, body))
+            };
+            match read_and_save() {
+                Ok((version, title, body)) => {
+                    let title = crate::store::clean_title(&title);
                     let changed = note.row.title != title;
                     note.version = version;
                     note.row.title = title;
@@ -1127,7 +1176,10 @@ impl App {
                 line as usize,
                 buffer.as_mut_ptr() as isize,
             ) as usize;
-            let line = String::from_utf16_lossy(&buffer[..count]);
+            let Some(line) = buffer.get(..count) else {
+                return;
+            };
+            let line = String::from_utf16_lossy(line);
             let n = line.len() - line.trim_start_matches([' ', '\t']).len();
             let Some((_, mark)) = ["- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]"]
                 .iter()
@@ -1365,7 +1417,15 @@ impl App {
                             app.replace_selection(&format!("[[#{}|{name}]]", target.id));
                         }
                     }
-                    index => app.select(related[index - 2].1.id),
+                    index => {
+                        let id = related[index - 2].1.id;
+                        if !app.tree_items.contains_key(&id) {
+                            app.view = View::All;
+                            label(app.widgets.search, "");
+                            app.rebuild();
+                        }
+                        app.select(id);
+                    }
                 }
                 Ok(())
             });
@@ -1749,6 +1809,7 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let mut ps: PAINTSTRUCT = std::mem::zeroed();
                     BeginPaint(hwnd, &mut ps);
                     EndPaint(hwnd, &ps);
+                    REPAINT_PENDING.set(true);
                 }
                 return 0;
             }
@@ -1817,12 +1878,20 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let notice = &*(lp as *const NMHDR);
                 if notice.idFrom == TREE as usize
                     && notice.code == TVN_SELCHANGEDW
-                    && let Ok(mut app) = state.try_borrow_mut()
+                    && state.try_borrow().is_ok()
                 {
-                    let id = (*(lp as *const NMTREEVIEWW)).itemNew.lParam as i64;
+                    let id = (*(lp as *const NMTREEVIEWW)).itemNew.lParam;
                     if id > 0 {
-                        app.select(id);
+                        // Saving a renamed note can rebuild the tree. Wait for its selection
+                        // callback to unwind before changing or deleting native item handles.
+                        PostMessageW(hwnd, WM_OPEN_TREE_NOTE, id as usize, 0);
                     }
+                }
+                return 0;
+            }
+            WM_OPEN_TREE_NOTE => {
+                if let Ok(mut app) = state.try_borrow_mut() {
+                    app.select(wp as i64);
                 }
                 return 0;
             }

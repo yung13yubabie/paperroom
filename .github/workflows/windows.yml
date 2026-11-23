@@ -13,7 +13,7 @@ permissions:
   contents: read
 jobs:
   storage:
-    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
@@ -34,13 +34,17 @@ jobs:
         run: ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
 
   release-assets:
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '' &&
+      (github.ref == 'refs/heads/maintenance/signing-preparation' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
     runs-on: windows-2022
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.sha }}
           persist-credentials: false
 
       - name: Resolve the tag and verify public downloads

@@ -12,9 +12,9 @@ Windows x64 GNU 執行檔為 1,906,176 位元組，SHA-256 為 `b0f9b1dd2bd4d041
 
 ### 手動驗證公開 Release
 
-在 GitHub 的 Actions 開啟 **Windows storage checks**，按 **Run workflow**，選擇含驗證程式的分支。在 `release_tag` 輸入公開標籤，例如 `v0.1.1`。留空則執行所選分支的 Windows 原始碼測試。
+在 GitHub 的 Actions 開啟 **Windows storage checks**，按 **Run workflow**，選擇 `maintenance/signing-preparation`。在 `release_tag` 輸入公開標籤，例如 `v0.1.1`。留空則執行所選分支的 Windows 原始碼測試。
 
-流程先解析標籤指向的 commit，再以公開網址下載 EXE、Windows ZIP、原始碼 ZIP 和 SHA-256 清單。核對三份檔案的雜湊及原始碼 ZIP 的 commit 與檔案內容，逐位元組比對 Windows ZIP 內外的 EXE。最後使用所選分支的測試腳本，對剛下載核對的同一份 EXE 執行 Windows 儲存測試。
+流程先解析標籤指向的 commit，再以公開網址下載 EXE、Windows ZIP、原始碼 ZIP 和 SHA-256 清單。核對三份檔案的雜湊及原始碼 ZIP 的 commit 與檔案內容，逐位元組比對 Windows ZIP 內外的 EXE。最後使用候選分支的測試腳本，對剛下載核對的同一份 EXE 執行 Windows 儲存測試。流程成為預設分支的一部分後，預設分支也可手動執行。由 `release` 事件啟動時會從預設分支取得測試腳本。
 
 也可由已有 GitHub 寫入權限的維護者在 CLI 指定分支和輸入：
 

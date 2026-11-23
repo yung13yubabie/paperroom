@@ -69,7 +69,7 @@ impl Notebook {
             path.to_owned()
         } else {
             let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            std::fs::canonicalize(parent)?.join(path.file_name().ok_or("找不到筆記檔名。")?)
+            crate::output::windows_parent(parent)?.join(path.file_name().ok_or("找不到筆記檔名。")?)
         };
         #[cfg(windows)]
         let mut connection = Connection::open_with_flags_and_vfs(

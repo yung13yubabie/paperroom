@@ -21,6 +21,35 @@ fn windows_output_name(name: &std::ffi::OsStr) -> Result<&std::ffi::OsStr> {
     Ok(name)
 }
 
+#[cfg(windows)]
+pub fn windows_parent(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, PathBuf, Prefix};
+
+    let path = if path.as_os_str().is_empty() { Path::new(".") } else { path };
+    match fs::canonicalize(path) {
+        Err(error) if error.raw_os_error() == Some(234) => {
+            // GetFinalPathNameByHandleW can report ERROR_MORE_DATA for a deep
+            // directory. Keep the OS-normalized spelling and original UTF-16.
+            let absolute = std::path::absolute(path)?;
+            let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+                return Err(error);
+            };
+            let (start, skip) = match prefix.kind() {
+                Prefix::Disk(_) => (r"\\?\", 0),
+                Prefix::UNC(..) => (r"\\?\UNC\", 2),
+                Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..) => return Ok(absolute),
+                _ => return Err(error),
+            };
+            let units: Vec<u16> = start.encode_utf16()
+                .chain(absolute.as_os_str().encode_wide().skip(skip)).collect();
+            Ok(PathBuf::from(OsString::from_wide(&units)))
+        }
+        result => result,
+    }
+}
+
 // Keep staging on the destination volume. Each operation owns its directory,
 // so concurrent exports and leftovers from a terminated process stay separate.
 pub fn publish_new(
@@ -31,7 +60,7 @@ pub fn publish_new(
     // Rust returns an extended-length absolute path on Windows. Use the same
     // parent for SQLite staging and the Win32 move, including on UNC shares.
     #[cfg(windows)]
-    let parent = fs::canonicalize(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })?;
+    let parent = windows_parent(parent)?;
     #[cfg(windows)]
     let destination = parent.join(windows_output_name(destination.file_name().ok_or("找不到目標檔名。")?)?);
     #[cfg(windows)]

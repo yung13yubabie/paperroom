@@ -1,5 +1,7 @@
 use crate::store::{MAX_NOTE_BYTES, Result, clean_title};
-use std::fs::{self, File};
+use std::fs::File;
+#[cfg(test)]
+use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -172,17 +174,10 @@ fn collect(contents: &[u8], out: &mut Import, outer: bool) -> Result<()> {
 pub fn export_note(path: &Path, title: &str, body: &str) -> Result<()> {
     use std::io::Write;
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    let written = write!(file, "# {}\n\n{}", title, body).and_then(|_| file.sync_all());
-    if let Err(error) = written {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error.into());
-    }
-    Ok(())
+    crate::output::publish_new(path, |file, _| {
+        write!(file, "# {}\n\n{}", title, body)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

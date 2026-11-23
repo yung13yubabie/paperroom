@@ -5,6 +5,8 @@ mod archive;
 #[cfg(any(windows, test))]
 mod markdown;
 #[cfg(any(windows, test))]
+mod output;
+#[cfg(any(windows, test))]
 mod store;
 #[cfg(windows)]
 mod window;

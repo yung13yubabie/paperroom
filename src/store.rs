@@ -65,7 +65,9 @@ impl Notebook {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > 2 {
@@ -360,18 +362,11 @@ impl Notebook {
     }
 
     pub fn backup(&self, path: &Path) -> Result<()> {
-        let filename = path.to_str().ok_or("無法使用這個備份路徑。")?;
-        let reserved = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        if let Err(error) = self.connection.execute("VACUUM INTO ?1", [filename]) {
-            drop(reserved);
-            let _ = std::fs::remove_file(path);
-            return Err(error.into());
-        }
-        reserved.sync_all()?;
-        Ok(())
+        crate::output::publish_new(path, |_, staging| {
+            let filename = staging.to_str().ok_or("無法使用這個備份路徑。")?;
+            self.connection.execute("VACUUM INTO ?1", [filename])?;
+            Ok(())
+        })
     }
 
     pub fn import(

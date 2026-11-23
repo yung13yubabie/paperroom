@@ -1,0 +1,132 @@
+name: Publish Paperroom v0.1.1 once
+on: create
+permissions: {}
+jobs:
+  publish:
+    if: github.repository == 'yung13yubabie/paperroom' && github.event.ref_type == 'branch' && github.ref == 'refs/heads/release-once/v0.1.1' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Verify and publish the four frozen assets
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64
+          import hashlib
+          import json
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          repo = "yung13yubabie/paperroom"
+          tag = "v0.1.1"
+          commit = "a519f1561f35786e12707e41112c298eac1a6084"
+          assets = {
+              "Paperroom.exe": (
+                  "7b6463e86bcd6bad6645071885c5d8cfb6a5407a",
+                  "0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82",
+              ),
+              "Paperroom-v0.1.1-Windows-x64.zip": (
+                  "ea4d9f09372722aa5fde5cfe7d6153c529379b5e",
+                  "2b59407975d92a41760c7b8899350af5e40066531f32fa3969cbacb0ff920577",
+              ),
+              "Paperroom-v0.1.1-source.zip": (
+                  "d4b5f3ec1f3fc2ad14ee21042fd4e24d52a6849f",
+                  "b6db03ac1f3b799a540102d53d50ce29dd1e21a0c5140346004037abe720c167",
+              ),
+              "SHA256SUMS.txt": (
+                  "03770a592e4a9d7c3f068a89b9204cd0b025ea50",
+                  "feb975ad78fede30fc45ce39edee20c441d7e9946aae998c4564ed1a7c74d60f",
+              ),
+          }
+
+          def gh(*args):
+              return subprocess.run(["gh", *args], check=True, stdout=subprocess.PIPE).stdout
+
+          def api(path, *args):
+              return json.loads(gh("api", f"repos/{repo}/{path}", *args))
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def require_no_release():
+              pages = api("releases?per_page=100", "--paginate", "--slurp")
+              require(isinstance(pages, list) and all(page == [] for page in pages),
+                      "Existing release or draft found. Stopping without overwriting.")
+
+          def require_frozen_tag():
+              obj = api(f"git/ref/tags/{tag}")["object"]
+              if obj["type"] == "tag":
+                  obj = api(f"git/tags/{obj['sha']}")["object"]
+              require(obj["type"] == "commit" and obj["sha"] == commit,
+                      "Remote release tag does not match the frozen commit.")
+
+          require_no_release()
+          require_frozen_tag()
+          with tempfile.TemporaryDirectory(prefix="paperroom-release-") as temp:
+              root = Path(temp)
+              for name, (oid, digest) in assets.items():
+                  blob = api(f"git/blobs/{oid}")
+                  require(blob["sha"] == oid and blob["encoding"] == "base64",
+                          f"Unexpected Git blob for {name}.")
+                  data = base64.b64decode("".join(blob["content"].split()), validate=True)
+                  git_blob = f"blob {len(data)}\0".encode() + data
+                  require(hashlib.sha1(git_blob).hexdigest() == oid and
+                          hashlib.sha256(data).hexdigest() == digest,
+                          f"Frozen asset verification failed for {name}.")
+                  (root / name).write_bytes(data)
+
+              checksum_name = "SHA256SUMS.txt"
+              manifest = "".join(f"{digest}  {name}\n"
+                                 for name, (_, digest) in assets.items() if name != checksum_name)
+              require((root / checksum_name).read_bytes() == manifest.encode(),
+                      "Checksum manifest does not match the three frozen payload hashes.")
+              with ZipFile(root / "Paperroom-v0.1.1-Windows-x64.zip") as package:
+                  require(package.testzip() is None and package.namelist().count("Paperroom.exe") == 1
+                          and package.read("Paperroom.exe") == (root / "Paperroom.exe").read_bytes(),
+                          "Windows ZIP does not contain the frozen standalone EXE.")
+              with ZipFile(root / "Paperroom-v0.1.1-source.zip") as package:
+                  require(package.testzip() is None and package.comment == commit.encode(),
+                          "Source ZIP does not match the frozen Git archive commit.")
+
+              notes = root / "release-notes.md"
+              notes.write_text(
+                  "紙間 v0.1.1 · Windows x64\n\n"
+                  "請下載 `Paperroom.exe` 或 Windows x64 ZIP。執行檔未簽章（Authenticode），"
+                  "請先比對 `SHA256SUMS.txt`。Windows 的信譽或裝置政策可能顯示警示或阻擋執行。\n\n"
+                  "同一份發佈 EXE 在原生 Windows 通過預設與可攜工作區檢查，"
+                  "也通過 Wine 無網路介面環境的離線檢查。"
+                  "原始標籤的原生 Windows 測試為 15/16；"
+                  "獨立 QA 分支修正樹狀控制項初始化後為 16/16。"
+                  "此版本仍使用原始標籤的程式碼與資產。"
+                  " [原始標籤](https://github.com/yung13yubabie/paperroom/tree/v0.1.1)"
+                  " · [獨立 QA 分支](https://github.com/yung13yubabie/paperroom/tree/qa/windows-v0.1.1)"
+                  " · [驗證工作流程](https://github.com/yung13yubabie/paperroom/actions/runs/45284932624)\n",
+                  encoding="utf-8",
+              )
+
+              require_frozen_tag()
+              require_no_release()
+              gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
+                 "--title", "Paperroom v0.1.1", "--notes-file", str(notes))
+              drafts = [release for page in api("releases?per_page=100", "--paginate", "--slurp")
+                        for release in page]
+              require(len(drafts) == 1 and drafts[0]["tag_name"] == tag and drafts[0]["draft"]
+                      and not drafts[0]["assets"], "Unexpected release state after draft creation. Draft preserved.")
+              draft_id = drafts[0]["id"]
+              gh("release", "upload", tag, *(str(root / name) for name in assets), "--repo", repo)
+              draft = api(f"releases/{draft_id}")
+              actual = {asset["name"]: (asset.get("digest"), asset["state"]) for asset in draft["assets"]}
+              expected = {name: (f"sha256:{digest}", "uploaded") for name, (_, digest) in assets.items()}
+              require(draft["draft"] and draft["tag_name"] == tag and len(draft["assets"]) == 4
+                      and actual == expected, "Draft asset names/digests differ. Draft preserved.")
+              require_frozen_tag()
+              gh("release", "edit", tag, "--repo", repo, "--draft=false")
+              published = api(f"releases/{draft_id}")
+              require(not published["draft"] and published["tag_name"] == tag, "Release publication could not be confirmed.")
+              print(published["html_url"])

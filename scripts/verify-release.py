@@ -93,6 +93,7 @@ def verify_release(repo, tag, folder):
 
     canonical = folder / "tag-tree.zip"
     git(
+        "-c", "core.autocrlf=false", "-c", "core.eol=lf",
         "archive", "--format=zip", f"--prefix=paperroom-{tag[1:]}/",
         "-o", str(canonical), commit,
     )

@@ -66,6 +66,11 @@ impl Notebook {
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
+        // Do not persist journal-mode changes on a newer workspace we cannot open.
+        let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > 2 {
+            return Err("這份筆記由較新的紙間版本建立。".into());
+        }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -459,6 +464,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn newer_database_keeps_its_journal_mode() -> Result<()> {
+        let dir = data_dir();
+        let path = dir.join("future.sqlite3");
+        let future = Connection::open(&path)?;
+        future.pragma_update(None, "journal_mode", "DELETE")?;
+        future.pragma_update(None, "user_version", 3)?;
+        drop(future);
+        assert!(Notebook::open(&path, false).is_err());
+        let inspect = Connection::open(&path)?;
+        let mode: String = inspect.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        assert_eq!(mode, "delete");
+        drop(inspect);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     #[test]

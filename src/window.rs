@@ -150,17 +150,22 @@ unsafe fn message(hwnd: HWND, caption: &str, body: &str, flags: u32) -> i32 {
     unsafe { MessageBoxW(hwnd, wide(body).as_ptr(), wide(caption).as_ptr(), flags) }
 }
 
-fn directory() -> Result<PathBuf> {
-    let exe = std::env::current_exe()?;
+fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<PathBuf>) -> Result<PathBuf> {
     let adjacent = exe
         .parent()
         .ok_or("找不到程式所在資料夾。")?
         .join("paperroom-data");
-    if std::env::args_os().any(|arg| arg == "--portable") || adjacent.is_dir() {
+    if portable {
         return Ok(adjacent);
     }
-    let local = std::env::var_os("LOCALAPPDATA").ok_or("找不到 Windows 本機資料夾。")?;
-    Ok(PathBuf::from(local).join("Paperroom"))
+    match std::fs::metadata(&adjacent) {
+        Ok(metadata) if metadata.is_dir() => return Ok(adjacent),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let local = local.filter(|path| path.is_absolute())
+        .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
+    Ok(local.join("Paperroom"))
 }
 
 pub fn run() {
@@ -172,10 +177,51 @@ pub fn run() {
     }
 }
 
+// These user32 exports were added in separate Windows 10 feature updates.
+// Resolve them from the loaded system DLL so earlier builds can use 96 DPI.
+unsafe fn dpi_proc(name: &std::ffi::CStr) -> FARPROC {
+    unsafe {
+        let module = GetModuleHandleW(wide("user32.dll").as_ptr());
+        GetProcAddress(module, name.as_ptr().cast())
+    }
+}
+
+unsafe fn enable_monitor_dpi() {
+    unsafe {
+        if let Some(raw) = dpi_proc(c"SetProcessDpiAwarenessContext") {
+            let set_context: unsafe extern "system" fn(DPI_AWARENESS_CONTEXT) -> BOOL =
+                std::mem::transmute(raw);
+            set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+}
+
+unsafe fn system_dpi() -> u32 {
+    unsafe {
+        dpi_proc(c"GetDpiForSystem").map_or(96, |raw| {
+            let query: unsafe extern "system" fn() -> u32 = std::mem::transmute(raw);
+            query().max(96)
+        })
+    }
+}
+
+unsafe fn window_dpi(hwnd: HWND) -> u32 {
+    unsafe {
+        dpi_proc(c"GetDpiForWindow").map_or(96, |raw| {
+            let query: unsafe extern "system" fn(HWND) -> u32 = std::mem::transmute(raw);
+            query(hwnd).max(96)
+        })
+    }
+}
+
 unsafe fn start() -> Result<()> {
     unsafe {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let dir = directory()?;
+        enable_monitor_dpi();
+        let dir = workspace_directory(
+            &std::env::current_exe()?,
+            std::env::args_os().skip(1).any(|arg| arg == "--portable"),
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        )?;
         std::fs::create_dir_all(&dir)?;
         let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let module = GetModuleHandleW(null());
@@ -205,7 +251,8 @@ unsafe fn start() -> Result<()> {
         if RegisterClassW(&window_class) == 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        let scale = |value: i32| value * (GetDpiForSystem().max(96) as i32) / 96;
+        let dpi = system_dpi() as i32;
+        let scale = |value: i32| value * dpi / 96;
         let hwnd = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class.as_ptr(),
@@ -236,7 +283,7 @@ unsafe fn start() -> Result<()> {
             editor_ready: false,
             failed: false,
             view: View::All,
-            dpi: GetDpiForWindow(hwnd).max(96),
+            dpi: window_dpi(hwnd),
             fonts: Vec::new(),
             brushes: [CreateSolidBrush(PAPER), CreateSolidBrush(SIDEBAR)],
             extras: Extras::default(),
@@ -577,6 +624,8 @@ impl App {
             InvalidateRect(tree, null(), 1);
             let hint = if !query.trim().is_empty() {
                 format!("{} 筆搜尋結果", rows.len())
+            } else if self.data_dir.ends_with("paperroom-data") {
+                "●　可攜工作區".to_owned()
             } else {
                 "●　本機工作區".to_owned()
             };
@@ -1907,6 +1956,10 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     app.board_input(msg, wp, lp);
                 }
             }
+            WM_QUERYENDSESSION => {
+                // Windows may shut down before the pending autosave timer fires.
+                return isize::from(state.try_borrow_mut().is_ok_and(|mut app| app.flush(false)));
+            }
             WM_CLOSE => {
                 if let Ok(mut app) = state.try_borrow_mut() {
                     if app.flush(true)
@@ -1935,6 +1988,25 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_directory_rejects_cwd_fallback_and_prefers_portable_marker() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("paperroom-paths-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let exe = root.join("paperroom.exe");
+        let local = root.join("local");
+        let adjacent = root.join("paperroom-data");
+        for invalid in ["", "relative", r"C:relative", r"\rooted"] {
+            assert!(workspace_directory(&exe, false, Some(PathBuf::from(invalid))).is_err());
+        }
+        assert!(workspace_directory(&exe, false, None).is_err());
+        assert_eq!(workspace_directory(&exe, false, Some(local.clone()))?, local.join("Paperroom"));
+        assert_eq!(workspace_directory(&exe, true, None)?, adjacent);
+        std::fs::create_dir(&adjacent)?;
+        assert_eq!(workspace_directory(&exe, false, Some(local))?, adjacent);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn native_markdown_editor_preserves_rtf_like_unicode_text() {

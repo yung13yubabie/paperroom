@@ -191,6 +191,17 @@ fn check_workspace_volume(path: &Path, drive_type: impl FnOnce(&Path) -> u32) ->
     Ok(())
 }
 
+fn init_tree_control() -> Result<()> {
+    let controls = INITCOMMONCONTROLSEX {
+        dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_TREEVIEW_CLASSES,
+    };
+    if unsafe { InitCommonControlsEx(&controls) } == 0 {
+        return Err("Windows 無法註冊筆記樹狀控制項（SysTreeView32）。".into());
+    }
+    Ok(())
+}
+
 pub fn run() {
     if let Err(error) = unsafe { start() } {
         unsafe {
@@ -260,11 +271,7 @@ unsafe fn start() -> Result<()> {
         {
             return Err("Windows 缺少原生 RichEdit 控制項（Msftedit.dll）。".into());
         }
-        let controls = INITCOMMONCONTROLSEX {
-            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_TREEVIEW_CLASSES | ICC_STANDARD_CLASSES,
-        };
-        InitCommonControlsEx(&controls);
+        init_tree_control()?;
         let class = wide("PaperroomWindow");
         let window_class = WNDCLASSW {
             style: CS_DBLCLKS,
@@ -2058,11 +2065,7 @@ mod tests {
                 LOAD_LIBRARY_SEARCH_SYSTEM32,
             );
             assert!(!rich_edit.is_null());
-            let controls = INITCOMMONCONTROLSEX {
-                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_TREEVIEW_CLASSES | ICC_STANDARD_CLASSES,
-            };
-            assert_ne!(InitCommonControlsEx(&controls), 0);
+            init_tree_control().unwrap();
             let host = CreateWindowExW(
                 0,
                 wide("STATIC").as_ptr(),

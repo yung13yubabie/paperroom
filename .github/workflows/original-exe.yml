@@ -1,0 +1,31 @@
+name: Verify the original unsigned v0.1.1 EXE
+on:
+  push:
+    branches: [qa/windows-v0.1.1]
+permissions:
+  contents: read
+jobs:
+  original:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify original Git blob and run the desktop lifecycle checks
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $blob = '7b6463e86bcd6bad6645071885c5d8cfb6a5407a'
+          $expected = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+          $record = gh api "repos/yung13yubabie/paperroom/git/blobs/$blob"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub blob download failed.' }
+          $record = $record | ConvertFrom-Json
+          if ($record.sha -ne $blob -or $record.encoding -ne 'base64') { throw 'Unexpected Git object.' }
+          $exe = Join-Path $env:RUNNER_TEMP Paperroom.exe
+          [IO.File]::WriteAllBytes($exe, [Convert]::FromBase64String($record.content))
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Original EXE hash mismatch.' }
+          Write-Host "Original unsigned v0.1.1 EXE SHA-256 $expected"
+          ./scripts/windows-storage.ps1 -Exe $exe -Screenshot (Join-Path $env:RUNNER_TEMP 'original-first-window.png')

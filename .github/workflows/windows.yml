@@ -1,0 +1,90 @@
+name: Windows storage checks
+on:
+  push:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  storage:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Use the release Rust toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup override set 1.100.0
+          rustup target add x86_64-pc-windows-msvc
+      - name: Run native Rust tests
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+      - name: Build Windows x64 smoke-test binary
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Exercise first launch and crash recovery
+        shell: pwsh
+        run: ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
+
+      - name: Verify published release assets
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Join-Path $env:RUNNER_TEMP 'paperroom-release-check'
+          [void][IO.Directory]::CreateDirectory($assets)
+          $exe = 'Paperroom.exe'
+          $appZip = "Paperroom-${env:RELEASE_TAG}-Windows-x64.zip"
+          $sourceZip = "Paperroom-${env:RELEASE_TAG}-source.zip"
+          gh release download --repo $env:GITHUB_REPOSITORY --dir $assets --pattern $exe --pattern $appZip --pattern $sourceZip --pattern 'SHA256SUMS.txt' -- $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download release assets.' }
+          $manifest = Get-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt')
+          foreach ($name in @($exe, $appZip, $sourceZip)) {
+            $pattern = '^([0-9A-Fa-f]{64}) [ *]' + [regex]::Escape($name) + '$'
+            $entries = @($manifest | ForEach-Object { if ($_ -cmatch $pattern) { $Matches[1] } })
+            if ($entries.Count -ne 1) { throw "Expected one $name entry in SHA256SUMS.txt." }
+            $actual = (Get-FileHash -LiteralPath (Join-Path $assets $name) -Algorithm SHA256).Hash
+            if ($actual -ine $entries[0]) { throw "Published $name checksum mismatch." }
+            Write-Host "Verified published $name SHA-256 $actual"
+          }
+          $verifyZip = @'
+          from hashlib import file_digest
+          from pathlib import Path
+          from sys import argv
+          from zipfile import ZipFile
+
+          assets, exe, app_zip, source_zip, commit = argv[1:]
+          assets = Path(assets)
+          with (assets / exe).open("rb") as standalone:
+              published_digest = file_digest(standalone, "sha256").digest()
+          with ZipFile(assets / app_zip) as archive:
+              assert archive.namelist().count(exe) == 1, "Expected one EXE at ZIP root"
+              with archive.open(exe) as bundled:
+                  assert file_digest(bundled, "sha256").digest() == published_digest, "Bundled EXE differs"
+          with ZipFile(assets / source_zip) as archive:
+              assert archive.comment.decode() == commit, "Source ZIP does not name the release commit"
+          '@
+          python -c $verifyZip $assets $exe $appZip $sourceZip $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Release ZIP contents failed verification.' }
+
+      - name: Exercise published Windows EXE
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'paperroom-release-check/Paperroom.exe'
+          $screenshot = Join-Path $env:RUNNER_TEMP 'paperroom-first-window.png'
+          ./scripts/windows-storage.ps1 -Exe $exe -Screenshot $screenshot
+
+      - name: Attach captured release window
+        if: success() && github.event_name == 'release'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: paperroom-windows-first-window
+          path: ${{ runner.temp }}/paperroom-first-window.png
+          if-no-files-found: warn
+          retention-days: 7

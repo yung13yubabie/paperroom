@@ -1,7 +1,7 @@
 //! Read-only, byte-bound Notion ZIP relation preview. Does not authenticate Notion,
 //! edit any workspace, or suggest edges without explicitly approved page/column scope.
 
-use super::csv_table::parse_csv;
+use super::csv_table::parse_csv_preview;
 use super::notion_handoff::{CsvSources, windows_zip_path};
 use super::notion_relation_resolver as relation;
 pub(crate) use super::notion_relation_resolver::{CellEncoding, Part};
@@ -148,13 +148,18 @@ impl NotionPreviewSession {
     }
 
     pub(crate) fn columns(&self, pick:&CsvChoice) -> Result<Vec<String>> {
-        parse_csv(self.original_csv(pick)?)?.into_iter().next()
-            .ok_or_else(||"找不到 CSV 標題列。".into())
+        self.csv_header_and_count(pick).map(|(header, _)| header)
+    }
+
+    pub(crate) fn csv_header_and_count(&self, pick: &CsvChoice) -> Result<(Vec<String>, usize)> {
+        let mut parsed = parse_csv_preview(self.original_csv(pick)?)?.into_iter();
+        let header = parsed.next().ok_or("找不到 CSV 標題列。")?;
+        Ok((header, parsed.len()))
     }
 
     pub(crate) fn preview(&self, request: Selection<'_>) -> Result<Report> {
         let bytes = self.original_csv(request.csv)?;
-        let decoded = parse_csv(bytes)?;
+        let decoded = parse_csv_preview(bytes)?;
         let header = &decoded[0];
         let relation_name = header.get(request.relation_column).ok_or("無效的關聯欄位。")?;
         if request.source_id_column>=header.len() || request.source_id_column==request.relation_column {
@@ -277,6 +282,58 @@ mod tests {
             assert_eq!(first.tokens.last().unwrap().1,Resolution::UnsupportedValue);
             assert_eq!(original,session.original_csv(csv).unwrap());
         }
+    }
+
+    #[test]
+    fn headers_only_csv_is_empty_preview_but_cannot_create_notes() {
+        use std::io::{Cursor, Write};
+        let bytes = b"Name,Page ID,Relation\r\n";
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("filtered.csv", options).unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.start_file("Page 11111111111111111111111111111111.md", options).unwrap();
+        zip.write_all(b"# Page\n").unwrap();
+        let snapshot = zip.finish().unwrap().into_inner();
+        let session = NotionPreviewSession::from_snapshot(&snapshot).unwrap();
+        let csv = session.csv_choices().next().unwrap();
+        let approved: Vec<_> = session.page_choices().cloned().collect();
+        let scope = Scope { parts: &[Part::Outer], ancestor: &[] };
+        let (header, count) = session.csv_header_and_count(csv).unwrap();
+        assert_eq!(header, ["Name", "Page ID", "Relation"]);
+        assert_eq!(count, 0);
+        assert!(session.preview(selection(csv, &approved, scope)).unwrap().rows.is_empty());
+        assert_eq!(session.original_csv(csv).unwrap(), bytes);
+        assert!(super::super::csv_table::parse_csv(bytes).is_err());
+    }
+
+    #[test]
+    fn preview_keeps_blank_first_field_without_treating_it_as_a_note_title() {
+        use std::io::{Cursor, Write};
+        let bytes = b"Name,Page ID,Relation\n,11111111111111111111111111111111,\"https://www.notion.so/22222222222222222222222222222222, 22222222222222222222222222222222\"\n";
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in [
+            ("filtered.csv", bytes.as_slice()),
+            ("Same 11111111111111111111111111111111.md", b"# Same\n".as_slice()),
+            ("Same 22222222222222222222222222222222.md", b"# Same\n".as_slice()),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents).unwrap();
+        }
+        let snapshot = zip.finish().unwrap().into_inner();
+        let session = NotionPreviewSession::from_snapshot(&snapshot).unwrap();
+        let csv = session.csv_choices().next().unwrap();
+        let approved: Vec<_> = session.page_choices().cloned().collect();
+        let scope = Scope { parts: &[Part::Outer], ancestor: &[] };
+        let report = session.preview(selection(csv, &approved, scope)).unwrap();
+        assert_eq!(id_at_report_member(&session, &report.rows[0].source).as_deref(),
+            Some("11111111111111111111111111111111"));
+        assert_eq!(id_at_report_member(&session, &report.rows[0].tokens[0].1).as_deref(),
+            Some("22222222222222222222222222222222"));
+        assert_eq!(report.rows[0].tokens[1].1, Resolution::UnsupportedValue);
+        assert_eq!(session.original_csv(csv).unwrap(), bytes);
+        assert!(super::super::csv_table::parse_csv(bytes).is_err());
     }
 
     #[test]

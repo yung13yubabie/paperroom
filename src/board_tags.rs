@@ -1,5 +1,5 @@
 //! Native board-to-tag links; note tagging remains owned by its existing source.
-use super::{Notebook, Result};
+use super::{Notebook, Result, vault_search::TagMatch};
 use rusqlite::{Connection, params};
 
 pub(super) const SCHEMA: &str = "
@@ -81,6 +81,17 @@ impl Notebook {
         )?;
         Ok(stmt.query_map([board],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Boards are global; note hits are permitted only from the explicitly selected Vault.
+    pub(crate) fn search_board_and_vault_tag(
+        &self, tag: &str, vault: Option<i64>,
+    ) -> Result<Vec<TypedTagHit>> {
+        let notes = match vault {
+            Some(root) => self.search_vault_tag_terms(root, &[(tag.to_owned(), TagMatch::Exact)])?,
+            None => Vec::new(),
+        };
+        typed_hits(&self.connection, tag, &notes)
+    }
+
     pub(crate) fn exact_board_and_note_tag_hits(
         &self, tag:&str, notes:&[(i64,String)],
     )->Result<Vec<TypedTagHit>> {
@@ -91,6 +102,54 @@ impl Notebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_tag_lookup_is_exact_and_uses_only_the_selected_imported_vault() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let one = dir.join("one");
+        let two = dir.join("two");
+        std::fs::create_dir(&one)?;
+        std::fs::create_dir(&two)?;
+        std::fs::write(one.join("同名.md"), "#拍攝/夜景")?;
+        std::fs::write(one.join("近似.md"), "#拍攝/夜景/待剪")?;
+        std::fs::write(two.join("同名.md"), "#拍攝/夜景")?;
+        let path = dir.join("workspace.sqlite3");
+
+        let (board, sibling, vault) = {
+            let mut db = Notebook::open(&path, false)?;
+            let board = db.create_board("同名")?;
+            let sibling = db.create_board("同名（副）")?;
+            let near = db.create_board("近似")?;
+            db.set_board_tag(board, "#拍攝/夜景", true)?;
+            db.set_board_tag(sibling, "#拍攝/夜景", true)?;
+            db.set_board_tag(near, "#拍攝/夜景/待剪", true)?;
+            db.add(None, "本機同名", "#拍攝/夜景")?;
+            let vault = db.import_vault("首批", crate::vault::read(&one)?.pages)?;
+            db.import_vault("另一批", crate::vault::read(&two)?.pages)?;
+            (board, sibling, vault)
+        };
+        {
+            let db = Notebook::open(&path, false)?;
+            let tag = "#拍攝/夜景";
+            let board_hits = db.search_board_and_vault_tag(tag, None)?;
+            assert_eq!(board_hits.len(), 2);
+            assert!(board_hits.iter().any(|h| h.subject == TagSubject::Board(board)));
+            assert!(board_hits.iter().any(|h| h.subject == TagSubject::Board(sibling)));
+            let mixed = db.search_board_and_vault_tag(tag, Some(vault))?;
+            assert_eq!(mixed.len(), 3);
+            let hit = mixed.last().ok_or("找不到精確標籤筆記")?;
+            let TagSubject::Note(note) = hit.subject else { panic!("筆記和白板必須分開"); };
+            assert_eq!(hit.title, "同名.md");
+            assert!(db.vault_search_hit(vault, note, &hit.title)?);
+
+            db.set_board_tag(board, tag, false)?;
+            let after = db.search_board_and_vault_tag(tag, Some(vault))?;
+            assert_eq!(after.iter().map(|hit| hit.subject).collect::<Vec<_>>(),
+                [TagSubject::Board(sibling), TagSubject::Note(note)]);
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn tags_use_stable_board_identity_even_when_note_title_and_id_match() {
         let db=Connection::open_in_memory().unwrap();

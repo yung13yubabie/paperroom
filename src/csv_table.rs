@@ -11,6 +11,16 @@ const MAX_COLS: usize = 128;
 const MAX_FIELD: usize = 4096;
 
 pub(crate) fn parse_csv(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
+    parse_csv_with_purpose(bytes, false)
+}
+
+/// Read the same bounded CSV format for a preview; do not require a note title
+/// or data records because no notes are created.
+pub(crate) fn parse_csv_preview(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
+    parse_csv_with_purpose(bytes, true)
+}
+
+fn parse_csv_with_purpose(bytes: &[u8], preview: bool) -> Result<Vec<Vec<String>>> {
     if bytes.len() > MAX_CSV_BYTES { return Err("CSV 超過 8 MiB。".into()); }
     let text = std::str::from_utf8(bytes)?.trim_start_matches('\u{feff}');
     if text.contains('\0') { return Err("CSV 不能包含 NUL。".into()); }
@@ -51,7 +61,10 @@ pub(crate) fn parse_csv(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
         if row.len() > MAX_COLS { return Err("CSV 欄位超過 128 欄。".into()); }
         rows.push(row);
     }
-    if rows.len() < 2 || rows.len() > MAX_ROWS + 1 { return Err("CSV 需要欄名及 1 至 5000 列資料。".into()); }
+    if rows.is_empty() || rows.len() > MAX_ROWS + 1 || (!preview && rows.len() < 2) {
+        return Err(if preview { "CSV 需要欄名，資料最多 5000 列。" }
+            else { "CSV 需要欄名及 1 至 5000 列資料。" }.into());
+    }
     let width = rows[0].len();
     if rows.iter().any(|r| r.len() != width) { return Err("CSV 每列欄位數必須一致。".into()); }
     let mut seen = HashSet::new();
@@ -61,7 +74,7 @@ pub(crate) fn parse_csv(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
             return Err("CSV 欄名不可空白、重複或超過 256 位元組。".into());
         }
     }
-    for row in &rows[1..] {
+    for row in rows[1..].iter().filter(|_| !preview) {
         let title = row[0].trim();
         if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
             return Err("每列第一欄需有標題，且不得超過 180 字。".into());

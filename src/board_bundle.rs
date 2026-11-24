@@ -450,6 +450,70 @@ mod tests {
     }
 
     #[test]
+    fn workspace_backup_keeps_shapes_tag_edges_and_original_image_bytes() -> Result<()> {
+        use super::super::board_shapes::{ShapeKind, ShapeRect};
+        use super::super::board_tags::TagSubject;
+
+        let dir = super::super::tests::data_dir();
+        let source = dir.join("source.sqlite3");
+        let backup = dir.join("backup.sqlite3");
+        let refused = dir.join("would-lose-board-data.zip");
+        let bytes = image_bytes()?;
+        let rectangle = ShapeRect { x: 44, y: 85, width: 180, height: 91 };
+        let ellipse = ShapeRect { x: 411, y: 104, width: 132, height: 76 };
+        let (board, sibling, note, image, rect_id, ellipse_id) = {
+            let mut db = Notebook::open(&source, false)?;
+            let board = db.create_board("田野觀察")?;
+            let sibling = db.create_board("另一張研究板")?;
+            let note = db.add(None, "田野觀察", BODY)?;
+            db.add_card_on(board, note)?;
+            let image = db.add_board_images(
+                board,
+                &[BoardImageInput::new("研究附圖.png".into(), bytes.clone())?],
+            )?[0];
+            db.add_edge_on(board, image, note)?;
+            let rect_id = db.create_board_shape(board, ShapeKind::Rectangle, rectangle)?;
+            let ellipse_id = db.create_board_shape(board, ShapeKind::Ellipse, ellipse)?;
+            db.set_board_tag(board, "#拍攝/夜景", true)?;
+            db.set_board_tag(sibling, "#拍攝/夜景", true)?;
+            assert!(db.export_board_bundle(board, &refused).unwrap_err().to_string()
+                .contains("請改用工作區備份"));
+            assert!(!refused.exists());
+            db.backup(&backup)?;
+            (board, sibling, note, image, rect_id, ellipse_id)
+        };
+        {
+            let copy = Notebook::open(&backup, false)?;
+            assert!(!copy.connection.prepare("PRAGMA foreign_key_check")?.exists([])?);
+            assert_eq!(copy.note(note)?.unwrap().body.as_bytes(), BODY.as_bytes());
+            assert_eq!(copy.board_image_bytes(image)?.unwrap(), bytes);
+            assert_eq!(copy.list_attachments(image)?[0].name, "研究附圖.png");
+            let edges = copy.edges_on(board)?;
+            assert_eq!(edges.len(), 1);
+            assert_eq!((edges[0].from, edges[0].to), (note, image));
+
+            let shapes = copy.board_shapes(board)?;
+            assert_eq!(shapes.len(), 2);
+            assert!(shapes.iter().any(|shape| (shape.id, shape.kind, shape.rect)
+                == (rect_id, ShapeKind::Rectangle, rectangle)));
+            assert!(shapes.iter().any(|shape| (shape.id, shape.kind, shape.rect)
+                == (ellipse_id, ShapeKind::Ellipse, ellipse)));
+            assert!(copy.board_shapes(sibling)?.is_empty());
+            assert_eq!(copy.board_tags(board)?, ["拍攝/夜景".to_owned()]);
+
+            copy.set_board_tag(board, "#拍攝/夜景", false)?;
+            let hits = copy.exact_board_and_note_tag_hits("拍攝/夜景", &[])?;
+            assert_eq!(hits.iter().map(|hit| hit.subject).collect::<Vec<_>>(),
+                [TagSubject::Board(sibling)]);
+        }
+        let original = Notebook::open(&source, false)?;
+        assert_eq!(original.board_tags(board)?, ["拍攝/夜景".to_owned()]);
+        drop(original);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn research_zip_keeps_markdown_image_bytes_layout_and_edges_when_reopened() -> Result<()> {
         let dir = super::super::tests::data_dir();
         let path = dir.join("board.sqlite3");

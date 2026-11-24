@@ -1,17 +1,17 @@
 # 三款產品功能狀態
 
-本表按產品記錄 250 列公開功能，包含同一類功能在不同產品的列。每列依目前紙間的程式和證據標示。[公開文件索引](PUBLIC-FEATURE-INDEX.tsv) · [操作及驗收紀錄](UI-ACCEPTANCE.md)
+本表按產品記錄 252 列公開功能，包含同一類功能在不同產品的列。每列依目前紙間的程式和證據標示。[公開文件索引](PUBLIC-FEATURE-INDEX.tsv) · [操作及驗收紀錄](UI-ACCEPTANCE.md)
 
 | 產品 | 列數 | 已驗證 | 部分 | 未實作 | 外部服務 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Notion | 99 | 8 | 38 | 25 | 28 |
 | Obsidian | 88 | 6 | 39 | 34 | 9 |
-| Heptabase | 63 | 5 | 33 | 13 | 12 |
-| 合計 | 250 | 19 | 110 | 72 | 49 |
+| Heptabase | 65 | 5 | 35 | 13 | 12 |
+| 合計 | 252 | 19 | 112 | 72 | 49 |
 
 「已驗證」表示清冊該列指的本機工作流可從正常操作入口完成，並驗過相關的存檔、重開與資料邊界。「部分」表示已有可用的本機對應，列內會註明尚缺的行為。「未實作」表示目前沒有對應入口或資料模型。「外部服務」表示該項仍需外部服務。Canvas 的拖曳及與官方 Obsidian 的回匯證據沿用上一輪的合成樣本。[Canvas 操作證據](UI-ACCEPTANCE.md#canvas-拖曳與回匯)
 
-前一批通過的 Vault 雙向協調、遷移報告、多行 PDF 與核取方塊都有本機證據。其對應列仍各有範圍缺口，包括自動同步、匯出中繼資料與可跳轉連結、複雜 PDF 排版，以及更廣的屬性和視圖能力，所以維持原列狀態。局部流程的檢查點不直接計入 250 列。
+前一批通過的 Vault 雙向協調、遷移報告、多行 PDF 與核取方塊都有本機證據。其對應列仍各有範圍缺口，包括自動同步、匯出中繼資料與可跳轉連結、複雜 PDF 排版，以及更廣的屬性和視圖能力，所以維持原列狀態。局部流程的檢查點不直接計入 252 列。
 
 第 13 版候選補上日期欄範圍、多欄排序、Vault 標籤階層與改名追蹤，以及白板文字和 PDF 標註復原。[操作與驗收紀錄](UI-ACCEPTANCE.md#第-13-版候選的本機工作流)
 
@@ -235,6 +235,8 @@
 | 卡片篩選 | 部分 | 兩種卡片可篩文字、完整標籤、類型、標星和目前白板放置狀態。PDF 摘錄另有附件 ID 和頁碼。屬性、日期及保存篩選條件待做。 | [官方](https://wiki.heptabase.com/changelog) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
 | 相關卡片 | 部分 | 筆記可加入多個白板，另有篩選、關聯及搜尋。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [collections.rs](../src/collections.rs) |
 | 白板 | 部分 | 可將筆記卡、圖片和文字依實際尺寸對齊與等距排列，重開後可復原最近一次排列。自由分區幾何與其他物件仍有缺口。 | [官方](https://support.heptabase.com/en/articles/17060792-heptabase-mcp-tool-reference) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
+| 白板獨立矩形與橢圓 | 部分 | 草稿版可新增、以數值調整位置與尺寸，以及刪除指定形狀。原生 Windows 介面驗收及原廠手勢、樣式與匯入相容仍待核對。研究 ZIP 會拒絕匯出含形狀的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_shape_tag_ui.rs](../src/board_shape_tag_ui.rs) |
+| 白板標籤 | 部分 | 草稿版可新增、移除白板本身的標籤，並以完整標籤找白板，或一併找指定 Vault 的筆記。原生 Windows 介面驗收及原廠匯出匯入仍待核對。研究 ZIP 會拒絕匯出含白板標籤的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_tags.rs](../src/board_tags.rs) |
 | 分區 | 部分 | 可重新命名、整組移動可見成員、收合及展開，並打開來源筆記或 PDF。自由分區幾何待做。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
 | 連線 | 部分 | 同白板連線連到卡片 ID，分區平移後端點仍連到原卡片。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
 | 卡片拖曳 | 部分 | 同板可拖曳多選物件。跨板可把選取的筆記或 PDF 摘錄卡拖至已指定的目的區，再確認位移。保留相對位置、組內連線及完整分區。文字方塊與子白板尚不支援跨板。 | [官方](https://support.heptabase.com/en/articles/17060792-heptabase-mcp-tool-reference) · [白板操作](UI-ACCEPTANCE.md#第-18-版的資料列範本區塊返回與跨板拖曳) |

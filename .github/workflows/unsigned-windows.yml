@@ -1,5 +1,7 @@
 name: Build unsigned Windows artifact
 on:
+  push:
+    branches: ['dev/offline-workspace-handoff']
   workflow_dispatch:
     inputs:
       verify_only:
@@ -88,7 +90,7 @@ jobs:
           "exe_hash=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Upload Paperroom.exe as the only archive member
-        if: ${{ !inputs.verify_only }}
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

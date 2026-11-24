@@ -60,6 +60,8 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+#[path = "notion_preview_ui.rs"]
+mod notion_preview_ui;
 #[path = "workspace_ui.rs"]
 mod workspace_ui;
 use workspace_ui::WorkspaceView;
@@ -1162,8 +1164,16 @@ impl App {
                 (29, "匯出 Zotero 原始 CSL JSON…"),
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
+                (32, "預覽 Notion ZIP 關聯（唯讀）…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
+            if action == 32 {
+                // The preview must not flush an open note or invoke any workspace mutation.
+                if let Err(error) = notion_preview_ui::run(self.hwnd) {
+                    self.show_error(error);
+                }
+                return;
+            }
             self.mutate(|app| {
                 let is_notion_zip = action == 2;
                 let action = match action {
@@ -2182,6 +2192,12 @@ impl App {
                         let mut pt = POINT { x, y };
                         ClientToScreen(self.hwnd, &mut pt);
                         if let Err(error) = self.board_card_menu(id, pt) {
+                            self.show_error(error);
+                        }
+                    } else if let Some(shape) = self.board_shape_at(x, y) {
+                        let mut pt = POINT { x, y };
+                        ClientToScreen(self.hwnd, &mut pt);
+                        if let Err(error) = self.board_shape_context_menu(shape, pt) {
                             self.show_error(error);
                         }
                     }

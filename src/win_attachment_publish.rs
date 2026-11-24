@@ -1,0 +1,173 @@
+//! Publish an attachment relative to its already validated and pinned parent.
+use crate::store::Result;
+use std::{
+    ffi::{OsStr, c_void}, fs::File, io::{self, Write},
+    mem::{offset_of, size_of},
+    os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle}},
+    ptr::{null, null_mut},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+type Handle = *mut c_void;
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[repr(C)]
+struct UnicodeString { length: u16, maximum_length: u16, buffer: *const u16 }
+
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32, root_directory: Handle, object_name: *const UnicodeString,
+    attributes: u32, security_descriptor: *const c_void, security_qos: *const c_void,
+}
+
+#[repr(C)]
+struct IoStatus { status_or_pointer: usize, information: usize }
+
+#[repr(C)]
+struct RenameInformation {
+    replace_if_exists: u8, root_directory: Handle, file_name_length: u32,
+    file_name: [u16; 1],
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        handle: *mut Handle, desired_access: u32, attributes: *const ObjectAttributes,
+        status: *mut IoStatus, allocation_size: *const i64, file_attributes: u32,
+        share_access: u32, create_disposition: u32, create_options: u32,
+        ea_buffer: *const c_void, ea_length: u32,
+    ) -> i32;
+    fn NtSetInformationFile(
+        file: Handle, status: *mut IoStatus, info: *const c_void,
+        length: u32, class: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+fn status_result(status: i32) -> io::Result<()> {
+    if status >= 0 { Ok(()) }
+    else { Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)) }
+}
+
+fn create_stage(parent: &File, name: &str) -> io::Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, SYNCHRONIZE,
+    };
+    const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+    const OBJ_DONT_REPARSE: u32 = 0x1000;
+    const FILE_CREATE: u32 = 2;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let len = (wide.len() * size_of::<u16>()) as u16;
+    let name = UnicodeString { length: len, maximum_length: len, buffer: wide.as_ptr() };
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: parent.as_raw_handle(),
+        object_name: &name, attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        security_descriptor: null(), security_qos: null(),
+    };
+    let mut handle: Handle = null_mut();
+    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
+    // Space and file identity are scoped to the pinned parent handle. Create-new and
+    // no sharing retain exclusive ownership of the stage until publish or cleanup.
+    status_result(unsafe {
+        NtCreateFile(&mut handle, FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE,
+            &attributes, &mut status, null(), FILE_ATTRIBUTE_NORMAL, 0, FILE_CREATE,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, null(), 0)
+    })?;
+    if handle.is_null() {
+        return Err(io::Error::other("Windows did not return a staging file handle"));
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn rename_stage(file: &File, leaf: &OsStr) -> io::Result<()> {
+    const FILE_RENAME_INFORMATION: u32 = 10;
+    let wide: Vec<u16> = leaf.encode_wide().collect();
+    if wide.len() > 255 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Windows attachment name is too long"));
+    }
+    let name_offset = offset_of!(RenameInformation, file_name);
+    let name_bytes = wide.len() * size_of::<u16>();
+    let len = size_of::<RenameInformation>() + name_bytes;
+    // Vec<usize> supplies pointer alignment for the variable-length NT structure.
+    let mut storage = vec![0usize; len.div_ceil(size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<RenameInformation>();
+    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
+    unsafe {
+        (*info).file_name_length = name_bytes as u32;
+        info.cast::<u8>().add(name_offset).cast::<u16>()
+            .copy_from_nonoverlapping(wide.as_ptr(), wide.len());
+        // Zero RootDirectory + a single leaf means the staging file's own parent,
+        // not a cross-directory move which would reopen our pinned directory.
+        status_result(NtSetInformationFile(file.as_raw_handle(), &mut status,
+            info.cast(), len as u32, FILE_RENAME_INFORMATION))
+    }
+}
+
+fn discard_stage(file: &File) -> io::Result<()> {
+    const FILE_DISPOSITION_INFORMATION: u32 = 13;
+    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
+    let delete = 1u8;
+    status_result(unsafe {
+        NtSetInformationFile(file.as_raw_handle(), &mut status,
+            (&delete as *const u8).cast(), 1, FILE_DISPOSITION_INFORMATION)
+    })
+}
+
+pub(crate) fn publish(parent: &File, leaf: &OsStr, contents: &[u8]) -> Result<()> {
+    let leaf = crate::output::windows_output_name(leaf)?;
+    let stage = loop {
+        let name = format!(".paperroom-{}-{}.partial", std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed));
+        if leaf.to_string_lossy().eq_ignore_ascii_case(&name) { continue }
+        match create_stage(parent, &name) {
+            Ok(file) => break file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let mut stage = stage;
+    let result = (|| {
+        stage.write_all(contents)?;
+        stage.sync_all()?;
+        rename_stage(&stage, leaf)
+    })();
+    if let Err(error) = result {
+        if let Err(cleanup) = discard_stage(&stage) {
+            // The published name is untouched. Do not silently leave a stage behind.
+            return Err(format!("無法儲存附件：{error}；也無法清理暫存檔：{cleanup}").into());
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn attachment_on_pinned_parent_is_atomic_and_never_replaces_an_existing_file() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("paperroom-pinned-publish-{}", std::process::id()));
+        fs::create_dir(&root)?;
+        let destination = root.join("附件資料.txt");
+        let (absolute, pins) = super::super::pin_local_parents(&destination)?;
+        let parent = pins.last().expect("pin the destination parent");
+        let leaf = absolute.file_name().expect("destination leaf");
+        assert!(!destination.exists());
+        publish(parent, leaf, b"first version")?;
+        assert_eq!(fs::read(&destination)?, b"first version");
+        let conflict = publish(parent, leaf, b"discard this stage");
+        assert!(conflict.is_err());
+        assert_eq!(fs::read(&destination)?, b"first version");
+        assert_eq!(fs::read_dir(&root)?.collect::<io::Result<Vec<_>>>()?.len(), 1);
+        drop(pins);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

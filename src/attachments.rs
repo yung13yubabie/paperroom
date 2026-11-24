@@ -3,8 +3,13 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 #[path = "attachment_bundle.rs"]
 mod attachment_bundle;
+#[cfg(windows)]
+#[path = "win_attachment_publish.rs"]
+mod win_attachment_publish;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(not(windows))]
+use std::io::Write;
 use std::path::Path;
 
 pub(super) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -144,9 +149,8 @@ fn open_checked(path: &Path, directory: bool) -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(0o400000 | 0o4000); // O_NOFOLLOW | O_NONBLOCK
     }
-    let stage = if directory { "attachment.pin-directory" } else { "attachment.open-input" };
-    let file = crate::output::observe_io(stage, options.open(path))?;
-    let metadata = crate::output::observe_io("attachment.metadata", file.metadata())?;
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
     #[cfg(windows)]
     let reparse = {
         use std::os::windows::fs::MetadataExt;
@@ -273,11 +277,15 @@ impl Notebook {
             |row| row.get(0),
         ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
         #[cfg(windows)]
-        let (absolute, _parents) = pin_local_parents(path)?;
-        #[cfg(windows)]
-        let path = absolute.as_path();
+        {
+            let (absolute, parents) = pin_local_parents(path)?;
+            let parent = parents.last().ok_or("找不到目標資料夾。")?;
+            let leaf = absolute.file_name().ok_or("找不到目標檔名。")?;
+            win_attachment_publish::publish(parent, leaf, &content)
+        }
+        #[cfg(not(windows))]
         crate::output::publish_new(path, |file, _| {
-            crate::output::observe_io("attachment.write", file.write_all(&content))?;
+            file.write_all(&content)?;
             Ok(())
         })
     }

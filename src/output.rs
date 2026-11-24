@@ -4,18 +4,6 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// Windows CI diagnostic: retain the original error and emit no path or file data.
-pub(crate) fn observe_io<T>(stage: &'static str, result: std::io::Result<T>) -> std::io::Result<T> {
-    #[cfg(all(windows, test))]
-    if let Err(error) = &result {
-        if error.raw_os_error() == Some(32) {
-            eprintln!("paperroom-win32-diagnostic: {stage}; error=32");
-        }
-    }
-    let _ = stage;
-    result
-}
-
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(any(windows, test))]
@@ -72,19 +60,19 @@ pub fn publish_new(
     // Rust returns an extended-length absolute path on Windows. Use the same
     // parent for SQLite staging and the Win32 move, including on UNC shares.
     #[cfg(windows)]
-    let parent = observe_io("publish.parent", windows_parent(parent))?;
+    let parent = windows_parent(parent)?;
     #[cfg(windows)]
     let destination = parent.join(windows_output_name(destination.file_name().ok_or("找不到目標檔名。")?)?);
     #[cfg(windows)]
     let destination = destination.as_path();
-    if observe_io("publish.probe", destination.try_exists())? {
+    if destination.try_exists()? {
         return Err(std::io::Error::from(ErrorKind::AlreadyExists).into());
     }
     let directory = loop {
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         let name = format!(".paperroom-{}-{sequence}.partial", std::process::id());
         let directory = parent.join(name);
-        match observe_io("publish.stage-dir", fs::create_dir(&directory)) {
+        match fs::create_dir(&directory) {
             Ok(()) => break directory,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -97,9 +85,9 @@ pub fn publish_new(
     #[cfg(not(windows))]
     let staging = directory.join("o");
     let result = (|| {
-        let mut file = observe_io("publish.stage-file", File::create_new(&staging))?;
+        let mut file = File::create_new(&staging)?;
         write(&mut file, &staging)?;
-        observe_io("publish.sync", file.sync_all())?;
+        file.sync_all()?;
         drop(file);
         // Windows rename replaces an existing file. A move without the
         // replace flag publishes the complete file only if the name is free.
@@ -112,8 +100,7 @@ pub fn publish_new(
             }
             let native = |p: &Path| p.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
             if unsafe { MoveFileW(native(&staging).as_ptr(), native(destination).as_ptr()) } == 0 {
-                let error = std::io::Error::last_os_error();
-                observe_io::<()>("publish.MoveFileW", Err(error))?;
+                return Err(std::io::Error::last_os_error().into());
             }
         }
         #[cfg(not(windows))]

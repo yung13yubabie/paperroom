@@ -1,0 +1,25 @@
+name: Paperroom draft static security audit
+
+on:
+  push:
+    branches: ['dev/offline-workspace-handoff']
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-opengrep:
+    if: >-
+      github.repository == 'yung13yubabie/paperroom' &&
+      github.actor == 'yung13yubabie' &&
+      github.ref == 'refs/heads/dev/offline-workspace-handoff'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify official scanner, check canaries, and audit tracked source
+        shell: bash
+        run: bash .github/security/paperroom-opengrep.sh

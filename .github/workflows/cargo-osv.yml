@@ -1,0 +1,32 @@
+name: Cargo dependency advisory check
+on:
+  push:
+    branches: ['dev/offline-workspace-handoff']
+permissions:
+  contents: read
+jobs:
+  cargo-osv:
+    if: >-
+      github.repository == 'yung13yubabie/paperroom' &&
+      github.actor == 'yung13yubabie' &&
+      github.ref == 'refs/heads/dev/offline-workspace-handoff'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact checkout and fetch public inputs
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/check-cargo-osv.sh prepare "$RUNNER_TEMP/paperroom-cargo-osv"
+      - name: Scan exact Cargo.lock with networking disabled
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sudo -n /usr/bin/unshare --net -- /usr/bin/setpriv \
+            --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash \
+            scripts/check-cargo-osv.sh scan "$RUNNER_TEMP/paperroom-cargo-osv" Cargo.lock

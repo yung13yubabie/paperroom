@@ -1,0 +1,33 @@
+rules:
+  - id: paperroom.rust.shell-execute-review
+    languages: [rust]
+    severity: INFO
+    message: Review this Windows shell handoff and verify where verb, target, and parameters come from.
+    pattern: ShellExecuteW(...)
+  - id: paperroom.rust.child-process-review
+    languages: [rust]
+    severity: INFO
+    message: Review child process execution against the offline and no-shell design claims.
+    pattern: Command::new($PROGRAM)
+  - id: paperroom.rust.tcp-connect-review
+    languages: [rust]
+    severity: INFO
+    message: Review possible outbound connection against offline behavior promises.
+    pattern: TcpStream::connect($ADDR)
+  - id: paperroom.python.dynamic-evaluation
+    languages: [python]
+    severity: WARNING
+    message: Review dynamic evaluation. This scanner does not establish data provenance.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: paperroom.python.shell-execution
+    languages: [python]
+    severity: WARNING
+    message: Review shell interpretation in build or release scripts.
+    pattern-either:
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.Popen(..., shell=True, ...)
+      - pattern: subprocess.check_output(..., shell=True, ...)
+      - pattern: subprocess.check_call(..., shell=True, ...)
+      - pattern: os.system(...)

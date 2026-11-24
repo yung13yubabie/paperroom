@@ -1169,8 +1169,16 @@ impl App {
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
+                (33, "關於紙間／第三方補充通知…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
+            if action == 33 {
+                let notices = crate::about_notices::body();
+                if let Err(error) = crate::dialog::show_text(self.hwnd, "第三方補充通知", &notices) {
+                    self.show_error(error);
+                }
+                return;
+            }
             if action == 32 {
                 // The preview must not flush an open note or invoke any workspace mutation.
                 if let Err(error) = notion_preview_ui::run(self.hwnd) {

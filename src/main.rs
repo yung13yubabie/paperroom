@@ -24,6 +24,8 @@ mod vault_edit;
 mod pdf_geometry;
 #[cfg(any(windows, test))]
 mod pdf_render;
+#[cfg(any(windows, test))]
+mod about_notices;
 #[cfg(windows)]
 mod dialog;
 #[cfg(windows)]

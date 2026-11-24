@@ -29,6 +29,7 @@ pub struct Import {
     pub pages: Vec<ImportedPage>,
     pub source_paths: BTreeMap<Vec<String>, String>,
     pub skipped: usize,
+    has_all_data_json: bool,
     visited: usize,
     total_bytes: u64,
     unpacked_archives: u64,
@@ -93,6 +94,14 @@ pub(crate) fn notion_archive_with_media(path: &Path) -> Result<(Import, MediaPla
     let mut csv = CsvSources::default();
     let imported = read_archive(path, Some(&mut media), Some(&mut csv))?;
     Ok((imported, media, csv))
+}
+
+impl Import {
+    pub(crate) fn markdown_zip_import_notice(&self) -> Option<&'static str> {
+        self.has_all_data_json.then_some(
+            "ZIP 含有 All-Data.json，可能是 Heptabase 完整備份。紙間只會匯入 Markdown 與可辨識的附件，不會匯入白板配置、卡片關聯或備份中繼資料。仍要繼續？"
+        )
+    }
 }
 
 fn read_archive(path: &Path, media: Option<&mut MediaPlan>, csv: Option<&mut CsvSources>) -> Result<Import> {
@@ -202,6 +211,11 @@ fn collect(
         if !safe_archive_path(&path) || entry.is_symlink() {
             out.skipped += 1;
             continue;
+        }
+        // Only identify the safe, regular member name. Do not read or interpret
+        // its body as a native backup, and do not change what Markdown import accepts.
+        if filename.eq_ignore_ascii_case("All-Data.json") {
+            out.has_all_data_json = true;
         }
         if part.is_none() && !path.contains('/') && ext.eq_ignore_ascii_case("zip") {
             if let Some(sources) = csv.as_deref_mut() {
@@ -435,10 +449,38 @@ mod tests {
             assert_eq!((notes.pages.len(), notes.skipped, plan.count(), plan.unresolved), (1, 1, 2, 1));
             assert!(report.contains("卡片.md　附件　media/missing.pdf　找不到"));
             assert!(!report.contains("cloud.pdf") && !report.contains("All-Data.json"));
+            let notice = notes.markdown_zip_import_notice().ok_or("expected backup marker notice")?;
+            assert!(notice.contains("All-Data.json") && notice.contains("不會匯入白板配置"));
             Ok(())
         })();
         fs::remove_dir_all(&dir)?;
         result
+    }
+
+    #[test]
+    fn synthetic_markdown_zip_backup_notice_requires_safe_exact_filename() -> Result<()> {
+        fn zip(entries: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, content) in entries {
+                writer.start_file(*path, zip::write::SimpleFileOptions::default())?;
+                writer.write_all(content)?;
+            }
+            Ok(writer.finish()?.into_inner())
+        }
+
+        // This deliberately is not valid JSON: only the nested member name should matter.
+        let notes = b"# card\n\nText.";
+        let part = zip(&[("Backup/card.md", notes), ("Backup/All-Data.json", b"not JSON")])?;
+        let archive = zip(&[("Part.zip", &part)])?;
+        let imported = read_archive_snapshot(&archive, Some(&mut MediaPlan::default()), None)?;
+        assert_eq!((imported.pages.len(), imported.skipped), (1, 1));
+        assert!(imported.markdown_zip_import_notice().is_some());
+
+        let ordinary = zip(&[("card.md", notes), ("All-Data.json.bak", b"not JSON"), ("../All-Data.json", b"unsafe path")])?;
+        let imported = read_archive_snapshot(&ordinary, Some(&mut MediaPlan::default()), None)?;
+        assert_eq!((imported.pages.len(), imported.skipped), (1, 2));
+        assert!(imported.markdown_zip_import_notice().is_none());
+        Ok(())
     }
 
     #[test]

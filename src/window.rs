@@ -1275,6 +1275,14 @@ impl App {
                         }
                         "zip" => {
                             let (imported, media) = archive::archive_with_media(&path)?;
+                            if let Some(notice) = imported.markdown_zip_import_notice()
+                                && message(
+                                    app.hwnd, "Markdown ZIP 匯入範圍", notice,
+                                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING,
+                                ) != IDYES
+                            {
+                                return Ok(());
+                            }
                             let report = media.report(imported.pages.len(), imported.skipped);
                             let status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", imported.pages.len(), media.count());
                             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Markdown ZIP");

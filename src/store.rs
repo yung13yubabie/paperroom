@@ -1475,6 +1475,83 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn live_wal_backup_reopens_as_an_independent_portable_workspace() -> Result<()> {
+        use super::board_shapes::{ShapeKind, ShapeRect};
+        use std::fs;
+
+        let root = data_dir();
+        let source = root.join("使用中.sqlite3");
+        let archive = root.join("紙間備份.sqlite3");
+        let fixture = root.join("剪輯範圍.pdf");
+        let expected = include_bytes!("../tests/fixtures/storyboard-zh/剪輯範圍.pdf");
+        fs::write(&fixture, expected)?;
+        let mut live = Notebook::open(&source, false)?;
+        // Leave all new commits in WAL and capture the still-open workspace.
+        live.connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        live.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let note = live.add(None, "原始標題", "備份快照")?;
+        let sibling = live.add(None, "第二張卡", "連線端點")?;
+        let attachment = live.import_attachment(note, &fixture)?;
+        let board = live.create_board("研究白板")?;
+        live.add_card_on(board, note)?;
+        live.add_card_on(board, sibling)?;
+        live.move_card_on(board, note, 192, 360)?;
+        live.add_edge_on(board, note, sibling)?;
+        let rect = ShapeRect { x: 480, y: 224, width: 192, height: 96 };
+        let shape = live.create_board_shape(board, ShapeKind::Ellipse, rect)?;
+        live.set_board_tag(board, "回放", true)?;
+        assert!(fs::metadata(root.join("使用中.sqlite3-wal"))?.len() > 32);
+        live.backup(&archive)?;
+        let saved = fs::read(&archive)?;
+        assert!(saved.starts_with(b"SQLite format 3\0"));
+        assert!(live.backup(&archive).is_err());
+        assert_eq!(fs::read(&archive)?, saved);
+
+        // A portable restore is one file, with no reliance on the live DB,
+        // its WAL, the previously imported attachment, or a socket.
+        let portable = root.join("獨立工作區").join("paperroom-data");
+        fs::create_dir_all(&portable)?;
+        let copy_path = portable.join("notes.sqlite3");
+        fs::copy(&archive, &copy_path)?;
+        assert_eq!(fs::read_dir(&portable)?.count(), 1);
+        let current = live.note(note)?.unwrap();
+        live.save(note, current.version, "現在", "備份之後")?;
+        live.remove_attachment(attachment)?;
+        live.remove_edge_on(board, note, sibling)?;
+        let current_shape = live.board_shapes(board)?.into_iter().next().unwrap();
+        live.delete_board_shape(board, shape, current_shape.version)?;
+        assert_eq!(live.note(note)?.unwrap().body, "備份之後");
+        assert!(live.list_attachments(note)?.is_empty());
+        assert!(live.edges_on(board)?.is_empty());
+        assert!(live.board_shapes(board)?.is_empty());
+        fs::remove_file(&fixture)?;
+
+        {
+            let replica = Notebook::open(&copy_path, true)?;
+            assert!(!replica.connection.prepare("PRAGMA foreign_key_check")?.exists([])?);
+            assert_eq!(replica.note(note)?.unwrap().body, "備份快照");
+            assert_eq!(replica.list_attachments(note)?[0].id, attachment);
+            let materialized = portable.join("回復的附件.pdf");
+            replica.save_attachment_copy(attachment, &materialized)?;
+            assert_eq!(fs::read(&materialized)?, expected);
+            let cards = replica.cards_on(board)?;
+            assert_eq!(cards.len(), 2);
+            assert!(cards.iter().any(|card| (card.id, card.x, card.y) == (note, 192, 360)));
+            let edges = replica.edges_on(board)?;
+            assert_eq!(edges.len(), 1);
+            assert_eq!((edges[0].from, edges[0].to), (note, sibling));
+            let shapes = replica.board_shapes(board)?;
+            assert_eq!(shapes.len(), 1);
+            assert_eq!((shapes[0].id, shapes[0].kind, shapes[0].rect), (shape, ShapeKind::Ellipse, rect));
+            assert_eq!(replica.board_tags(board)?, ["回放"]);
+        }
+        assert_eq!(fs::read(&archive)?, saved);
+        drop(live);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn old_board_workspace_upgrades_atomically_and_backup_restores_typed_objects() -> Result<()> {
         use super::board_shapes::{ShapeKind, ShapeRect};
         use super::board_tags::TagSubject;

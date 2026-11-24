@@ -144,8 +144,9 @@ fn open_checked(path: &Path, directory: bool) -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(0o400000 | 0o4000); // O_NOFOLLOW | O_NONBLOCK
     }
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
+    let stage = if directory { "attachment.pin-directory" } else { "attachment.open-input" };
+    let file = crate::output::observe_io(stage, options.open(path))?;
+    let metadata = crate::output::observe_io("attachment.metadata", file.metadata())?;
     #[cfg(windows)]
     let reparse = {
         use std::os::windows::fs::MetadataExt;
@@ -276,7 +277,7 @@ impl Notebook {
         #[cfg(windows)]
         let path = absolute.as_path();
         crate::output::publish_new(path, |file, _| {
-            file.write_all(&content)?;
+            crate::output::observe_io("attachment.write", file.write_all(&content))?;
             Ok(())
         })
     }

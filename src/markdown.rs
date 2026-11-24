@@ -1,4 +1,9 @@
-use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
+#[path = "note_text_tools.rs"]
+pub(crate) mod note_text_tools;
+#[path = "block_anchors.rs"]
+pub(crate) mod block_anchors;
+
+use pulldown_cmark::{BlockQuoteKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use std::fmt::Write;
 
 pub fn preview(body: &str) -> String {
@@ -11,7 +16,8 @@ pub fn preview(body: &str) -> String {
     ));
     let parser = Parser::new_ext(
         body,
-        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_WIKILINKS,
+        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_WIKILINKS
+            | Options::ENABLE_GFM,
     );
     let mut list = Vec::<Option<u64>>::new();
     for event in parser {
@@ -41,7 +47,19 @@ pub fn preview(body: &str) -> String {
                 }
             }
             Event::End(TagEnd::Item) => out.push_str(r"\par}"),
-            Event::Start(Tag::BlockQuote(_)) => out.push_str(r"{\li330\i\cf3 "),
+            Event::Start(Tag::BlockQuote(Some(kind))) => {
+                let (title, color) = match kind {
+                    BlockQuoteKind::Note => ("筆記", 2),
+                    BlockQuoteKind::Tip => ("提示", 2),
+                    BlockQuoteKind::Important => ("重要", 4),
+                    BlockQuoteKind::Warning => ("警告", 4),
+                    BlockQuoteKind::Caution => ("注意", 4),
+                };
+                let _ = write!(out, r"{{\li330\brdrl\brdrs\brdrw22\brdrcf{color}\brsp80 {{\b\cf{color} ");
+                rtf_text(&mut out, title);
+                out.push_str(r"}\line ");
+            }
+            Event::Start(Tag::BlockQuote(None)) => out.push_str(r"{\li330\i\cf3 "),
             Event::End(TagEnd::BlockQuote(_)) => out.push('}'),
             Event::Start(Tag::CodeBlock(_)) => out.push_str(r"{\f1\cf3\li235 "),
             Event::End(TagEnd::CodeBlock) => out.push_str(r"\par}"),
@@ -95,6 +113,176 @@ pub fn wiki_targets(body: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AnchorSyntax {
+    Wiki,
+    Markdown,
+}
+
+pub(crate) struct NoteReference {
+    pub destination: String,
+    pub label: String,
+    pub syntax: AnchorSyntax,
+    pub offset: usize,
+}
+
+/// Return parsed WikiLinks and Markdown heading links, excluding literal code.
+pub(crate) fn note_references(body: &str) -> Vec<NoteReference> {
+    let mut active = None::<NoteReference>;
+    let mut references = Vec::new();
+    for (event, range) in Parser::new_ext(body, Options::ENABLE_WIKILINKS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { link_type, dest_url, .. }) => {
+                let syntax = if matches!(link_type, LinkType::WikiLink { .. }) {
+                    AnchorSyntax::Wiki
+                } else {
+                    if !dest_url.contains('#') { continue; }
+                    AnchorSyntax::Markdown
+                };
+                active = Some(NoteReference {
+                    destination: dest_url.trim().to_owned(), label: String::new(), syntax, offset: range.start,
+                });
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some(reference) = &mut active {
+                    reference.label.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(reference) = active.take().filter(|item| !item.destination.is_empty()) {
+                    references.push(reference);
+                }
+            }
+            _ => {}
+        }
+    }
+    references
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum HeadingLookup {
+    Found { ordinal: usize, section: std::ops::Range<usize> },
+    Missing,
+    Ambiguous,
+    Unsupported,
+}
+
+fn decode_fragment(raw: &str) -> Option<String> {
+    let mut source = raw.bytes();
+    let mut decoded = Vec::with_capacity(raw.len());
+    while let Some(byte) = source.next() {
+        let byte = if byte == b'%' {
+            let high = char::from(source.next()?).to_digit(16)?;
+            let low = char::from(source.next()?).to_digit(16)?;
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        decoded.push(byte);
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn heading_levels(anchor: &str, syntax: AnchorSyntax) -> Option<Vec<String>> {
+    let suffix = anchor.strip_prefix('#')?;
+    if suffix.len() > 4096 { return None; }
+    // Split before decoding: "%23" is a literal hash in one Markdown
+    // heading. A raw "#" separates explicitly named ancestors.
+    suffix.split('#').map(|part| {
+        if part.starts_with('^') { return None; }
+        let name = match syntax {
+            AnchorSyntax::Wiki => part.to_owned(),
+            AnchorSyntax::Markdown => decode_fragment(part)?,
+        };
+        let label = name.trim();
+        (!label.is_empty() && !name.chars().any(char::is_control)).then(|| label.to_owned())
+    }).collect()
+}
+
+fn slug_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_')
+}
+
+fn heading_slug(title: &str) -> String {
+    title.trim().to_lowercase().chars().filter_map(|c| {
+        if c.is_whitespace() { Some('-') }
+        else if slug_char(c) { Some(c) }
+        else { None }
+    }).collect()
+}
+
+fn find_heading(headings: &[(usize, u8, String)], levels: &[String], slugs: bool, bytes: usize) -> HeadingLookup {
+    let Some((last, parents)) = levels.split_last() else { return HeadingLookup::Unsupported; };
+    let same = |title: &str, query: &str| {
+        title.trim() == query || (slugs && query.chars().all(slug_char)
+            && heading_slug(title) == query.to_lowercase())
+    };
+    let mut ancestry = Vec::<usize>::new();
+    let mut found = None;
+    for (ordinal, (start, level, title)) in headings.iter().enumerate() {
+        while ancestry.last().is_some_and(|&i| headings[i].1 >= *level) {
+            ancestry.pop();
+        }
+        if same(title, last) {
+            let mut chain = ancestry.iter().rev();
+            if parents.iter().rev().all(|parent| chain.any(|&i| same(&headings[i].2, parent))) {
+                if found.is_some() { return HeadingLookup::Ambiguous; }
+                found = Some((ordinal, *start, *level));
+            }
+        }
+        ancestry.push(ordinal);
+    }
+    let Some((ordinal, start, level)) = found else { return HeadingLookup::Missing; };
+    let end = headings[ordinal + 1..].iter().find(|(_, depth, _)| *depth <= level)
+        .map_or(bytes, |(position, _, _)| *position);
+    HeadingLookup::Found { ordinal, section: start..end }
+}
+
+pub(crate) fn resolve_heading(body: &str, anchor: &str, syntax: AnchorSyntax) -> HeadingLookup {
+    let Some(levels) = heading_levels(anchor, syntax) else { return HeadingLookup::Unsupported; };
+    let headings = source_headings(body);
+    let exact = find_heading(&headings, &levels, false, body.len());
+    if exact == HeadingLookup::Missing && syntax == AnchorSyntax::Markdown {
+        find_heading(&headings, &levels, true, body.len())
+    } else {
+        exact
+    }
+}
+
+/// Resolve a unique literal heading or explicit chain, preserving source bytes.
+pub fn heading_section<'a>(body: &'a str, anchor: &str) -> Option<&'a str> {
+    match resolve_heading(body, anchor, AnchorSyntax::Wiki) {
+        HeadingLookup::Found { section, .. } => body.get(section),
+        _ => None,
+    }
+}
+
+pub(crate) fn source_headings(body: &str) -> Vec<(usize, u8, String)> {
+    let (_, prose) = crate::store::vault_search::frontmatter(body);
+    let skipped = body.len() - prose.len();
+    heading_offsets(prose).into_iter().map(|(at, level, title)| (skipped + at, level, title)).collect()
+}
+
+pub(crate) fn heading_offsets(body:&str)->Vec<(usize,u8,String)> {
+    let mut headings = Vec::new();
+    let mut active = None::<(usize, u8, String)>;
+    for (event, range) in Parser::new(body).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                active = Some((range.start, level as u8, String::new()));
+            }
+            Event::Text(value) | Event::Code(value) => {
+                if let Some((_, _, text)) = &mut active { text.push_str(&value); }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(heading) = active.take() { headings.push(heading); }
+            }
+            _ => {}
+        }
+    }
+    headings
+}
+
 fn rtf_text(out: &mut String, text: &str) {
     for unit in text.encode_utf16() {
         match unit {
@@ -117,6 +305,32 @@ fn rtf_text(out: &mut String, text: &str) {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn anchors_distinguish_nested_headings_from_one_percent_encoded_hash() {
+        let text = concat!(
+            "---\r\naliases: [來源]\r\n---\r\n", "📷 前文\r\n",
+            "# 第一幕\r\n## 同名\r\n錯誤分支\r\n", "# 第二幕\r\n### 過場\r\n#### 同名\r\n正確分支\r\n",
+            "# 第二幕#同名\r\n含雜湊符號\r\n", "# 鏡位%23A\r\n字面百分號\r\n",
+            "# North Take!\r\n標準網址片段\r\n",
+        );
+        let locate = |anchor, syntax| match resolve_heading(text, anchor, syntax) {
+            HeadingLookup::Found { section, .. } => &text[section],
+            _ => panic!("missing {anchor}"),
+        };
+        assert_eq!(resolve_heading(text, "#同名", AnchorSyntax::Wiki), HeadingLookup::Ambiguous);
+        assert!(locate("#第二幕#同名", AnchorSyntax::Wiki).contains("正確分支"));
+        assert!(locate("#第二幕%23同名", AnchorSyntax::Markdown).contains("含雜湊符號"));
+        assert!(locate("#鏡位%23A", AnchorSyntax::Wiki).contains("字面百分號"));
+        assert!(locate("#鏡位%2523A", AnchorSyntax::Markdown).contains("字面百分號"));
+        assert!(locate("#north-take", AnchorSyntax::Markdown).contains("標準網址片段"));
+        assert_eq!(resolve_heading(text, "#不存在#同名", AnchorSyntax::Wiki), HeadingLookup::Missing);
+        assert_eq!(resolve_heading(text, "#第一幕##同名", AnchorSyntax::Wiki), HeadingLookup::Unsupported);
+        assert_eq!(resolve_heading(text, "#test%2", AnchorSyntax::Markdown), HeadingLookup::Unsupported);
+        assert_eq!(resolve_heading(text, "#^無區塊", AnchorSyntax::Wiki), HeadingLookup::Unsupported);
+        assert_eq!(resolve_heading(text, "#north-take", AnchorSyntax::Wiki), HeadingLookup::Missing);
+    }
+
     #[test]
     fn rtf_keeps_unicode_and_escapes_literal_control_text() {
         let text =
@@ -127,4 +341,16 @@ mod tests {
         assert!(text.contains(r"\{\\rtf\}"));
         assert!(!text.contains("https://"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn displays_standard_callouts_and_keeps_unknown_markers_literal() {
+    let body = "> [!warning]\n> Stand clear **now**.\n\n> [!custom] My label\n> original";
+    let rendered = preview(body);
+    assert!(rendered.contains(r"\brdrcf4"));
+    assert!(rendered.contains("Stand clear"));
+    assert!(rendered.contains("{\\b now}"));
+    assert!(rendered.contains("[!custom] My label"));
+    assert!(!rendered.contains("[!warning]"));
 }

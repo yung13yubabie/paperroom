@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(any(windows, test))]
-fn windows_output_name(name: &std::ffi::OsStr) -> Result<&std::ffi::OsStr> {
+pub(crate) fn windows_output_name(name: &std::ffi::OsStr) -> Result<&std::ffi::OsStr> {
     let text = name.to_string_lossy();
     let stem = text.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
     let port = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"));
@@ -78,7 +78,12 @@ pub fn publish_new(
             Err(error) => return Err(error.into()),
         }
     };
+    #[cfg(windows)]
     let staging = directory.join("output");
+    // SQLite's default Unix VFS has a 512-byte limit including its journal
+    // suffix. Leave room without changing the staging boundary.
+    #[cfg(not(windows))]
+    let staging = directory.join("o");
     let result = (|| {
         let mut file = File::create_new(&staging)?;
         write(&mut file, &staging)?;

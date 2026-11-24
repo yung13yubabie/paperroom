@@ -1,0 +1,84 @@
+{
+  "nodes": [
+    {
+      "id": "scene",
+      "type": "group",
+      "x": -150,
+      "y": -90,
+      "width": 1150,
+      "height": 470,
+      "label": "第一場"
+    },
+    {
+      "id": "script-a",
+      "type": "file",
+      "x": -100,
+      "file": "分鏡/鏡頭.md",
+      "subpath": "#補拍焦段",
+      "label": "初剪",
+      "y": -25,
+      "width": 220,
+      "height": 160
+    },
+    {
+      "id": "script-b",
+      "type": "file",
+      "x": 220,
+      "file": "分鏡/鏡頭.md",
+      "subpath": "#器材",
+      "label": "複審",
+      "y": -25,
+      "width": 220,
+      "height": 160
+    },
+    {
+      "id": "continuity",
+      "type": "file",
+      "x": 540,
+      "file": "場記/鏡頭.md",
+      "subpath": "#補拍焦段",
+      "label": "場記",
+      "y": -25,
+      "width": 220,
+      "height": 160
+    },
+    {
+      "id": "label",
+      "type": "text",
+      "x": 220,
+      "y": 225,
+      "width": 220,
+      "height": 100,
+      "text": "核對備份後再交剪輯。"
+    },
+    {
+      "id": "reference",
+      "type": "link",
+      "x": 540,
+      "y": 225,
+      "width": 220,
+      "height": 100,
+      "url": "https://example.invalid/storyboard"
+    }
+  ],
+  "edges": [
+    {
+      "id": "cut-a",
+      "fromNode": "script-a",
+      "toNode": "script-b",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "label": "重新安排"
+    },
+    {
+      "id": "cut-b",
+      "fromNode": "script-b",
+      "toNode": "continuity",
+      "fromSide": "right",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "對照"
+    }
+  ]
+}

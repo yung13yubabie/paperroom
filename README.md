@@ -70,3 +70,49 @@ cargo build --locked --release --target x86_64-pc-windows-gnu
 更多細節請參考 [防禦性檢查](docs/AUDIT.md)、[簡易教學](docs/QUICKSTART.md)、[驗證紀錄](docs/VERIFICATION.md)及[官方公開文件索引](docs/PUBLIC-FEATURE-INDEX.tsv)。
 
 ![筆記資料庫、SQLite 復原檔與匯出暫存的位置示意圖](docs/storage-layout.png)
+
+下一版的 [Windows 簽章準備](docs/SIGNING.md) 說明候選檔的來源、審核與簽章後驗證方式；依賴、字型和圖片的來源見 [再散布清單](docs/REDISTRIBUTION.md)。
+
+## 開發中的離線工作區
+
+這批候選可複製單篇筆記或整個使用中的分支，保留正文、屬性及附件。在匯入 Notion Markdown ZIP 時，可以另存同包的原始 CSV。兩項功能沿用第 23 版工作區格式。[操作步驟](docs/UI-ACCEPTANCE.md#複製筆記與-notion-交接)
+
+工作區第 23 版可匯入 Zotero CSL JSON 書目並保存原始檔。HTML ZIP 解壓後可直接在瀏覽器閱覽筆記、下載原始 Markdown 及附件。白板也可建立心智圖分支。請先用現行版本備份，再以副本開啟候選。[操作步驟](docs/UI-ACCEPTANCE.md#書目html-匯出與心智圖)
+
+這批候選加入同步區塊、Vault 文字嵌入及日誌月曆。在閱讀模式可查看引用內容，從「管理本篇同步區塊」可開啟或修改原文。日誌月曆用日期找回日誌，即使標題已改名。資料庫結構維持第 22 版，試用前仍建議另存工作區備份。[操作步驟](docs/UI-ACCEPTANCE.md#同步區塊vault-嵌入與日誌月曆)
+
+第 22 版工作區候選加入白板對齊、等距及一次復原。研究 ZIP 的 Canvas 圖片路徑可保留繁中檔名。具名檢視可使用本機的週、月區間，並複製或調整同層篩選條件。也可查看 Vault 未連結提及，以及從跨頁待辦直接回到原筆記。升級前請先用現行版本備份。[候選操作及限制](docs/UI-ACCEPTANCE.md#第-22-版候選)
+
+![合成筆記卡、圖片卡及文字物件向左對齊，筆記與圖片的連線仍在](docs/screenshots/board-alignment-candidate.png)
+
+第 21 版工作區候選可從剪貼簿貼上圖片像素，也能另行貼上檔案總管複製的本機 PNG 或 JPEG。圖片放上白板後可移動、調整大小及連線。研究白板可匯出含圖片的 Canvas ZIP。這版也加入多層範本子頁、具名檢視的相對日期，以及 Vault 標籤排序。升級前請先用現行版本備份。[候選操作及限制](docs/UI-ACCEPTANCE.md#第-21-版候選)
+
+![合成研究白板回匯後的畫面，顯示兩張圖片卡及一條筆記連線](docs/screenshots/research-board-candidate.png)
+
+第 20 版工作區候選可從空白建立範本，套用時可另外帶入已選的直接子頁。Vault 可核對搬移後的相對連結，也能搜尋及複製區塊連結。卡片資料庫可搜尋筆記卡與 PDF 摘錄卡。升級前請先備份，再以副本測試。[候選操作與限制](docs/UI-ACCEPTANCE.md#第-20-版候選)
+
+![離線 Wine 驗收時的卡片資料庫畫面節錄。篩選結果顯示合成 PDF 摘錄及原頁預覽](docs/screenshots/card-library-candidate.png)
+
+第 19 版工作區候選可在範本中選用關聯和附件。核對 Vault 外部搬移時，會再驗證受影響的區塊引用。白板新增 PDF 摘錄卡資料庫，可依來源篩選後整批放入既有卡片。升級前請用目前版本備份，再以副本測試。[操作步驟](docs/UI-ACCEPTANCE.md#第-19-版的範本資源vault-搬移與-pdf-摘錄卡庫)
+
+第 18 版工作區候選可從資料列保存範本，再建立獨立筆記。Vault 區塊可先預覽再前往，並返回來源筆記。白板可指定目的地後拖曳卡片跨板。升級前請用目前版本備份，再以副本測試。[操作步驟](docs/UI-ACCEPTANCE.md#第-18-版的資料列範本區塊返回與跨板拖曳)
+
+第 17 版工作區候選可依公式、關聯和彙總結果篩選集合。匯入的 Vault 連結可跳到帶區塊 ID 的原文，白板則可將選取的卡片連同相對位置搬到另一張白板。升級前請用目前版本備份，再以副本測試。[操作步驟](docs/UI-ACCEPTANCE.md#第-17-版的衍生篩選區塊與跨板搬移)
+
+第 16 版工作區候選可在具名集合檢視保存巢狀篩選，從 Vault 連結跳到指定的父子標題，也能將一批筆記卡或 PDF 摘錄卡放到另一張白板供兩處共用。請先用現行版本備份，再用副本開啟候選。[操作步驟](docs/UI-ACCEPTANCE.md#第-16-版的篩選標題與跨板卡片)
+
+第 15 版工作區候選可直接在集合時間軸拖曳調整日期。確認 Vault 外部搬移時，可以一起更新已綁定的 Canvas 檔案節點。PDF 相鄰兩頁可摘成一張卡，從白板可回到兩頁原選區。升級前請用現用版本另存工作區備份。[操作步驟](docs/UI-ACCEPTANCE.md#第-15-版的時間軸vault-與雙頁摘錄)
+
+第 13 版工作區候選可保存集合的多日事件、排序及篩選，並從所匯入的 Vault 瀏覽巢狀標籤。白板能復原最近移除的文字方塊。若原 PDF 仍在，也能從摘錄卡復原標註與選區。請用現行紙間備份工作區，再用副本測試新版。
+
+這份開發分支也可複製具名檢視、在備份後更新同一路徑的 Vault 附件，並從不同白板開啟同一張 PDF 摘錄。原標註移除後，只要原 PDF 仍可開啟，就能預覽選區。[這批操作與驗收](docs/UI-ACCEPTANCE.md#清除建置路徑的第-13-版候選)
+
+上一批本機候選可從集合檢視操作關聯，以原始 Vault 路徑開啟匯入筆記，並在閱讀順序明確的同頁雙欄 PDF 保存文字選區。[這批操作與驗收](docs/UI-ACCEPTANCE.md#集合關聯vault-瀏覽與-pdf-雙欄候選) · [發版前檢查](docs/VERIFICATION.md#公開前核對本機候選)
+
+第 14 版工作區候選加入月時間軸、Vault 外部搬移核對、白板混合多選，以及 PDF 相鄰兩頁選取。[這批操作與驗收](docs/UI-ACCEPTANCE.md#第-14-版的排程來源維護與選區操作)
+
+![紙間在子白板復原文字方塊後的畫面](docs/screenshots/board-text-restored.png)
+
+圖為第 13 版工作區候選在無網卡 Wine 環境的實際畫面，使用合成筆記。狀態列顯示文字方塊已復原至原位置。
+
+[整合範圍、REA 證據與驗收案例](docs/INTEGRATION-COVERAGE.md) · [第二階段操作與限制](docs/WORKSPACE-SECOND-STAGE.md) · [介面入口與驗收紀錄](docs/UI-ACCEPTANCE.md) · [三款工具功能狀態](docs/FEATURE-STATUS.md)

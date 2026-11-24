@@ -1,0 +1,25 @@
+input	member
+crt2.o	(direct object)
+crtbegin.o	(direct object)
+crtend.o	(direct object)
+libgcc_eh.a	unwind-seh.o
+libmingw32.a	lib64_libmingw32_a-CRT_fp10.o
+libmingw32.a	lib64_libmingw32_a-_newmode.o
+libmingw32.a	lib64_libmingw32_a-cinitexe.o
+libmingw32.a	lib64_libmingw32_a-crt_handler.o
+libmingw32.a	lib64_libmingw32_a-dllargv.o
+libmingw32.a	lib64_libmingw32_a-gccmain.o
+libmingw32.a	lib64_libmingw32_a-merr.o
+libmingw32.a	lib64_libmingw32_a-mingw_helpers.o
+libmingw32.a	lib64_libmingw32_a-natstart.o
+libmingw32.a	lib64_libmingw32_a-pesect.o
+libmingw32.a	lib64_libmingw32_a-pseudo-reloc.o
+libmingw32.a	lib64_libmingw32_a-tlsmcrt.o
+libmingw32.a	lib64_libmingw32_a-tlssup.o
+libmingw32.a	lib64_libmingw32_a-tlsthrd.o
+libmingw32.a	lib64_libmingw32_a-usermatherr.o
+libmingw32.a	lib64_libmingw32_a-wildcard.o
+libmingw32.a	lib64_libmingw32_a-xncommod.o
+libmingw32.a	lib64_libmingw32_a-xtxtmode.o
+libmingwex.a	lib64_libmingwex_a-internal_logl.o
+libmingwex.a	lib64_libmingwex_a-mingw_matherr.o

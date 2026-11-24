@@ -1,0 +1,179 @@
+{
+  "tool": "rea-agents@6.10.1",
+  "command": "node package/scripts/rea.mjs inspect-artifact <filename> --json",
+  "scope": "Local static package metadata and container inventory. No desktop package was executed. No bundled application code was read or extracted. Runtime format compatibility was not tested.",
+  "inspections": [
+    {
+      "file": "Heptabase-1.117.0.AppImage",
+      "synthetic": false,
+      "evidence_id": "ev_fe9315c9b6b58823f02a9b9d8ac5db76e057b9f82eacff4c4b1c18560e7d5c3c",
+      "manifest": {
+        "manifest_id": "agm_112a50a967d5339d55d9ce32e884f40f852b120541a917d909096d8a879f4a6b",
+        "root_artifact_id": "art_63945337beff28324887f834937e176885f01b9494f703fca7bdd3d4c33f1e18",
+        "root_sha256": "96315a94f35881966113841664bbdc5cdd2971e8ad2d13657589e2f3a4d40b8d",
+        "root_format": "elf",
+        "graph_sha256": "3d125570ba2a27b2081a680f83d99c8b9ec7331f5b8cf7d516652ab019241608",
+        "node_count": 1,
+        "occurrence_count": 1,
+        "edge_count": 0
+      },
+      "coverage": {
+        "scope": "root",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "Inventory covers root bytes only; child container entries were not examined."
+      ],
+      "header_metadata": "ELF64 little-endian x86-64, AppImage Type 2",
+      "official_download": "https://github.com/heptameta/project-meta/releases/download/v1.117.0/Heptabase-1.117.0.AppImage",
+      "published_sha256_matches": true
+    },
+    {
+      "file": "Notion-7.44.1.msix",
+      "synthetic": false,
+      "evidence_id": "ev_25a0d9ba728233c2700218393a60045f1b0b7b033c3ca2c9784d1306f2b96e02",
+      "manifest": {
+        "manifest_id": "agm_134f1b75a529e64fe4ebfec59915bc7a1610f5c4ccd44061884b5d0b86fda4df",
+        "root_artifact_id": "art_f9b8ed7f420f7bd2c0d55d1c38e733db1519f583a228fe950fbac1eda15989d2",
+        "root_sha256": "e32f265d6fbcdf6357c93beade305e0aad58dcfb93106fb092f11596ebfc41ad",
+        "root_format": "msix",
+        "graph_sha256": "a3cb8b05d288b8f0205cd68b77d4e0e2eeffa3b75e72328ec6185229e418a506",
+        "node_count": 64,
+        "occurrence_count": 82,
+        "edge_count": 81
+      },
+      "coverage": {
+        "scope": "container-entries",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "ZIP inventory lists central-directory entries only. Non-entry bytes, including leading bytes before the first entry such as a self-extractor stub, an APK Signing Block before the central directory or a ZIP comment after it, are not occurrences."
+      ],
+      "official_download": "https://desktop-release.notion-static.com/Notion-7.44.1.msix",
+      "manifest_identity": {
+        "Name": "com.notion.app.desktop.notion",
+        "Publisher": "CN=\"Notion Labs, Inc.\", O=\"Notion Labs, Inc.\", L=San Francisco, S=California, C=US",
+        "Version": "7.44.1.0",
+        "ProcessorArchitecture": "x64"
+      },
+      "signature_entry_present": true,
+      "signature_chain_verified": false,
+      "asar_entry_present": true
+    },
+    {
+      "file": "Obsidian-1.15.1.AppImage",
+      "synthetic": false,
+      "evidence_id": "ev_e5ddf7a291156689eaafd05ef650db8d5ab72b95150e220a70460037e96c8dee",
+      "manifest": {
+        "manifest_id": "agm_2a2949742b75a332c2eb7925172b78b5b296bbd14e601bc885a467379b9cfe80",
+        "root_artifact_id": "art_93e8e51d2b39fc87d5816ab045b029b53f79018170aab03cca4124ced4d5c21c",
+        "root_sha256": "515ff49bb263d08841069adc46002dae94562e5041fb7762b3a1dcb7be10a51a",
+        "root_format": "elf",
+        "graph_sha256": "acd880b89521612fccaab23c16db5e819303d4ea98fab3548864343f43708dbc",
+        "node_count": 1,
+        "occurrence_count": 1,
+        "edge_count": 0
+      },
+      "coverage": {
+        "scope": "root",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "Inventory covers root bytes only; child container entries were not examined."
+      ],
+      "header_metadata": "ELF64 little-endian x86-64, AppImage Type 2",
+      "official_download": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.1/Obsidian-1.15.1.AppImage",
+      "published_sha256_matches": true
+    },
+    {
+      "file": "heptabase.zip",
+      "synthetic": true,
+      "evidence_id": "ev_1a33068d1ab0473e99a04c6871efcd3024f706b357b8ce7a07f1c80435b4df81",
+      "manifest": {
+        "manifest_id": "agm_7ebe576d12e9d0f9c9d87b6b1a12fb54bdb620858c3f374c1ee1fcd0e3c8f435",
+        "root_artifact_id": "art_68db0507b30fefef277e1808e26228ef03e2ed87960394a25c1245ab7498f5bf",
+        "root_sha256": "a52b652a56351949ccdd2083f03fc3984d99f578d9db8de359f748f8d708c826",
+        "root_format": "zip",
+        "graph_sha256": "4f60b6ed25b846918efe1952aebb9f8ba4b9cb7eb27e4f040a3ab0431b59c921",
+        "node_count": 4,
+        "occurrence_count": 4,
+        "edge_count": 3
+      },
+      "coverage": {
+        "scope": "container-entries",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "ZIP inventory lists central-directory entries only. Non-entry bytes, including leading bytes before the first entry such as a self-extractor stub, an APK Signing Block before the central directory or a ZIP comment after it, are not occurrences."
+      ],
+      "members": [
+        "All-Data.json",
+        "Alpha.md",
+        "Beta.md"
+      ],
+      "python_zip_crc_passed": true
+    },
+    {
+      "file": "notion.zip",
+      "synthetic": true,
+      "evidence_id": "ev_ca2f259d06cd400131eb5d0dc7c463dfb54dd3b1ec1e5531426022b115df7b75",
+      "manifest": {
+        "manifest_id": "agm_200b81c6f329c71c919c16922df6b997415589d5d4869df5f428a78b79e62180",
+        "root_artifact_id": "art_c3606265a25e9bac9b5c1fd16c3933eae05ff5badca4f359dd0f7c8dc05dc644",
+        "root_sha256": "649646dccb63b499a6fb9cb48b970a4bd797199ee3be4e13f4fb3d112cdca568",
+        "root_format": "zip",
+        "graph_sha256": "c2151466f1deb470aefe337c44f26e28979c05a11338fa3e9eab6678760eb53c",
+        "node_count": 4,
+        "occurrence_count": 4,
+        "edge_count": 3
+      },
+      "coverage": {
+        "scope": "container-entries",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "ZIP inventory lists central-directory entries only. Non-entry bytes, including leading bytes before the first entry such as a self-extractor stub, an APK Signing Block before the central directory or a ZIP comment after it, are not occurrences."
+      ],
+      "members": [
+        "Notes.md",
+        "Notes/Child.md",
+        "Notes/Tasks.csv"
+      ],
+      "python_zip_crc_passed": true
+    },
+    {
+      "file": "obsidian.zip",
+      "synthetic": true,
+      "evidence_id": "ev_ce1d408b883f34d90a0426b4f2dbf104591ad6bb2c73c1fdef1fb34a6ddb7148",
+      "manifest": {
+        "manifest_id": "agm_4b5625635f5d143d10b0ea9b980ddb7c379620a06cf80ac9c5b7d011027ccb40",
+        "root_artifact_id": "art_fcdea725b8d462f2ff79af12a66018f6e4cd91c5ae78cbf6313fa4811af0a7d2",
+        "root_sha256": "133012b5faae67f84a53374f625388ff04da99ac759c0af241fcc2d00792ca32",
+        "root_format": "zip",
+        "graph_sha256": "c6a6352001272e8e54f361d48e819a092b92783afd446f4674518fb5a08e6fd6",
+        "node_count": 4,
+        "occurrence_count": 4,
+        "edge_count": 3
+      },
+      "coverage": {
+        "scope": "container-entries",
+        "status": "complete"
+      },
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics.",
+        "ZIP inventory lists central-directory entries only. Non-entry bytes, including leading bytes before the first entry such as a self-extractor stub, an APK Signing Block before the central directory or a ZIP comment after it, are not occurrences."
+      ],
+      "members": [
+        "Vault/.obsidian/app.json",
+        "Vault/Notes/Alpha.md",
+        "Vault/Notes/Beta.md"
+      ],
+      "python_zip_crc_passed": true
+    }
+  ]
+}

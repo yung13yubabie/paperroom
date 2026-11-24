@@ -95,10 +95,44 @@ printf '%s\0' "${targets[@]}" > requested.nul
 # Scope includes only a scratch archive, not the checkout. Compare tracked
 # input digests after scanning. Actual scanner starts with networking disabled.
 ( cd source; sha256sum -- "$rules" "${targets[@]}" ) > inputs.sha256
+scan_status=0
 (
-  cd source
+  cd source &&
   sandbox "$work/opengrep" "${scan_flags[@]}" "${targets[@]}"
-) > findings.json
+) > findings.json || scan_status=$?
+if (( scan_status != 0 )); then
+  # A strict failure must still identify the affected tracked file(s), without
+  # echoing the scanner's source snippets or relaxing its coverage gate.
+  python3 -I - "$work" <<'PY_DIAG' || printf 'OpenGrep diagnostics were not in the expected JSON format.\n' >&2
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+root = work / 'source'
+targets = set((work / 'requested.nul').read_bytes().decode('utf-8').split('\0')[:-1])
+errors = json.loads((work / 'findings.json').read_text())['errors']
+print(f'OpenGrep strict scan blocked ({len(errors)} recorded errors):')
+emitted = set()
+for error in errors:
+    spans = error.get('spans') or (error.get('type')[1]
+        if isinstance(error.get('type'), list) and len(error['type']) == 2
+        and isinstance(error['type'][1], list) else [])
+    for span in spans or [{}]:
+        raw = span.get('path') or span.get('file') or error.get('path')
+        if not isinstance(raw, str):
+            continue
+        p = pathlib.Path(raw)
+        if p.is_absolute():
+            if not p.is_relative_to(root):
+                continue
+            p = p.relative_to(root)
+        name = p.as_posix()
+        line = (span.get('start') or {}).get('line')
+        if name not in targets or (name, line) in emitted:
+            continue
+        emitted.add((name, line))
+        print(f'  {name}:{line}' if type(line) is int and line > 0 else f'  {name}')
+PY_DIAG
+  exit "$scan_status"
+fi
 ( cd source; sha256sum --check --strict "$work/inputs.sha256" ) > /dev/null
 python3 -I - "$work" "$GITHUB_SHA" "$tool_version" "$digest" <<'PY'
 import hashlib, json, pathlib, sys

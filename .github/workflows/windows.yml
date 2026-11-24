@@ -29,9 +29,38 @@ jobs:
         run: cargo test --locked --target x86_64-pc-windows-msvc
       - name: Build Windows x64 smoke-test binary
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
-      - name: Exercise first launch and crash recovery
+      - name: Fetch and verify the pinned public v0.1.1 upgrade baseline
+        id: legacy
         shell: pwsh
-        run: ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $legacy = Join-Path $env:RUNNER_TEMP ('paperroom-v011-' + [guid]::NewGuid())
+          [void][System.IO.Directory]::CreateDirectory($legacy)
+          try {
+            $exe = Join-Path $legacy 'Paperroom.exe'
+            Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $exe -TimeoutSec 45
+            $sha = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+            if ((Get-FileHash -LiteralPath $exe).Hash -ine $sha) { throw 'Public v0.1.1 baseline digest differs.' }
+            "exe=$exe" >> $env:GITHUB_OUTPUT
+          } catch {
+            Remove-Item -LiteralPath $legacy -Recurse -Force
+            throw
+          }
+      - name: Exercise first launch, crash recovery and upgrade from published v0.1.1
+        shell: pwsh
+        env:
+          V011_BASELINE: ${{ steps.legacy.outputs.exe }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:V011_BASELINE) -or
+              !(Test-Path -LiteralPath $env:V011_BASELINE -PathType Leaf)) {
+            throw 'Pinned public upgrade baseline is required for this check.'
+          }
+          try {
+            ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe -UpgradeBaseline $env:V011_BASELINE
+          } finally {
+            Remove-Item -LiteralPath $env:V011_BASELINE -Force
+            Remove-Item -LiteralPath (Split-Path $env:V011_BASELINE -Parent)
+          }
 
   release-assets:
     if: >-

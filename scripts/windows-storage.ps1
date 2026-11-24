@@ -1,5 +1,5 @@
 # Requires PowerShell 7, a Windows desktop session and Python 3 with sqlite3.
-param([Parameter(Mandatory)][string]$Exe, [string]$Screenshot)
+param([Parameter(Mandatory)][string]$Exe, [string]$Screenshot, [string]$UpgradeBaseline)
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 Add-Type @'
@@ -141,6 +141,109 @@ function Check-Files($Root, $Phase, $RelativeDb, $DuringRun) {
     }
 }
 
+function Assert-UpgradeDatabase($Db, $Schema, $Title, $PriorDb = '') {
+    # Connected through a read-only, immutable URI only after a graceful close.
+    # Reject live sidecars so immutable reads can't conceal unapplied WAL data.
+    foreach ($suffix in '-wal','-shm','-journal') {
+        if (Test-Path -LiteralPath ($Db + $suffix)) { throw "Database has a live sidecar: $suffix" }
+    }
+    @'
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+def inspect(database):
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro&immutable=1", uri=True)) as con:
+        assert con.execute("pragma integrity_check").fetchall() == [("ok",)]
+        assert con.execute("pragma foreign_key_check").fetchall() == []
+        version = con.execute("pragma user_version").fetchone()[0]
+        notes = con.execute("select id,parent,title,body,pinned,trash_root,version from notes order by id").fetchall()
+        cards = con.execute("select note_id,x,y from board_cards order by note_id").fetchall()
+        return version, notes, cards
+
+version, notes, cards = inspect(sys.argv[1])
+schema, title = int(sys.argv[2]), sys.argv[3]
+assert version == schema, (version, schema)
+assert sum(row[2] == title for row in notes) == 1
+if len(sys.argv) > 4 and sys.argv[4]:
+    old_version, old_notes, old_cards = inspect(sys.argv[4])
+    assert old_version == 2 and cards == old_cards and len(notes) == len(old_notes)
+    for before, after in zip(old_notes, notes):
+        if before == after:
+            continue
+        assert before[0] == after[0] and after[2] == title
+        assert before[1] == after[1] and before[3:6] == after[3:6]
+        assert after[6] == before[6] + 1
+'@ | python - $Db $Schema $Title $PriorDb
+    if ($LASTEXITCODE -ne 0) { throw 'Published workspace upgrade SQLite verification failed.' }
+}
+
+function Set-UpgradeTitle($Process, $Title) {
+    $window = $Process.MainWindowHandle
+    if ((Read-Control $window 103) -eq $Title) { throw 'Upgrade marker was not unique.' }
+    [void][PaperroomWindow]::Send($window, 273, [IntPtr]110, [IntPtr]::Zero)
+    $control = [PaperroomWindow]::GetDlgItem($window, 103)
+    [void][PaperroomWindow]::SetText($control, 12, [IntPtr]::Zero, $Title)
+    if ((Read-Control $window 103) -cne $Title -or (Read-Control $window 116) -ne '有尚未儲存的修改…') {
+        throw 'The native UI did not register its upgrade marker.'
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ((Read-Control $window 116) -ne '已儲存至此電腦') {
+        if ([DateTime]::UtcNow -gt $deadline) { throw 'Upgrade marker autosave was not acknowledged.' }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Test-PublishedWorkspaceUpgrade($Root, $Baseline, $Candidate) {
+    $Baseline = (Resolve-Path -LiteralPath $Baseline).Path
+    $published = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+    if ((Get-FileHash -LiteralPath $Baseline).Hash -ine $published) {
+        throw 'Upgrade baseline is not the pinned public v0.1.1 executable.'
+    }
+
+    $original = Join-Path $Root 'published-v011'
+    $upgrade = Join-Path $Root 'candidate-upgrade'
+    foreach ($isolated in $original,$upgrade) {
+        foreach ($dir in 'bin','local','temp') {
+            [void][IO.Directory]::CreateDirectory((Join-Path $isolated $dir))
+        }
+    }
+    Copy-Item -LiteralPath $Baseline -Destination (Join-Path $original 'bin/paperroom.exe')
+    Copy-Item -LiteralPath $Candidate -Destination (Join-Path $upgrade 'bin/paperroom.exe')
+    $oldDb = Join-Path $original 'bin/paperroom-data/notes.sqlite3'
+    $newDb = Join-Path $upgrade 'bin/paperroom-data/notes.sqlite3'
+    $oldTitle = '紙間 v0.1.1 升級原本'
+    $newTitle = '紙間升級測試只改副本'
+    $process = $null
+    try {
+        $process = Start-Notebook (Join-Path $original 'bin') (Join-Path $original 'local') (Join-Path $original 'temp') $true
+        Set-UpgradeTitle $process $oldTitle
+        Close-Notebook $process
+        $originalHash = (Get-FileHash -LiteralPath $oldDb).Hash
+        Assert-UpgradeDatabase $oldDb 2 $oldTitle
+        [void][IO.Directory]::CreateDirectory((Split-Path $newDb -Parent))
+        Copy-Item -LiteralPath $oldDb -Destination $newDb
+        if ((Get-FileHash -LiteralPath $newDb).Hash -cne $originalHash) { throw 'Upgrade input copy changed bytes.' }
+
+        $process = Start-Notebook (Join-Path $upgrade 'bin') (Join-Path $upgrade 'local') (Join-Path $upgrade 'temp') $false
+        if ((Read-Control $process.MainWindowHandle 103) -cne $oldTitle) { throw 'Candidate did not open the published original note.' }
+        Assert-UpgradeDatabase $oldDb 2 $oldTitle
+        Set-UpgradeTitle $process $newTitle
+        Close-Notebook $process
+        Assert-UpgradeDatabase $newDb 25 $newTitle $oldDb
+        $process = Start-Notebook (Join-Path $upgrade 'bin') (Join-Path $upgrade 'local') (Join-Path $upgrade 'temp') $false
+        if ((Read-Control $process.MainWindowHandle 103) -cne $newTitle) { throw 'Candidate did not retain the upgraded note on reopen.' }
+        Close-Notebook $process
+        Assert-UpgradeDatabase $newDb 25 $newTitle $oldDb
+        Assert-UpgradeDatabase $oldDb 2 $oldTitle
+        if ((Get-FileHash -LiteralPath $oldDb).Hash -cne $originalHash) { throw 'Published original database bytes changed.' }
+        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 25 → native UI save/reopen, integrity, and original byte preservation passed.'
+    } finally {
+        if ($process -and !$process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    }
+}
+
 $base = Join-Path ([IO.Path]::GetTempPath()) ('paperroom-smoke-' + [guid]::NewGuid())
 try {
     # Refuse ambiguous startup instead of creating state in an unintended folder.
@@ -198,6 +301,7 @@ try {
             $bad.Dispose()
         }
     }
+    if ($UpgradeBaseline) { Test-PublishedWorkspaceUpgrade $base $UpgradeBaseline $Exe }
     foreach ($mode in 'default','portable','portable-marker') {
         $root = Join-Path $base $mode
         $bin = Join-Path $root 'bin'

@@ -1,47 +1,43 @@
 //! Publish an attachment relative to its already validated and pinned parent.
 use crate::store::Result;
 use std::{
-    ffi::{OsStr, c_void}, fs::File, io::{self, Write},
+    ffi::OsStr, fs::File, io::{self, Write},
     mem::{offset_of, size_of},
     os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle}},
     ptr::{null, null_mut},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-type Handle = *mut c_void;
+use windows_sys::{
+    Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{
+            FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_DISPOSITION_INFORMATION, FILE_RENAME_INFORMATION, FileDispositionInformation,
+            FileRenameInformation, NtCreateFile, NtSetInformationFile,
+        },
+    },
+    Win32::{
+        Foundation::{HANDLE, RtlNtStatusToDosError, UNICODE_STRING},
+        System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0},
+    },
+};
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-#[repr(C)]
-struct UnicodeString { length: u16, maximum_length: u16, buffer: *const u16 }
+// Match the former native ABI representation on the shipped x64 target.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<UNICODE_STRING>() == 16);
+    assert!(size_of::<OBJECT_ATTRIBUTES>() == 48);
+    assert!(size_of::<IO_STATUS_BLOCK>() == 16);
+    assert!(size_of::<FILE_RENAME_INFORMATION>() == 24);
+    assert!(offset_of!(FILE_RENAME_INFORMATION, FileName) == 20);
+    assert!(size_of::<FILE_DISPOSITION_INFORMATION>() == 1);
+};
 
-#[repr(C)]
-struct ObjectAttributes {
-    length: u32, root_directory: Handle, object_name: *const UnicodeString,
-    attributes: u32, security_descriptor: *const c_void, security_qos: *const c_void,
-}
-
-#[repr(C)]
-struct IoStatus { status_or_pointer: usize, information: usize }
-
-#[repr(C)]
-struct RenameInformation {
-    replace_if_exists: u8, root_directory: Handle, file_name_length: u32,
-    file_name: [u16; 1],
-}
-
-#[link(name = "ntdll")]
-unsafe extern "system" {
-    fn NtCreateFile(
-        handle: *mut Handle, desired_access: u32, attributes: *const ObjectAttributes,
-        status: *mut IoStatus, allocation_size: *const i64, file_attributes: u32,
-        share_access: u32, create_disposition: u32, create_options: u32,
-        ea_buffer: *const c_void, ea_length: u32,
-    ) -> i32;
-    fn NtSetInformationFile(
-        file: Handle, status: *mut IoStatus, info: *const c_void,
-        length: u32, class: u32,
-    ) -> i32;
-    fn RtlNtStatusToDosError(status: i32) -> u32;
+fn io_status() -> IO_STATUS_BLOCK {
+    IO_STATUS_BLOCK { Anonymous: IO_STATUS_BLOCK_0 { Pointer: null_mut() }, Information: 0 }
 }
 
 fn status_result(status: i32) -> io::Result<()> {
@@ -55,21 +51,17 @@ fn create_stage(parent: &File, name: &str) -> io::Result<File> {
     };
     const OBJ_CASE_INSENSITIVE: u32 = 0x40;
     const OBJ_DONT_REPARSE: u32 = 0x1000;
-    const FILE_CREATE: u32 = 2;
-    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
-    const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
-
-    let wide: Vec<u16> = name.encode_utf16().collect();
+    let mut wide: Vec<u16> = name.encode_utf16().collect();
     let len = (wide.len() * size_of::<u16>()) as u16;
-    let name = UnicodeString { length: len, maximum_length: len, buffer: wide.as_ptr() };
-    let attributes = ObjectAttributes {
-        length: size_of::<ObjectAttributes>() as u32,
-        root_directory: parent.as_raw_handle(),
-        object_name: &name, attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
-        security_descriptor: null(), security_qos: null(),
+    let name = UNICODE_STRING { Length: len, MaximumLength: len, Buffer: wide.as_mut_ptr() };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &name, Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        SecurityDescriptor: null(), SecurityQualityOfService: null(),
     };
-    let mut handle: Handle = null_mut();
-    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
+    let mut handle: HANDLE = null_mut();
+    let mut status = io_status();
     // Space and file identity are scoped to the pinned parent handle. Create-new and
     // no sharing retain exclusive ownership of the stage until publish or cleanup.
     status_result(unsafe {
@@ -84,36 +76,35 @@ fn create_stage(parent: &File, name: &str) -> io::Result<File> {
 }
 
 fn rename_stage(file: &File, leaf: &OsStr) -> io::Result<()> {
-    const FILE_RENAME_INFORMATION: u32 = 10;
     let wide: Vec<u16> = leaf.encode_wide().collect();
     if wide.len() > 255 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Windows attachment name is too long"));
     }
-    let name_offset = offset_of!(RenameInformation, file_name);
+    let name_offset = offset_of!(FILE_RENAME_INFORMATION, FileName);
     let name_bytes = wide.len() * size_of::<u16>();
-    let len = size_of::<RenameInformation>() + name_bytes;
+    let len = size_of::<FILE_RENAME_INFORMATION>() + name_bytes;
     // Vec<usize> supplies pointer alignment for the variable-length NT structure.
     let mut storage = vec![0usize; len.div_ceil(size_of::<usize>())];
-    let info = storage.as_mut_ptr().cast::<RenameInformation>();
-    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut status = io_status();
     unsafe {
-        (*info).file_name_length = name_bytes as u32;
+        (*info).FileNameLength = name_bytes as u32;
         info.cast::<u8>().add(name_offset).cast::<u16>()
             .copy_from_nonoverlapping(wide.as_ptr(), wide.len());
         // Zero RootDirectory + a single leaf means the staging file's own parent,
         // not a cross-directory move which would reopen our pinned directory.
         status_result(NtSetInformationFile(file.as_raw_handle(), &mut status,
-            info.cast(), len as u32, FILE_RENAME_INFORMATION))
+            info.cast(), len as u32, FileRenameInformation))
     }
 }
 
 fn discard_stage(file: &File) -> io::Result<()> {
-    const FILE_DISPOSITION_INFORMATION: u32 = 13;
-    let mut status = IoStatus { status_or_pointer: 0, information: 0 };
-    let delete = 1u8;
+    let mut status = io_status();
+    let delete = FILE_DISPOSITION_INFORMATION { DeleteFile: 1 };
     status_result(unsafe {
         NtSetInformationFile(file.as_raw_handle(), &mut status,
-            (&delete as *const u8).cast(), 1, FILE_DISPOSITION_INFORMATION)
+            (&delete as *const FILE_DISPOSITION_INFORMATION).cast(),
+            size_of::<FILE_DISPOSITION_INFORMATION>() as u32, FileDispositionInformation)
     })
 }
 

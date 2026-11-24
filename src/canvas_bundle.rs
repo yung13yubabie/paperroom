@@ -339,12 +339,23 @@ impl Notebook {
 
     pub(crate) fn export_canvas_bundle(&self, id: i64, output: &Path) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
-        let (canvas_path, raw, _) = self.canvas_bundle_source(id)?.ok_or("這份 Canvas 不含 ZIP 封裝。")?;
+        let (canvas_path, raw, inventory) = self.canvas_bundle_source(id)?.ok_or("這份 Canvas 不含 ZIP 封裝。")?;
         let names = self.canvas_bundle_paths(id)?;
         if !portable(&canvas_path) || !canvas_name(&canvas_path) || names.iter().any(|n| !portable(n) || n == &canvas_path) {
             return Err("Canvas ZIP 的儲存路徑無效。".into());
         }
-        canvas::parse_bundle(raw.clone())?;
+        let doc = canvas::parse_bundle(raw.clone())?;
+        let inventory: BTreeSet<String> = serde_json::from_str(&inventory)?;
+        // ZIP export contains only the retained members. Losing a competing
+        // path must not silently make an unbound reference exact on reimport.
+        let original_index = path_index(&inventory);
+        let exported = report(&doc, &canvas_path, &names);
+        if exported.references.iter().any(|(key, state)| {
+            matches!(state, CanvasAssetState::Stored(_))
+                && resolve_indexed(key, &canvas_path, &original_index) != *state
+        }) {
+            return Err("這份 Canvas ZIP 會在重新匯入時改變附件配對。請先修正畫布中的歧義路徑，或只匯出 .canvas。".into());
+        }
         publish_new(output, |file, _| {
             let mut zip = ZipWriter::new(file);
             let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -422,6 +433,65 @@ mod tests {
             db.compare_set_canvas_vault(bundle, Some(b), None)?;
             assert!(db.resolve_canvas_file_link(bundle, None, "exact")?.note_id.is_none());
             assert_eq!(db.read_canvas(bundle)?.json(), &pack);
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(dir);
+        result
+    }
+
+    #[test]
+    fn bundle_export_does_not_rebind_an_ambiguous_reference_to_a_retained_member() -> Result<()> {
+        use crate::store::canvas_edit::CanvasEdit;
+        let dir = super::super::tests::data_dir();
+        let result = (|| -> Result<()> {
+            let source = dir.join("original.zip");
+            let output = dir.join("roundtrip.zip");
+            let database = dir.join("workspace.sqlite3");
+            let pack = json!({"nodes":[
+                {"id":"ambiguous","type":"file","x":0,"y":0,"width":100,"height":80,"file":"圖.png"},
+                {"id":"exact","type":"file","x":120,"y":0,"width":90,"height":80,"file":"Vault/圖.png"},
+                {"id":"missing","type":"file","x":0,"y":100,"width":100,"height":80,"file":"未附.md"}
+            ]});
+            let mut zip = ZipWriter::new(File::create_new(&source)?);
+            let raw = serde_json::to_vec(&pack)?;
+            for (name, bytes) in [("Vault/板.canvas", raw.as_slice()),
+                ("圖.png", b"root image"), ("Vault/圖.png", b"wrapped image")] {
+                zip.start_file(name, SimpleFileOptions::default())?;
+                zip.write_all(bytes)?;
+            }
+            zip.finish()?;
+            let original = fs::read(&source)?;
+            let first = Notebook::open(&database, false)?;
+            let imported = first.import_canvas_bundle(&source)?;
+            assert_eq!(imported.report.references["圖.png"], CanvasAssetState::Ambiguous);
+            assert_eq!(imported.report.references["Vault/圖.png"],
+                CanvasAssetState::Stored("Vault/圖.png".into()));
+            assert_eq!(imported.report.references["未附.md"], CanvasAssetState::Missing);
+            drop(first);
+
+            let db = Notebook::open(&database, false)?;
+            assert_eq!(db.canvas_bundle_report(imported.id)?.unwrap().references["圖.png"],
+                CanvasAssetState::Ambiguous);
+            let entries_before = fs::read_dir(&dir)?.count();
+            let error = db.export_canvas_bundle(imported.id, &output).unwrap_err();
+            assert!(error.to_string().contains("會在重新匯入時改變附件配對"));
+            assert!(!output.exists());
+            assert_eq!(fs::read_dir(&dir)?.count(), entries_before);
+            assert_eq!(fs::read(&source)?, original);
+
+            let doc = db.read_canvas(imported.id)?;
+            let revised = db.edit_canvas(imported.id, &doc, CanvasEdit::DeleteNode { id: "ambiguous" })?;
+            db.export_canvas_bundle(imported.id, &output)?;
+            let second = Notebook::open(&dir.join("reimport.sqlite3"), false)?;
+            let again = second.import_canvas_bundle(&output)?;
+            assert_eq!(second.read_canvas(again.id)?.as_str(), revised.as_str());
+            assert_eq!(again.report.references["Vault/圖.png"],
+                CanvasAssetState::Stored("Vault/圖.png".into()));
+            assert_eq!(again.report.references["未附.md"], CanvasAssetState::Missing);
+            let mut archive = open_input(&output)?;
+            assert_eq!(archive.sizes.len(), 2);
+            assert_eq!(archive.read("Vault/圖.png", b"wrapped image".len())?, b"wrapped image");
+            assert_eq!(fs::read(&source)?, original);
             Ok(())
         })();
         let _ = fs::remove_dir_all(dir);

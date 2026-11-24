@@ -9,6 +9,27 @@ fn shape_label(kind: ShapeKind) -> &'static str {
     match kind { ShapeKind::Rectangle => "矩形", ShapeKind::Ellipse => "橢圓" }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct BoardShapeDrag {
+    board: i64,
+    shape: Shape,
+    pointer: (i32, i32),
+    dpi: u32,
+    max_x: i32,
+    preview: ShapeRect,
+}
+
+impl BoardShapeDrag {
+    fn target(self, x: i32, y: i32) -> ShapeRect {
+        self.shape.rect.moved_by_pointer(
+            x.saturating_sub(self.pointer.0),
+            y.saturating_sub(self.pointer.1),
+            self.dpi,
+            self.max_x,
+        )
+    }
+}
+
 impl App {
     unsafe fn prompt_shape_rect(&self, title: &str, rect: ShapeRect) -> Result<Option<ShapeRect>> {
         unsafe {
@@ -136,6 +157,72 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn begin_board_shape_drag(&mut self, shape: Shape, x: i32, y: i32) {
+        unsafe {
+            let area = self.board_area();
+            // Keep at least a handle-width visible when dropping near the right edge.
+            let width = (i64::from((area.right - area.left).max(0)) * 96
+                / i64::from(self.dpi.max(1))) as i32;
+            SetCapture(self.hwnd);
+            if GetCapture() == self.hwnd {
+                self.extras.board_shape_drag = Some(BoardShapeDrag {
+                    board: self.board_id(), shape, pointer: (x, y), dpi: self.dpi,
+                    max_x: width.saturating_sub(24), preview: shape.rect,
+                });
+            }
+        }
+    }
+
+    pub(super) unsafe fn cancel_board_shape_drag(&mut self) -> bool {
+        unsafe {
+            if self.extras.board_shape_drag.take().is_none() {
+                return false;
+            }
+            if GetCapture() == self.hwnd { ReleaseCapture(); }
+            InvalidateRect(self.hwnd, null(), 1);
+            true
+        }
+    }
+
+    pub(super) unsafe fn board_shape_drag_input(&mut self, msg: u32, x: i32, y: i32) -> bool {
+        unsafe {
+            let Some(drag) = self.extras.board_shape_drag else { return false; };
+            if drag.board != self.board_id() || drag.dpi != self.dpi
+                || !self.extras.board || self.extras.workspace.is_some()
+            {
+                self.cancel_board_shape_drag();
+                return true;
+            }
+            match msg {
+                WM_MOUSEMOVE => {
+                    let preview = drag.target(x, y);
+                    if preview != drag.preview {
+                        self.extras.board_shape_drag = Some(BoardShapeDrag { preview, ..drag });
+                        InvalidateRect(self.hwnd, &self.board_area(), 1);
+                    }
+                }
+                WM_LBUTTONUP => {
+                    // Take state before releasing capture, so the capture event cannot commit.
+                    self.cancel_board_shape_drag();
+                    let target = drag.target(x, y);
+                    if target != drag.shape.rect {
+                        let moved = self.notebook.update_board_shape(
+                            drag.board, drag.shape.id, drag.shape.version, target,
+                        );
+                        let refreshed = self.refresh_board();
+                        match moved.and(refreshed) {
+                            Ok(()) => label(self.widgets.status, "白板形狀位置已儲存。"),
+                            Err(error) => self.show_error(error),
+                        }
+                    }
+                }
+                WM_CAPTURECHANGED | WM_CANCELMODE => { self.cancel_board_shape_drag(); }
+                _ => {}
+            }
+            true
+        }
+    }
+
     pub(super) unsafe fn paint_board_shapes(&self, dc: HDC, area: RECT) {
         unsafe {
             let pen = CreatePen(PS_SOLID,self.scaled(2).max(1),color(53,100,137));
@@ -144,7 +231,13 @@ impl App {
                 let pen_before = SelectObject(dc,pen);
                 let brush_before = SelectObject(dc,brush);
                 for shape in &self.extras.board_shapes {
-                    let ShapeRect { x, y, width, height } = self.board_shape_pixel_rect(*shape, area);
+                    let mut shown = *shape;
+                    if let Some(drag) = self.extras.board_shape_drag
+                        && drag.board == self.board_id() && drag.shape.id == shape.id
+                    {
+                        shown.rect = drag.preview;
+                    }
+                    let ShapeRect { x, y, width, height } = self.board_shape_pixel_rect(shown, area);
                     let right = x + width;
                     let bottom = y + height;
                     if x >= area.right || right <= area.left || y >= area.bottom || bottom <= area.top {continue;}

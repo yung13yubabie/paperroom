@@ -1,7 +1,7 @@
 use super::{HWND, Result, file_dialog};
 use crate::dialog::{prompt, show_text};
 use crate::store::notion_preview::{
-    CellEncoding, Member, NotionPreviewSession, PageChoice, Part, Report, Resolution, Scope,
+    CellEncoding, CsvChoice, Member, NotionPreviewSession, PageChoice, Part, Report, Resolution, Scope,
     Selection,
 };
 use std::collections::BTreeSet;
@@ -111,6 +111,36 @@ fn report_text(report: &Report, source: &[&PageChoice], target: &[&PageChoice])
     Ok(text)
 }
 
+unsafe fn show_original(hwnd: HWND, preview: &NotionPreviewSession, csv: &CsvChoice)
+    -> Result<()>
+{
+    unsafe {
+        let original = preview.original_text(csv)?;
+        let pages = original.page_count();
+        let mut number = 1;
+        loop {
+            let page = original.page(number).ok_or("找不到原始 CSV 的這一頁。")?;
+            let heading = format!(
+                "{}\n第 {number} / {pages} 頁 · 原檔位元組 {} 起，顯示 {} 位元組\n\\r、\\t 與不可見符號以跳脫形式顯示。此處未解析、匯入或配對資料。\n\n",
+                member_label(&csv.member), page.bytes.start, page.bytes.len()
+            );
+            show_text(hwnd, "Notion CSV 原文（唯讀）", &(heading + &page.display_text()))?;
+            if pages == 1 {
+                return Ok(());
+            }
+            let next = if number < pages { (number + 1).to_string() } else { String::new() };
+            let Some(entered) = prompt(
+                hwnd, "Notion CSV 原文", "輸入頁號以繼續；取消可關閉。", &next, 12,
+            )? else { return Ok(()); };
+            let number_text = numbers(&entered, pages)?;
+            if number_text.len() != 1 {
+                return Err("每次請輸入一個頁號。".into());
+            }
+            number = number_text[0] + 1;
+        }
+    }
+}
+
 pub(super) unsafe fn run(hwnd: HWND) -> Result<()> {
     unsafe {
         let Some(path) = file_dialog(hwnd, "Notion Markdown ZIP\0*.zip\0\0", "zip", None)?
@@ -125,6 +155,14 @@ pub(super) unsafe fn run(hwnd: HWND) -> Result<()> {
         let Some(file) = select(hwnd, "1 / 選擇原始 CSV", &text, names.len(), true)?
             else { return Ok(()); };
         let csv = files[file[0]];
+        let Some(mode) = prompt(hwnd, "Notion CSV（唯讀）",
+            "1 = 檢視原始 CSV；2 = 預覽關聯（需有來源頁面 ID）。", "1", 3)?
+            else { return Ok(()); };
+        match mode.trim() {
+            "1" => return show_original(hwnd, &preview, csv),
+            "2" => {}
+            _ => return Err("請輸入 1（原始 CSV）或 2（關聯預覽）。".into()),
+        }
         let (columns, rows) = preview.csv_header_and_count(csv)?;
         let names: Vec<_> = columns.iter().map(|name| format!("{name:?}")).collect();
         if rows == 0 {

@@ -117,24 +117,28 @@ fn discard_stage(file: &File) -> io::Result<()> {
     })
 }
 
-pub(crate) fn publish(parent: &File, leaf: &OsStr, contents: &[u8]) -> Result<()> {
-    let leaf = crate::output::windows_output_name(leaf)?;
-    let stage = loop {
+fn allocate_stage(parent: &File, leaf: &OsStr) -> io::Result<(File, String)> {
+    loop {
         let name = format!(".paperroom-{}-{}.partial", std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed));
         if leaf.to_string_lossy().eq_ignore_ascii_case(&name) { continue }
         match create_stage(parent, &name) {
-            Ok(file) => break file,
+            Ok(file) => return Ok((file, name)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
-    };
-    let mut stage = stage;
-    let result = (|| {
-        stage.write_all(contents)?;
-        stage.sync_all()?;
-        rename_stage(&stage, leaf)
-    })();
+    }
+}
+
+fn write_stage(stage: &mut File, contents: &[u8]) -> io::Result<()> {
+    stage.write_all(contents)?;
+    stage.sync_all()
+}
+
+pub(crate) fn publish(parent: &File, leaf: &OsStr, contents: &[u8]) -> Result<()> {
+    let leaf = crate::output::windows_output_name(leaf)?;
+    let (mut stage, _) = allocate_stage(parent, leaf)?;
+    let result = write_stage(&mut stage, contents).and_then(|()| rename_stage(&stage, leaf));
     if let Err(error) = result {
         if let Err(cleanup) = discard_stage(&stage) {
             // The published name is untouched. Do not silently leave a stage behind.
@@ -150,6 +154,88 @@ pub(crate) fn publish(parent: &File, leaf: &OsStr, contents: &[u8]) -> Result<()
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct TestChild(Child);
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn forced_exit_before_publish_preserves_unpublished_stage_and_unrelated_files() -> Result<()> {
+        const CHILD_ROOT: &str = "PAPERROOM_TEST_ATTACHMENT_CRASH_CHILD_ROOT";
+        const STAGED: &[u8] = b"attachment payload before interrupted rename";
+        const UNRELATED: &[u8] = b"other work, never delete";
+        const LEAF: &str = "saved-attachment.txt";
+        const READY: &str = "crash-test-stage-ready";
+        if let Some(path) = std::env::var_os(CHILD_ROOT) {
+            // This subprocess branch belongs exclusively to the harness invocation below.
+            let root = std::path::PathBuf::from(path);
+            assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+            assert!(root.file_name().and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with("paperroom-attachment-crash-test-")));
+            assert_eq!(fs::read(root.join("unrelated.partial"))?, UNRELATED);
+            let destination = root.join(LEAF);
+            let (_, pins) = super::super::pin_local_parents(&destination)?;
+            let (mut stage, stage_name) = allocate_stage(pins.last().expect("pinned root"), OsStr::new(LEAF))?;
+            write_stage(&mut stage, STAGED)?;
+            fs::write(root.join(READY), stage_name)?;
+            // Keep the actual non-sharing NTFS staging handle open until the parent kills us.
+            loop { std::thread::park(); }
+        }
+
+        let root = std::env::temp_dir().join(format!("paperroom-attachment-crash-test-{}-{}",
+            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()));
+        fs::create_dir(&root)?;
+        fs::write(root.join("unrelated.partial"), UNRELATED)?;
+        let destination = root.join(LEAF);
+        let check = (|| -> Result<()> {
+            let mut child = TestChild(Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg(concat!(module_path!(), "::forced_exit_before_publish_preserves_unpublished_stage_and_unrelated_files")
+                    .split_once("::").expect("test module path").1)
+                .env(CHILD_ROOT, &root)
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .spawn()?);
+            let stage_prefix = format!(".paperroom-{}-", child.0.id());
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let stage_name = loop {
+                if let Ok(name) = fs::read_to_string(root.join(READY)) {
+                    if name.strip_prefix(&stage_prefix).and_then(|s| s.strip_suffix(".partial"))
+                        .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
+                        break name;
+                    }
+                }
+                if child.0.try_wait()?.is_some() || Instant::now() >= deadline {
+                    return Err("Native attachment subprocess did not reach the sync barrier".into());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(!destination.try_exists()?);
+            let stage_path = root.join(stage_name);
+            assert!(stage_path.is_file());
+            child.0.kill()?;
+            assert!(!child.0.wait()?.success());
+            assert!(!destination.try_exists()?);
+            assert_eq!(fs::read(&stage_path)?, STAGED);
+            let (_, pins) = super::super::pin_local_parents(&destination)?;
+            publish(pins.last().expect("pinned root"), OsStr::new(LEAF), b"retried")?;
+            assert_eq!(fs::read(&destination)?, b"retried");
+            assert_eq!(fs::read(&stage_path)?, STAGED);
+            assert_eq!(fs::read(root.join("unrelated.partial"))?, UNRELATED);
+            let files = fs::read_dir(&root)?.collect::<io::Result<Vec<_>>>()?;
+            assert_eq!(files.len(), 4, "destination, original stage, unrelated file, test signal");
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        check?;
+        cleanup?;
+        Ok(())
+    }
 
     #[test]
     fn attachment_on_pinned_parent_is_atomic_and_never_replaces_an_existing_file() -> Result<()> {

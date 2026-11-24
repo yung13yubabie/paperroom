@@ -89,6 +89,57 @@ pub(crate) struct Report {
     pub(crate) rows: Vec<Row>,
 }
 
+const RAW_PAGE_BYTES: usize = 4096;
+
+pub(crate) struct CsvText<'a> {
+    original: &'a str,
+    pages: Vec<std::ops::Range<usize>>,
+}
+
+pub(crate) struct CsvTextPage<'a> {
+    pub(crate) bytes: std::ops::Range<usize>,
+    pub(crate) text: &'a str,
+}
+
+impl<'a> CsvText<'a> {
+    fn new(original: &'a str) -> Self {
+        let mut pages = Vec::new();
+        let mut start = 0;
+        while start < original.len() {
+            let mut end = (start + RAW_PAGE_BYTES).min(original.len());
+            while !original.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end < original.len() && &original.as_bytes()[end - 1..=end] == b"\r\n" {
+                end -= 1;
+            }
+            pages.push(start..end);
+            start = end;
+        }
+        Self { original, pages }
+    }
+
+    pub(crate) fn page_count(&self) -> usize { self.pages.len() }
+
+    pub(crate) fn page(&self, one_based: usize) -> Option<CsvTextPage<'a>> {
+        let bytes = self.pages.get(one_based.checked_sub(1)?)?.clone();
+        Some(CsvTextPage { text: &self.original[bytes.clone()], bytes })
+    }
+}
+
+impl CsvTextPage<'_> {
+    pub(crate) fn display_text(&self) -> String {
+        let mut rendered = String::with_capacity(self.text.len());
+        for c in self.text.chars() {
+            match c {
+                '\n' | '"' | '\'' => rendered.push(c),
+                _ => rendered.extend(c.escape_debug()),
+            }
+        }
+        rendered
+    }
+}
+
 pub(crate) struct NotionPreviewSession {
     archive_sha256: [u8; 32],
     sources: CsvSources,
@@ -145,6 +196,11 @@ impl NotionPreviewSession {
         self.sources.preview_members().find(|(part,path,_)| *part==pick.member.part.as_deref()
             && *path==pick.member.path).map(|(_,_,bytes)|bytes)
             .ok_or_else(||"找不到已選取的原始 CSV。".into())
+    }
+
+    pub(crate) fn original_text<'a>(&'a self, pick: &CsvChoice) -> Result<CsvText<'a>> {
+        let text = std::str::from_utf8(self.original_csv(pick)?)?;
+        Ok(CsvText::new(text))
     }
 
     pub(crate) fn columns(&self, pick:&CsvChoice) -> Result<Vec<String>> {
@@ -334,6 +390,65 @@ mod tests {
         assert_eq!(report.rows[0].tokens[1].1, Resolution::UnsupportedValue);
         assert_eq!(session.original_csv(csv).unwrap(), bytes);
         assert!(super::super::csv_table::parse_csv(bytes).is_err());
+    }
+
+    #[test]
+    fn original_text_reads_exact_zip_parts_without_inventing_a_relation_schema() {
+        use std::io::{Cursor, Write};
+
+        fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, data) in entries {
+                writer.start_file(*path, zip::write::SimpleFileOptions::default()).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap().into_inner()
+        }
+
+        let default = "\u{feff}名稱,關聯\r\n甲,同名\r\n";
+        let filtered = "名稱,關聯\n甲,\"無法解析，但原文仍能檢視";
+        let first = zip(&[("研究_all.csv", default.as_bytes())]);
+        let second = zip(&[("研究_all.csv", filtered.as_bytes())]);
+        let outer = zip(&[("part-A.zip", &first), ("part-B.zip", &second)]);
+        let session = NotionPreviewSession::from_snapshot(&outer).unwrap();
+        assert!(session.page_choices().next().is_none());
+        let picks: Vec<_> = session.csv_choices().collect();
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks[0].member.part.as_deref(), Some("part-A.zip"));
+        assert_eq!(picks[1].member.part.as_deref(), Some("part-B.zip"));
+        assert_eq!(picks[0].member.path, picks[1].member.path);
+        for (pick, expected) in picks.iter().zip([default, filtered]) {
+            let original = session.original_text(pick).unwrap();
+            assert_eq!(original.page_count(), 1);
+            let page = original.page(1).unwrap();
+            assert_eq!(page.text, expected);
+            assert_eq!(page.bytes, 0..expected.len());
+            assert_eq!(session.original_csv(pick).unwrap(), expected.as_bytes());
+        }
+        assert_eq!(session.csv_header_and_count(picks[0]).unwrap(), (vec!["名稱".into(), "關聯".into()], 1));
+        assert!(session.csv_header_and_count(picks[1]).is_err());
+        let replacement = zip(&[("part-A.zip", &second), ("part-B.zip", &first)]);
+        assert!(NotionPreviewSession::from_snapshot(&replacement).unwrap()
+            .original_text(picks[0]).is_err());
+    }
+
+    #[test]
+    fn original_text_pages_preserve_utf8_crlf_and_escape_invisible_characters() {
+        let mut input = "a".repeat(RAW_PAGE_BYTES - 1);
+        input.push_str("泥");
+        input.push_str(&"b".repeat(RAW_PAGE_BYTES - 4));
+        input.push_str("\r\n\u{202e}\t\\原文\n");
+        let original = CsvText::new(&input);
+        assert_eq!(original.page_count(), 3);
+        assert_eq!(original.page(1).unwrap().bytes, 0..RAW_PAGE_BYTES - 1);
+        assert_eq!(original.page(2).unwrap().text, format!("泥{}", "b".repeat(RAW_PAGE_BYTES - 4)));
+        let last = original.page(3).unwrap();
+        assert_eq!(last.text, "\r\n\u{202e}\t\\原文\n");
+        assert_eq!(last.display_text(), "\\r\n\\u{202e}\\t\\\\原文\n");
+        assert!(original.page(0).is_none());
+        assert!(original.page(4).is_none());
+        let complete: String = (1..=original.page_count()).map(|i| original.page(i).unwrap().text).collect();
+        assert_eq!(complete, input);
     }
 
     #[test]

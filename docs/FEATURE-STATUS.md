@@ -169,7 +169,7 @@
 | 快速切換器 | 部分 | F7 依標題、來源路徑或完整別名打開指定筆記，也可用 tag:#父層 找含子標籤的匯入筆記。模糊排序、快速新建及新分頁待做。 | [官方](https://obsidian.md/help/plugins/quick-switcher) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 大綱 | 部分 | F8 依標題層級與行號列大綱，可跳到同名標題的精確位置。拖曳重新排序段落待做。 | [官方](https://obsidian.md/help/plugins/outline) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 懸浮頁面預覽 | 未實作 | 沒有上述獨立入口。 | [官方](https://obsidian.md/help/plugins/page-preview) · [window.rs](../src/window.rs) |
-| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可修改既有節點。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
+| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可修改既有節點。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出；仍可個別匯出 .canvas。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 文字節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 檔案節點 | 部分 | 核對 Vault 搬移時，可在同一交易更新綁定該批次的檔案節點。保留原節點 ID、子路徑和未知欄位。原磁碟檔由外部工具管理。自動監聽待做。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 連結節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
@@ -235,7 +235,7 @@
 | 卡片篩選 | 部分 | 兩種卡片可篩文字、完整標籤、類型、標星和目前白板放置狀態。PDF 摘錄另有附件 ID 和頁碼。屬性、日期及保存篩選條件待做。 | [官方](https://wiki.heptabase.com/changelog) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
 | 相關卡片 | 部分 | 筆記可加入多個白板，另有篩選、關聯及搜尋。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [collections.rs](../src/collections.rs) |
 | 白板 | 部分 | 可將筆記卡、圖片和文字依實際尺寸對齊與等距排列，重開後可復原最近一次排列。自由分區幾何與其他物件仍有缺口。 | [官方](https://support.heptabase.com/en/articles/17060792-heptabase-mcp-tool-reference) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
-| 白板獨立矩形與橢圓 | 部分 | 草稿版可新增、以數值調整位置與尺寸，以及刪除指定形狀。原生 Windows 介面驗收及原廠手勢、樣式與匯入相容仍待核對。研究 ZIP 會拒絕匯出含形狀的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_shape_tag_ui.rs](../src/board_shape_tag_ui.rs) |
+| 白板獨立矩形與橢圓 | 部分 | 草稿版可新增、直接拖曳移動、以數值調整位置與尺寸，以及刪除指定形狀。原生 Windows 介面驗收及原廠手勢、樣式與匯入相容仍待核對。研究 ZIP 會拒絕匯出含形狀的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_shape_tag_ui.rs](../src/board_shape_tag_ui.rs) |
 | 白板標籤 | 部分 | 草稿版可新增、移除白板本身的標籤，並以完整標籤找白板，或一併找指定 Vault 的筆記。原生 Windows 介面驗收及原廠匯出匯入仍待核對。研究 ZIP 會拒絕匯出含白板標籤的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_tags.rs](../src/board_tags.rs) |
 | 分區 | 部分 | 可重新命名、整組移動可見成員、收合及展開，並打開來源筆記或 PDF。自由分區幾何待做。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
 | 連線 | 部分 | 同白板連線連到卡片 ID，分區平移後端點仍連到原卡片。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |

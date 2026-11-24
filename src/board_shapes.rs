@@ -46,6 +46,17 @@ impl ShapeRect {
             Err("白板形狀位置或尺寸超出範圍。".into())
         }
     }
+    /// Convert pointer displacement at the starting DPI without changing size.
+    pub(crate) fn moved_by_pointer(self, dx: i32, dy: i32, dpi: u32, max_x: i32) -> Self {
+        let unit = |pixels| i64::from(pixels) * 96 / i64::from(dpi.max(1));
+        let right = i64::from(max_x.max(self.x).clamp(0, 10_000));
+        Self {
+            x: (i64::from(self.x) + unit(dx)).clamp(0, right) as i32,
+            y: (i64::from(self.y) + unit(dy)).clamp(0, 50_000) as i32,
+            ..self
+        }
+    }
+
     pub fn hit(self, kind: ShapeKind, x: i32, y: i32) -> bool {
         let dx = i64::from(x) - i64::from(self.x);
         let dy = i64::from(y) - i64::from(self.y);
@@ -131,6 +142,40 @@ impl Notebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pointer_move_preserves_geometry_through_reopen_and_rejects_stale_drag() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("shape-drag.sqlite3");
+        let original = ShapeRect { x: 55, y: 220, width: 140, height: 80 };
+        let (board, id, sibling, moving_version, target) = {
+            let db = Notebook::open(&path, false)?;
+            let board = db.create_board("拖曳形狀")?;
+            let id = db.create_board_shape(board, ShapeKind::Ellipse, original)?;
+            let sibling = db.create_board_shape(board, ShapeKind::Rectangle, original)?;
+            let expected = db.board_shapes(board)?[0];
+            let target = expected.rect.moved_by_pointer(90, -60, 144, 400);
+            assert_eq!(target, ShapeRect { x: 115, y: 180, ..original });
+            assert_eq!(original.moved_by_pointer(i32::MAX, i32::MIN, 96, 400),
+                ShapeRect { x: 400, y: 0, ..original });
+            assert_eq!(original.moved_by_pointer(0, 0, 192, 20), original);
+            // Motion is preview-only until the app calls the versioned update.
+            assert_eq!(db.board_shapes(board)?[0], expected);
+            db.update_board_shape(board, id, expected.version, target)?;
+            (board, id, sibling, expected.version, target)
+        };
+        {
+            let reopened = Notebook::open(&path, false)?;
+            assert!(reopened.update_board_shape(board, id, moving_version, original).is_err());
+            let shapes = reopened.board_shapes(board)?;
+            assert_eq!(shapes.len(), 2);
+            assert_eq!((shapes[0].id, shapes[0].kind, shapes[0].rect),
+                (id, ShapeKind::Ellipse, target));
+            assert_eq!((shapes[1].id, shapes[1].rect), (sibling, original));
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn shape_geometry_and_compare_and_swap_are_scoped_to_board() {
         let db = Connection::open_in_memory().unwrap();

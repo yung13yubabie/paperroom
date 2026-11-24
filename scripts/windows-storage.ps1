@@ -143,15 +143,73 @@ function Check-Files($Root, $Phase, $RelativeDb, $DuringRun) {
 
 $base = Join-Path ([IO.Path]::GetTempPath()) ('paperroom-smoke-' + [guid]::NewGuid())
 try {
-    foreach ($mode in 'default','portable') {
+    # Refuse ambiguous startup instead of creating state in an unintended folder.
+    foreach ($invalidMode in 'missing-local','relative-local','marker-conflict') {
+        $invalidRoot = Join-Path $base ('invalid-' + [guid]::NewGuid())
+        $bin = Join-Path $invalidRoot 'bin'
+        $temp = Join-Path $invalidRoot 'temp'
+        $working = Join-Path $invalidRoot 'working'
+        foreach ($dir in $bin,$temp,$working) { [void][IO.Directory]::CreateDirectory($dir) }
+        Copy-Item -LiteralPath $Exe -Destination $bin
+        $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'paperroom.exe'))
+        $info.UseShellExecute = $false
+        $info.WorkingDirectory = $working
+        $info.Environment['TEMP'] = $temp
+        $info.Environment['TMP'] = $temp
+        $markerConflict = Join-Path $bin 'paperroom-data'
+        switch ($invalidMode) {
+            'missing-local' { [void]$info.Environment.Remove('LOCALAPPDATA') }
+            'relative-local' { $info.Environment['LOCALAPPDATA'] = 'relative-local' }
+            'marker-conflict' {
+                $info.Environment['LOCALAPPDATA'] = Join-Path $invalidRoot 'local'
+                [IO.File]::WriteAllText($markerConflict, 'preserve the existing file')
+            }
+        }
+        $bad = [Diagnostics.Process]::Start($info)
+        try {
+            $sawDialog = $false
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (!$bad.HasExited) {
+                $bad.Refresh()
+                if ($bad.MainWindowTitle -eq '紙間無法啟動' -and
+                    $bad.MainWindowHandle -ne [IntPtr]::Zero) {
+                    $sawDialog = $true
+                    [void]$bad.CloseMainWindow()
+                    break
+                }
+                if ([DateTime]::UtcNow -gt $deadline) { throw "$invalidMode did not produce the startup error dialog." }
+                Start-Sleep -Milliseconds 100
+            }
+            if (!$sawDialog) { throw "$invalidMode exited without an observed startup error dialog." }
+            if (!$bad.WaitForExit(10000) -or $bad.ExitCode -ne 1) { throw "$invalidMode should exit with status 1." }
+            if ($invalidMode -eq 'marker-conflict') {
+                if ([IO.File]::ReadAllText($markerConflict) -cne 'preserve the existing file') {
+                    throw 'An invalid portable marker was modified.'
+                }
+                [IO.File]::Delete($markerConflict)
+            }
+            Check-Files $invalidRoot "$invalidMode after failed startup" $null $false
+            $extraDirs = @(Get-ChildItem -LiteralPath $invalidRoot -Directory -Recurse -Force |
+                ForEach-Object { [IO.Path]::GetRelativePath($invalidRoot, $_.FullName) } |
+                Where-Object { $_ -notin @('bin','temp','working') })
+            if ($extraDirs.Count -ne 0) { throw 'Invalid startup created additional directories.' }
+        } finally {
+            if (!$bad.HasExited) { $bad.Kill(); $bad.WaitForExit() }
+            $bad.Dispose()
+        }
+    }
+    foreach ($mode in 'default','portable','portable-marker') {
         $root = Join-Path $base $mode
         $bin = Join-Path $root 'bin'
         $local = Join-Path $root 'local'
         $temp = Join-Path $root 'temp'
         foreach ($dir in $bin,$local,$temp) { [void][IO.Directory]::CreateDirectory($dir) }
         Copy-Item -LiteralPath $Exe -Destination $bin
-        $portable = $mode -eq 'portable'
-        $relative = if ($portable) { 'bin\paperroom-data\notes.sqlite3' } else { 'local\Paperroom\notes.sqlite3' }
+        $portable = $mode -eq 'portable' # Pass --portable only in the explicit mode.
+        if ($mode -eq 'portable-marker') {
+            [void][IO.Directory]::CreateDirectory((Join-Path $bin 'paperroom-data'))
+        }
+        $relative = if ($mode -ne 'default') { 'bin\paperroom-data\notes.sqlite3' } else { 'local\Paperroom\notes.sqlite3' }
         $db = Join-Path $root $relative
         $process = $null
         # root contains only the synthetic bin, local and temp directories.
@@ -165,7 +223,7 @@ try {
                 if ([DateTime]::UtcNow -gt $deadline) { throw 'Watcher missed synthetic database creation.' }
                 Start-Sleep -Milliseconds 50
             }
-            if ($Screenshot -and !$portable) {
+            if ($Screenshot -and $mode -eq 'default') {
                 try { Save-FirstWindow $process.MainWindowHandle $Screenshot }
                 catch { Write-Warning "Optional first-window capture: $_" }
             }

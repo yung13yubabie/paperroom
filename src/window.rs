@@ -165,6 +165,7 @@ struct Extras {
     objects: Vec<crate::store::board_objects::Object>,
     mind_map_nodes: Vec<crate::store::mind_map::MindNode>,
     board_shapes: Vec<crate::store::board_shapes::Shape>,
+    board_shape_drag: Option<board_shape_tag_ui::BoardShapeDrag>,
     object_drag: Option<(i64, i32, i32)>,
     board_selected: HashSet<BoardItem>,
     board_batch_drag: Option<board_objects_ui::BoardBatchDrag>,
@@ -258,13 +259,12 @@ fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<Path
         .parent()
         .ok_or("找不到程式所在資料夾。")?
         .join("paperroom-data");
-    if portable {
-        return Ok(adjacent);
-    }
     match std::fs::metadata(&adjacent) {
         Ok(metadata) if metadata.is_dir() => return Ok(adjacent),
+        Ok(_) => return Err("程式旁的 paperroom-data 必須是資料夾。紙間沒有切換到其他資料位置。".into()),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
+        Err(_) if portable => return Ok(adjacent),
+        Err(_) => {}
     }
     let local = local.filter(|path| path.is_absolute())
         .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
@@ -358,8 +358,6 @@ unsafe fn start() -> Result<()> {
         check_workspace_volume(&dir, |root| {
             windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr())
         })?;
-        std::fs::create_dir_all(&dir)?;
-        let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let module = GetModuleHandleW(null());
         if LoadLibraryExW(
             wide("Msftedit.dll").as_ptr(),
@@ -403,6 +401,9 @@ unsafe fn start() -> Result<()> {
             return Err(std::io::Error::last_os_error().into());
         }
         let widgets = Widgets::create(hwnd, module)?;
+        // Native editor initialization must succeed before writing workspace state.
+        std::fs::create_dir_all(&dir)?;
+        let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let app = Box::new(RefCell::new(App {
             hwnd,
             widgets,
@@ -817,6 +818,9 @@ impl App {
 
     unsafe fn present(&mut self) {
         unsafe {
+            if !self.extras.board || self.extras.workspace.is_some() {
+                self.cancel_board_shape_drag();
+            }
             if (!self.extras.board || self.extras.workspace.is_some())
                 && self.extras.board_drop_target.is_some()
             {
@@ -1629,7 +1633,7 @@ impl App {
                 return self.block_menu(true);
             }
             if msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE as usize
-                && (self.cancel_workspace_drag() || self.cancel_board_selection())
+                && (self.cancel_workspace_drag() || self.cancel_board_shape_drag() || self.cancel_board_selection())
             {
                 return true;
             }
@@ -2011,6 +2015,7 @@ impl App {
 
     unsafe fn select_board(&mut self, id: i64, title: String) -> Result<()> {
         unsafe {
+            self.cancel_board_shape_drag();
             self.cancel_board_selection();
             let previous = self.extras.board_selection.replace((id, title));
             if let Err(error) = self.refresh_board() {
@@ -2063,6 +2068,7 @@ impl App {
         unsafe {
             self.mutate(|app| {
                 app.cancel_workspace_drag();
+                app.cancel_board_shape_drag();
                 app.cancel_board_selection();
                 app.extras.board_drop_target = None;
                 app.extras.workspace = None;
@@ -2126,6 +2132,9 @@ impl App {
             }
             let x = lp as u16 as i16 as i32;
             let y = (lp >> 16) as u16 as i16 as i32;
+            if self.board_shape_drag_input(msg, x, y) {
+                return;
+            }
             if self.board_batch_input(msg, wp, x, y) {
                 return;
             }
@@ -2144,6 +2153,8 @@ impl App {
                             y - area.top - self.scaled(card.y - self.extras.scroll),
                         ));
                         SetCapture(self.hwnd);
+                    } else if let Some(shape) = self.board_shape_at(x, y) {
+                        self.begin_board_shape_drag(shape, x, y);
                     }
                 }
                 WM_MOUSEMOVE => {
@@ -2757,6 +2768,12 @@ mod tests {
         assert!(workspace_directory(&exe, false, None).is_err());
         assert_eq!(workspace_directory(&exe, false, Some(local.clone()))?, local.join("Paperroom"));
         assert_eq!(workspace_directory(&exe, true, None)?, adjacent);
+        std::fs::write(&adjacent, "existing data")?;
+        assert!(workspace_directory(&exe, false, Some(local.clone())).is_err());
+        assert!(workspace_directory(&exe, true, None).is_err());
+        assert_eq!(std::fs::read_to_string(&adjacent)?, "existing data");
+        assert!(!local.exists());
+        std::fs::remove_file(&adjacent)?;
         std::fs::create_dir(&adjacent)?;
         assert_eq!(workspace_directory(&exe, false, Some(local))?, adjacent);
         std::fs::remove_dir_all(root)?;

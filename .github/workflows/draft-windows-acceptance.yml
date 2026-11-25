@@ -153,9 +153,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: 461900aa1a62b49b238cc99ea06d9dc591844e18
-      PINNED_EXE_SHA: cf9156edca0805e5c3866c4e01625cef3030011b8a812ea5b593db343c80ae2d
-      PINNED_ZIP_SHA: 2911d2aba5f891e961f221dff6c06ea188baa16b249a089137699bcb31be1956
+      PINNED_SOURCE: c08ff78daefae72f93fd09e421b0f3e616e1d230
+      PINNED_EXE_SHA: ae33a30d36ee2ef62c5197ecd13482cc5b6a88ea193e0c3ff525c4cf29c13d22
+      PINNED_ZIP_SHA: cce012ff858427540fe05421a54503ac3498040061dff4c43d588b4e2213ef82
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -170,7 +170,7 @@ jobs:
           git merge-base --is-ancestor $env:PINNED_SOURCE $head
           if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
           $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
-          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
+          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1', 'scripts/windows-about-notices.ps1')
           if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
           }
@@ -180,11 +180,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15013248009"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15016141093"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45596799775 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45600579227 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'
@@ -209,7 +209,11 @@ jobs:
               $zip.Dispose()
             }
             Remove-Item Env:GH_TOKEN
+            $aboutError = $null
+            try { ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA }
+            catch { $aboutError = $_; Write-Host "Native About failed: $($_.Exception.Message)" }
             ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA
+            if ($aboutError) { throw $aboutError }
           } finally {
             Remove-Item -LiteralPath $root -Recurse -Force
           }

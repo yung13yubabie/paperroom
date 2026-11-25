@@ -124,10 +124,12 @@ public static class PaperroomAbout {
                     return;
                 }
                 // Scroll the live popup only, never another foreground window.
-                if(row.bottom<bounds.bottom || !Aim(popup,bounds.Center))
+                var down=bounds.Center;
+                down.y=bounds.bottom-7;
+                if(point.y<bounds.bottom-14 || !Aim(popup,down))
                     throw new Exception("About row not hittable: index="+i+" hit="+lastHit+" row="+row+" popup="+bounds+" "+State(pid));
                 MouseInput(0x800);
-                System.Threading.Thread.Sleep(100);
+                System.Threading.Thread.Sleep(180);
             }
             throw new Exception("About remained outside the hittable popup after bounded scrolling. Last hit="+lastHit+" "+State(pid));
         }

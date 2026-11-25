@@ -357,8 +357,11 @@ public static class PaperroomHighlightGui {
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(0x11, 0, 0), Key(0x5A, 0, 0), Key(0x5A, 0, 2), Key(0x11, 0, 2) });
     }
+    public static bool WorkspaceInForeground(IntPtr owner, uint pid) {
+        return ForegroundIsOwned(owner, pid) && GetForegroundWindow() == owner;
+    }
     public static void WorkspaceSearchKey(IntPtr owner, uint pid) {
-        if (!ForegroundIsOwned(owner, pid) || GetForegroundWindow() != owner)
+        if (!WorkspaceInForeground(owner, pid))
             throw new InvalidOperationException("Expected the isolated workspace before Ctrl+Shift+F.");
         foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
@@ -607,26 +610,32 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         34 { 'vault.zip' }
         default { '' }
     } }
-    try {
-        $edit = Wait-For "unique native file name field for $Caption" {
-            [PaperroomHighlightGui]::FilenameField($dialog, $process.Id, $defaultName)
-        }
-    } catch {
-        Write-Host ([PaperroomHighlightGui]::DescribeFilenameControls($dialog, $process.Id))
-        throw
-    }
-    Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
     $saving = $CanvasSave -or $Item -notin 1, 11
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
-        $point = [PaperroomHighlightGui]::FilenamePoint($dialog, $process.Id, $edit)
-        [PaperroomHighlightGui]::MouseAction($window, $process.Id, $edit, $point, 0)
-        $null = Wait-For "native file name focus for $Caption" {
-            [PaperroomHighlightGui]::FilenameHasFocus($window, $process.Id, $dialog, $edit)
+        # Explorer can replace its edit while populating the save dialog.
+        $target = Wait-For "stable native file name edit for $Caption" {
+            $edit = [PaperroomHighlightGui]::FilenameField($dialog, $process.Id, $defaultName)
+            if ($edit -eq [IntPtr]::Zero) { return $null }
+            try {
+                $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
+                [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+            } catch {
+                if ($_.Exception.Message -match 'owned, visible file name edit|edit is not exposed|point is no longer|pointer target changed') {
+                    return $null
+                }
+                throw
+            }
+            if ([PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)) {
+                [pscustomobject]@{ Edit=$edit; Point=$point }
+            }
         }
+        $edit = $target.Edit
+        $point = $target.Point
+        Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
         [PaperroomHighlightGui]::TypeFilename($window, $process.Id, $dialog, $edit, $typed)
         $null = Wait-For "exact physical path entry for $Caption" {
             [PaperroomHighlightGui]::Read($edit) -ceq $typed
@@ -892,7 +901,12 @@ function Assert-OutlineSelection([uint32]$Item, [string]$MenuLabel, [string]$Exp
 }
 function Open-WorkspaceSearch([switch]$Menu) {
     if ($Menu) { Native-Menu 109 35 '全域搜尋筆記…' }
-    else { [PaperroomHighlightGui]::WorkspaceSearchKey($window,$process.Id) }
+    else {
+        $null = Wait-For 'main workspace owns foreground before Ctrl+Shift+F' {
+            [PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)
+        }
+        [PaperroomHighlightGui]::WorkspaceSearchKey($window,$process.Id)
+    }
     Wait-For 'native workspace search dialog' {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','全域搜尋筆記',1)
     }

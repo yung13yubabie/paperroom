@@ -266,9 +266,7 @@ impl FilterRule {
                 }
             }
             if matches!(self.kind, FilterKind::Formula(_)) {
-                let exists = db.prepare_cached("SELECT 1 FROM collection_formulas WHERE collection_id=?1 AND name=?2")?
-                    .exists(params![collection, self.key])?;
-                if !exists { return Err("找不到這個集合中的公式。請重新選取。".into()); }
+                require_formula(db, collection, &self.key)?;
             }
         } else {
             self.key.clear();
@@ -373,11 +371,138 @@ fn decode_filters(raw: &Json) -> rusqlite::Result<Vec<FilterRule>> {
     }).collect()
 }
 
+fn require_formula(db: &Connection, collection: i64, name: &str) -> Result<()> {
+    let exists = db.prepare_cached("SELECT 1 FROM collection_formulas WHERE collection_id=?1 AND name=?2")?
+        .exists(params![collection, name])?;
+    if !exists { return Err(format!("找不到集合公式「{name}」。請重新選取。").into()); }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SortSource {
+    Property(Option<PropertyType>),
+    Formula(Option<PropertyType>),
+    RollupCount,
+    RollupSum(String),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SortRule {
     pub key: String,
-    pub kind: Option<PropertyType>,
+    pub source: SortSource,
     pub descending: bool,
+}
+
+impl SortRule {
+    pub fn same_column(&self, other: &Self) -> bool {
+        self.key == other.key && match (&self.source, &other.source) {
+            (SortSource::Property(_), SortSource::Property(_))
+            | (SortSource::Formula(_), SortSource::Formula(_))
+            | (SortSource::RollupCount, SortSource::RollupCount) => true,
+            (SortSource::RollupSum(a), SortSource::RollupSum(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match &self.source {
+            SortSource::Property(_) => self.key.clone(),
+            SortSource::Formula(_) => format!("公式「{}」", self.key),
+            SortSource::RollupCount => format!("「{}」的彙總筆數", self.key),
+            SortSource::RollupSum(field) => format!("「{}」的「{field}」加總", self.key),
+        }
+    }
+
+    fn encode(&self) -> Json {
+        let code = match &self.source {
+            SortSource::Property(kind) => kind.map(PropertyType::code),
+            SortSource::Formula(kind) => Some(FilterKind::Formula(*kind).code()),
+            SortSource::RollupCount => Some(FilterKind::RollupCount.code()),
+            SortSource::RollupSum(field) =>
+                return json!([self.key, FilterKind::RollupSum.code(), self.descending, field]),
+        };
+        json!([self.key, code, self.descending])
+    }
+
+    fn decode(value: &Json) -> rusqlite::Result<Self> {
+        let bad = || rusqlite::Error::InvalidQuery;
+        let parts = value.as_array().ok_or_else(bad)?;
+        let [key, code, descending, rest @ ..] = parts.as_slice() else { return Err(bad()); };
+        let key = key.as_str().filter(|key| key_checked(key).is_ok_and(|canonical| canonical == *key)).ok_or_else(bad)?;
+        let source = match (code.is_null(), rest) {
+            (true, []) => SortSource::Property(None),
+            (false, []) => match FilterKind::decode(code.as_str().ok_or_else(bad)?)? {
+                FilterKind::Typed(kind) => SortSource::Property(Some(kind)),
+                FilterKind::Formula(kind) => SortSource::Formula(kind),
+                FilterKind::RollupCount => SortSource::RollupCount,
+                _ => return Err(bad()),
+            },
+            (false, [field]) if code.as_str() == Some(FilterKind::RollupSum.code()) => {
+                let field = field.as_str().filter(|key| key_checked(key).is_ok_and(|canonical| canonical == *key))
+                    .ok_or_else(bad)?;
+                SortSource::RollupSum(field.to_owned())
+            }
+            _ => return Err(bad()),
+        };
+        Ok(Self { key: key.to_owned(), source, descending: descending.as_bool().ok_or_else(bad)? })
+    }
+
+    fn validate(&mut self, tx: &Transaction<'_>, collection: i64) -> Result<()> {
+        self.key = key_checked(&self.key)?.to_owned();
+        match &mut self.source {
+            SortSource::Property(kind) if lookup(tx, &self.key)? != *kind =>
+                Err("排序欄位型別已變更。請移除該規則並重新選取。".into()),
+            SortSource::Formula(_) => require_formula(tx, collection, &self.key),
+            SortSource::RollupSum(field) => {
+                *field = key_checked(field)?.to_owned();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn value_type(&self) -> Option<PropertyType> {
+        match &self.source {
+            SortSource::Property(kind) | SortSource::Formula(kind) => *kind,
+            SortSource::RollupCount | SortSource::RollupSum(_) => Some(PropertyType::Number),
+        }
+    }
+
+    fn sort_value(
+        &self, note: i64, columns: &HashMap<&str, HashMap<i64, String>>,
+        formulas: &CompiledFields, derived: Option<&DerivedRow<'_>>,
+    ) -> std::result::Result<Option<String>, String> {
+        if let SortSource::Property(kind) = self.source {
+            let raw = columns[self.key.as_str()].get(&note);
+            return Ok(match (kind, raw) {
+                (Some(kind), Some(raw)) => kind.normalized(raw),
+                (None, Some(raw)) if !raw.is_empty() => Some(raw.clone()),
+                _ => None,
+            });
+        }
+        let row = derived.ok_or("找不到排序欄位的來源資料列。")?;
+        let value = match &self.source {
+            SortSource::Formula(expected) => match (expected, row.formula(&self.key, compiled_formula(formulas, &self.key)?)?) {
+                (Some(PropertyType::Number), Value::Num(value)) => computed_decimal(value)?,
+                (Some(PropertyType::Checkbox), Value::Bool(value)) => value.to_string(),
+                (Some(PropertyType::Date), Value::Date(value)) => value,
+                (None, Value::Str(value)) if value.trim().is_empty() => return Ok(None),
+                (None, Value::Str(value)) => value,
+                _ => return Err("公式結果的型別與排序設定不符。".to_owned()),
+            },
+            SortSource::RollupCount => row.count(&self.key)?.to_string(),
+            SortSource::RollupSum(field) => computed_decimal(row.sum(&self.key, field)?)?,
+            SortSource::Property(_) => unreachable!("property handled before evaluating derived rows"),
+        };
+        Ok(Some(value))
+    }
+}
+
+fn computed_decimal(value: f64) -> std::result::Result<String, String> {
+    if !value.is_finite() { return Err("排序數值超出範圍。".to_owned()); }
+    // Display uses decimal notation. Normalize negative zero for the exact
+    // decimal comparator shared with declared numeric properties.
+    Ok(if value == 0.0 { "0".into() } else { value.to_string() })
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -398,9 +523,7 @@ impl ViewRules {
     }
 
     fn encode(&self) -> String {
-        let sorts = self.sorts.iter().map(|rule|
-            json!([rule.key, rule.kind.map(PropertyType::code), rule.descending])
-        ).collect::<Vec<_>>();
+        let sorts = self.sorts.iter().map(SortRule::encode).collect::<Vec<_>>();
         let mut root = vec![json!(self.mode == FilterMode::Any), json!(encode_filters(&self.filters)), json!(sorts)];
         // Preserve the original typed flat tuple when it can express the current filter.
         if !self.groups.is_empty() {
@@ -411,7 +534,7 @@ impl ViewRules {
 
     fn decode(raw: &str) -> rusqlite::Result<Self> {
         let invalid = || rusqlite::Error::InvalidQuery;
-        if raw.len() > 7 * (MAX_FILTERS * (super::MAX_VALUE_BYTES + 2 * super::MAX_KEY_BYTES) + MAX_SORTS * super::MAX_KEY_BYTES + 1024) {
+        if raw.len() > 7 * (MAX_FILTERS * (super::MAX_VALUE_BYTES + 2 * super::MAX_KEY_BYTES) + 2 * MAX_SORTS * super::MAX_KEY_BYTES + 1024) {
             return Err(invalid());
         }
         let json: Json = serde_json::from_str(raw).map_err(|_| invalid())?;
@@ -419,8 +542,7 @@ impl ViewRules {
         if !(3..=4).contains(&root.len()) { return Err(invalid()); }
         let mode = if root[0].as_bool().ok_or_else(invalid)? { FilterMode::Any } else { FilterMode::All };
         let filters = decode_filters(&root[1])?;
-        type StoredSort = (String, Option<String>, bool);
-        let sorts: Vec<StoredSort> = serde_json::from_value(root[2].clone()).map_err(|_| invalid())?;
+        let sorts = root[2].as_array().ok_or_else(invalid)?;
         if sorts.len() > MAX_SORTS { return Err(invalid()); }
         let mut budget = MAX_FILTER_GROUPS;
         let groups = if let Some(groups) = root.get(3) {
@@ -429,10 +551,7 @@ impl ViewRules {
         } else { Vec::new() };
         let root = Self {
             mode, filters, groups,
-            sorts: sorts.into_iter().map(|(key, kind, descending)| {
-                let kind = kind.as_deref().map(PropertyType::decode).transpose()?;
-                Ok(SortRule { key, kind, descending })
-            }).collect::<rusqlite::Result<_>>()?,
+            sorts: sorts.iter().map(SortRule::decode).collect::<rusqlite::Result<_>>()?,
         };
         if !root.counts_are_valid() { return Err(invalid()); }
         Ok(root)
@@ -456,24 +575,39 @@ impl ViewRules {
         }
         for rule in &mut self.filters { rule.validate(tx, collection)?; }
         for group in &mut self.groups { validate_group(group, 1, tx, collection)?; }
-        let mut keys = HashSet::new();
-        for rule in &mut self.sorts {
-            rule.key = key_checked(&rule.key)?.to_owned();
-            if !keys.insert(rule.key.clone()) { return Err("同一個欄位只能排序一次。".into()); }
-            if lookup(tx, &rule.key)? != rule.kind {
-                return Err("排序欄位型別已變更。請移除該規則並重新選取。".into());
+        for index in 0..self.sorts.len() {
+            let (prior, next) = self.sorts.split_at_mut(index);
+            let rule = &mut next[0];
+            rule.validate(tx, collection)?;
+            if prior.iter().any(|previous| previous.same_column(rule)) {
+                return Err("同一個欄位只能排序一次。".into());
             }
         }
         Ok(())
     }
 }
 
-type CompiledFilters = HashMap<String, std::result::Result<CompiledFormula, String>>;
+type CompiledFields = HashMap<String, std::result::Result<CompiledFormula, String>>;
+
+fn compiled_formula<'a>(formulas: &'a CompiledFields, name: &str) -> std::result::Result<&'a CompiledFormula, String> {
+    formulas.get(name).ok_or_else(|| format!("找不到集合公式「{name}」。"))?.as_ref().map_err(Clone::clone)
+}
+
 
 #[derive(Default)]
-pub(crate) struct FilterProblems {
+pub(crate) struct RuleProblems {
     pub entries: Vec<String>,
     pub omitted: usize,
+}
+
+impl RuleProblems {
+    fn record(&mut self, note: i64, operation: &str, field: &str, error: &str) {
+        if self.entries.len() < 64 {
+            self.entries.push(format!("筆記 #{note}　{operation}　{field}　{error}"));
+        } else {
+            self.omitted += 1;
+        }
+    }
 }
 
 struct PreparedFilter<'a> {
@@ -512,7 +646,7 @@ impl<'a> PreparedFilter<'a> {
     }
 
     fn matches(&self, row: &Row, status: &str, columns: &HashMap<&str, HashMap<i64, String>>,
-               formulas: &CompiledFilters, derived: Option<&DerivedRow<'_>>, today: Option<CalendarDay>, issue: &mut impl FnMut(&FilterRule, &str)) -> bool {
+               formulas: &CompiledFields, derived: Option<&DerivedRow<'_>>, today: Option<CalendarDay>, issue: &mut impl FnMut(&FilterRule, &str)) -> bool {
         if self.filters.is_empty() && self.groups.is_empty() { return true; }
         let want_all = self.mode == FilterMode::All;
         for (rule, target) in &self.filters {
@@ -569,7 +703,7 @@ fn text_match(rule: &FilterRule, raw: Option<&str>, target: Option<&str>, today:
 }
 
 fn derived_match(
-    rule: &FilterRule, target: Option<&str>, formulas: &CompiledFilters, row: Option<&DerivedRow<'_>>, today: Option<CalendarDay>,
+    rule: &FilterRule, target: Option<&str>, formulas: &CompiledFields, row: Option<&DerivedRow<'_>>, today: Option<CalendarDay>,
 ) -> std::result::Result<bool, String> {
     use FilterOperator::*;
     let row = row.ok_or("找不到衍生欄位的來源資料列。")?;
@@ -585,7 +719,7 @@ fn derived_match(
     };
     match rule.kind {
         FilterKind::Formula(expected) => {
-            let code = formulas.get(&rule.key).ok_or("找不到集合公式。")?.as_ref().map_err(Clone::clone)?;
+            let code = compiled_formula(formulas, &rule.key)?;
             match (expected, row.formula(&rule.key, code)?) {
                 (Some(PropertyType::Number), Value::Num(value)) => number_matches(value),
                 (Some(PropertyType::Checkbox), Value::Bool(value)) =>
@@ -807,7 +941,7 @@ impl CollectionView {
     pub fn sort_rules(&self) -> Vec<SortRule> {
         if let Some(rules) = &self.rules { return rules.sorts.clone(); }
         self.presentation.sort_key.as_ref().map(|key| SortRule {
-            key: key.clone(), kind: self.presentation.sort_kind, descending: self.presentation.sort_desc,
+            key: key.clone(), source: SortSource::Property(self.presentation.sort_kind), descending: self.presentation.sort_desc,
         }).into_iter().collect()
     }
 }
@@ -936,6 +1070,13 @@ impl Notebook {
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)", [destination], |row| row.get(0),
         )?;
         if !exists { return Err("找不到目標集合。".into()); }
+        if destination != origin {
+            for rule in source.sort_rules() {
+                if matches!(rule.source, SortSource::Formula(_)) {
+                    require_formula(&tx, destination, &rule.key)?;
+                }
+            }
+        }
         require_available_name(&tx, destination, name, None)?;
         let changed = tx.execute(
             "INSERT INTO collection_views(collection_id,name,layout,status,keyword,filter_key,filter_kind,filter_value,
@@ -1092,14 +1233,14 @@ impl Notebook {
         self.filter_collection_rows(collection, view, None, None)
     }
 
-    pub(crate) fn collection_filter_problems(&self, collection: i64, view: &CollectionView) -> Result<FilterProblems> {
-        let mut problems = FilterProblems::default();
+    pub(crate) fn collection_rule_problems(&self, collection: i64, view: &CollectionView) -> Result<RuleProblems> {
+        let mut problems = RuleProblems::default();
         self.filter_collection_rows(collection, Some(view), Some(&mut problems), None)?;
         Ok(problems)
     }
 
     fn filter_collection_rows(
-        &self, collection: i64, view: Option<&CollectionView>, mut issues: Option<&mut FilterProblems>,
+        &self, collection: i64, view: Option<&CollectionView>, mut issues: Option<&mut RuleProblems>,
         as_of: Option<CalendarDay>,
     ) -> Result<Vec<(Row,String)>> {
         let Some(view) = view else { return self.collection_rows(collection) };
@@ -1110,8 +1251,14 @@ impl Notebook {
         } else { None };
         let mut keys = HashSet::new();
         let mut formula_names = HashSet::new();
-        let needs_derived = filters.sources(&mut keys, &mut formula_names);
-        keys.extend(rules.sorts.iter().map(|rule| rule.key.as_str()));
+        let mut needs_derived = filters.sources(&mut keys, &mut formula_names);
+        for rule in &rules.sorts {
+            match &rule.source {
+                SortSource::Property(_) => { keys.insert(&rule.key); }
+                SortSource::Formula(_) => { formula_names.insert(&rule.key); needs_derived = true; }
+                _ => needs_derived = true,
+            }
+        }
         let snapshot = (needs_derived && self.connection.is_autocommit())
             .then(|| self.connection.unchecked_transaction()).transpose()?;
         let mut rows = self.collection_rows(collection)?;
@@ -1127,39 +1274,31 @@ impl Notebook {
                 .map(|(name, expression)| (name, CompiledFormula::new(&expression).map_err(|error| error.to_string()))).collect();
             (formulas, self.property_definitions()?.into_iter().collect())
         };
-        rows.retain(|(row, status)| {
+        let mut ordered = rows.into_iter().filter_map(|item| {
+            let (row, status) = &item;
             let derived = needs_derived.then(|| DerivedRow::new(self, row.id, &types));
-            filters.matches(row, status, &columns, &formulas, derived.as_ref(), today, &mut |rule, error| {
-                if let Some(issues) = issues.as_deref_mut() {
-                    if issues.entries.len() < 64 {
-                        issues.entries.push(format!("筆記 #{}　{}　{error}", row.id, rule.label()));
-                    } else { issues.omitted += 1; }
-                }
-            })
-        });
-        if let Some(snapshot) = snapshot { snapshot.commit()?; }
-        if rules.sorts.is_empty() {
-            if view.presentation.group_key.is_some() {
-                rows.sort_by(|(a,_),(b,_)| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
-            }
-            return Ok(rows);
-        }
-        let mut ordered = rows.into_iter().map(|item| {
-            let values = rules.sorts.iter().map(|rule| {
-                let raw = columns[rule.key.as_str()].get(&item.0.id)?;
-                match rule.kind {
-                    Some(kind) => kind.normalized(raw),
-                    None if !raw.is_empty() => Some(raw.clone()),
-                    None => None,
+            let matches = filters.matches(row, status, &columns, &formulas, derived.as_ref(), today, &mut |rule, error| {
+                if let Some(issues) = issues.as_deref_mut() { issues.record(row.id, "篩選", &rule.label(), error); }
+            });
+            if !matches { return None; }
+            let values = rules.sorts.iter().map(|rule| match rule.sort_value(row.id, &columns, &formulas, derived.as_ref()) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(issues) = issues.as_deref_mut() { issues.record(row.id, "排序", &rule.label(), &error); }
+                    None
                 }
             }).collect::<Vec<_>>();
-            (item, values)
+            Some((item, values))
         }).collect::<Vec<_>>();
+        if let Some(snapshot) = snapshot { snapshot.commit()?; }
+        if rules.sorts.is_empty() && view.presentation.group_key.is_none() {
+            return Ok(ordered.into_iter().map(|(item, _)| item).collect());
+        }
         ordered.sort_by(|((left, _), a), ((right, _), b)| {
             for ((a, b), rule) in a.iter().zip(b).zip(&rules.sorts) {
                 let order = match (a, b) {
                     (Some(a), Some(b)) => {
-                        let order = compare_value(rule.kind, a, b);
+                        let order = compare_value(rule.value_type(), a, b);
                         if rule.descending { order.reverse() } else { order }
                     }
                     (Some(_), None) => Ordering::Less,
@@ -1531,7 +1670,7 @@ mod tests {
             Ok(result)
         };
         assert_eq!(ids(&db,&saved,"2028-02-29")?,[candidates[1],candidates[3]]);
-        let mut problems = FilterProblems::default();
+        let mut problems = RuleProblems::default();
         db.filter_collection_rows(collection,Some(&saved),Some(&mut problems),CalendarDay::parse("2028-02-29"))?;
         assert_eq!(problems.entries.len(),2);
         drop(db);
@@ -1572,6 +1711,104 @@ mod tests {
         assert_eq!(day("2029-01-01").ordinal()-day("2028-12-31").ordinal(),1);
         drop(db);
         std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn saved_derived_sort_uses_live_values_keeps_errors_last_and_reopens() -> Result<()> {
+        use SortSource::{Formula, RollupCount, RollupSum};
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("notes.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let collection = db.create_collection("審片")?;
+        let dest = db.create_collection("剪輯")?;
+        let a = db.add(None, "A", "")?;
+        let b = db.add(None, "B", "")?;
+        let zero = db.add(None, "零", "")?;
+        let bad = db.add(None, "壞", "")?;
+        let hidden = db.add(None, "排除", "")?;
+        let high = db.add(None, "同名明細", "")?;
+        let low = db.add(None, "同名明細", "")?;
+        for (note, rank) in [(a, "5"), (b, "5"), (zero, "0"), (bad, "文字"), (hidden, "999")] {
+            db.set_property(note, "順位", Some(rank))?;
+            db.add_to_collection(collection, note, if note == hidden { "隱藏" } else { "待處理" })?;
+        }
+        for (note, hours) in [(high, "10"), (low, "2")] {
+            db.set_property(note, "工時", Some(hours))?;
+        }
+        db.compare_set_property_type("順位", None, Some(PropertyType::Number))?;
+        db.set_relation(a, "明細", high, true)?;
+        db.set_relation(b, "明細", low, true)?;
+        db.add_collection_formula(collection, "計算順位", r#"typed("順位")"#)?;
+        let view = db.create_collection_view(collection, "排序", CollectionLayout::Table, "", "")?;
+        let filter = FilterRule { key: String::new(), kind: FilterKind::Status,
+            operator: FilterOperator::Equal, value: "待處理".into(), argument: None };
+        let rule = |key: &str, source, descending| SortRule { key: key.into(), source, descending };
+        let rules = ViewRules {
+            filters: vec![filter],
+            sorts: vec![rule("計算順位", Formula(Some(PropertyType::Number)), true),
+                rule("明細", RollupSum("工時".into()), false), rule("明細", RollupCount, true)],
+            ..Default::default()
+        };
+        db.set_collection_view_rules(collection, &view, rules.clone())?;
+        let view = db.collection_views(collection)?.remove(0);
+        let ids = |db: &Notebook, view: &CollectionView| -> Result<Vec<i64>> {
+            Ok(db.filtered_collection_rows(collection, Some(view))?.into_iter().map(|(row, _)| row.id).collect())
+        };
+        assert_eq!(ids(&db, &view)?, [b, a, zero, bad]);
+        let errors = db.collection_rule_problems(collection, &view)?;
+        assert_eq!(errors.entries.len(), 1);
+        assert!(errors.entries[0].contains(&format!("筆記 #{bad}　排序　公式「計算順位」")));
+        assert!(db.copy_collection_view_to(collection, &view, dest, "無對應公式").is_err());
+        assert!(db.collection_views(dest)?.is_empty());
+        let mut duplicate = rules.clone();
+        duplicate.sorts.push(rule("計算順位", Formula(None), false));
+        assert!(db.set_collection_view_rules(collection, &view, duplicate).is_err());
+        db.set_property(high, "工時", Some("-1"))?;
+        assert_eq!(ids(&db, &view)?, [a, b, zero, bad]);
+        drop(db);
+
+        let db = Notebook::open(&path, false)?;
+        let view = db.collection_views(collection)?.remove(0);
+        assert_eq!(view.rules(), rules);
+        assert_eq!(ids(&db, &view)?, [a, b, zero, bad]);
+        db.set_property(high, "工時", None)?;
+        assert_eq!(ids(&db, &view)?, [b, a, zero, bad]);
+        assert!(db.collection_rule_problems(collection, &view)?.entries.iter().any(|entry|
+            entry.contains(&format!("筆記 #{a}　排序　「明細」的「工時」加總"))));
+        db.remove_collection_formula(collection, "計算順位", r#"typed("順位")"#)?;
+        assert_eq!(ids(&db, &view)?.len(), 4);
+        assert!(db.collection_rule_problems(collection, &view)?.entries.iter().any(|entry|
+            entry.contains("找不到集合公式「計算順位」")));
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn derived_sort_encoding_preserves_old_tuples_and_rejects_malformed_rules() -> Result<()> {
+        let legacy = r#"[false,[],[["未指定",null,false],["日期","date",true]]]"#;
+        assert_eq!(ViewRules::decode(legacy)?.encode(), legacy);
+        for bad in [
+            r#"[false,[],[["明細","rollup-sum",false]]]"#,
+            r#"[false,[],[["明細","rollup-sum",false,""]]]"#,
+            r#"[false,[],[["明細","rollup-count",false,"額外"]]]"#,
+            r#"[false,[],[["順位","formula-number","false"]]]"#,
+            r#"[false,[],[["順位","relation",false]]]"#,
+        ] {
+            assert!(ViewRules::decode(bad).is_err(), "{bad}");
+        }
+        let db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let collection = db.create_collection("空集合")?;
+        db.add_collection_formula(collection, "日期", r#"date("2028-02-29")"#)?;
+        let empty = db.create_collection_view(collection, "空清單", CollectionLayout::Table, "", "")?;
+        db.set_collection_view_rules(collection, &empty, ViewRules {
+            sorts: vec![SortRule { key: "日期".into(), source: SortSource::Formula(Some(PropertyType::Date)),
+                descending: false }], ..Default::default()
+        })?;
+        let empty = db.collection_views(collection)?.remove(0);
+        assert!(db.filtered_collection_rows(collection, Some(&empty))?.is_empty());
+        assert!(db.collection_rule_problems(collection, &empty)?.entries.is_empty());
         Ok(())
     }
 
@@ -1626,7 +1863,7 @@ mod tests {
             Ok(ids)
         };
         assert_eq!(ids(&db, &view)?, [first,unchecked]);
-        let diagnostics = db.collection_filter_problems(collection, &view)?;
+        let diagnostics = db.collection_rule_problems(collection, &view)?;
         assert_eq!(diagnostics.entries.len(), 1);
         assert!(diagnostics.entries[0].contains(&format!("#{missing}")));
         db.compare_set_property(a, "工時", Some("12"), Some("6"))?;
@@ -1664,7 +1901,7 @@ mod tests {
         db.set_collection_view_rules(collection, &view, bad_empty)?;
         let view = db.collection_views(collection)?.remove(0);
         assert!(ids(&db, &view)?.is_empty());
-        assert_eq!(db.collection_filter_problems(collection, &view)?.entries.len(), 1);
+        assert_eq!(db.collection_rule_problems(collection, &view)?.entries.len(), 1);
 
         let bad_type = ViewRules { filters: vec![
             leaf("日期格式", Formula(None), Equal, "2028-02-29", None),
@@ -1672,14 +1909,14 @@ mod tests {
         db.set_collection_view_rules(collection, &view, bad_type)?;
         let view = db.collection_views(collection)?.remove(0);
         assert!(ids(&db, &view)?.is_empty());
-        assert!(db.collection_filter_problems(collection, &view)?.entries[0].contains("型別"));
+        assert!(db.collection_rule_problems(collection, &view)?.entries[0].contains("型別"));
 
         let bad_sum = ViewRules { filters: vec![leaf("子項", RollupSum, Equal, "0", Some("工時"))], ..Default::default() };
         db.set_collection_view_rules(collection, &view, bad_sum)?;
         let view = db.collection_views(collection)?.remove(0);
         db.compare_set_property(b, "工時", Some("8"), None)?;
         assert_eq!(ids(&db, &view)?, [empty]);
-        assert_eq!(db.collection_filter_problems(collection, &view)?.entries.len(), 2);
+        assert_eq!(db.collection_rule_problems(collection, &view)?.entries.len(), 2);
         let malformed = r#"[false,[["子項","rollup-sum",0,"0"]],[]]"#;
         assert!(ViewRules::decode(malformed).is_err());
         drop(db);
@@ -1934,7 +2171,7 @@ mod tests {
         assert_eq!((clipped[0].visible_start, clipped[0].visible_end), (day("2028-03-01"), day("2028-03-03")));
 
         let rules = ViewRules { sorts: vec![SortRule {
-            key: "開始".into(), kind: Some(PropertyType::Date), descending: true,
+            key: "開始".into(), source: SortSource::Property(Some(PropertyType::Date)), descending: true,
         }], ..Default::default() };
         db.set_collection_view_rules(source, &timeline, rules.clone())?;
         let timeline = db.collection_views(source)?.remove(1);
@@ -2179,8 +2416,8 @@ mod tests {
         let rules = ViewRules {
             mode: FilterMode::All, filters: vec![hours, scheduled], groups: Vec::new(),
             sorts: vec![
-                SortRule { key: "工時".into(), kind: Some(PropertyType::Number), descending: false },
-                SortRule { key: "優先".into(), kind: Some(PropertyType::Number), descending: true },
+                SortRule { key: "工時".into(), source: SortSource::Property(Some(PropertyType::Number)), descending: false },
+                SortRule { key: "優先".into(), source: SortSource::Property(Some(PropertyType::Number)), descending: true },
             ],
         };
         for (name, layout, presentation) in [

@@ -398,6 +398,22 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
+    public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+        int count = GetMenuItemCount(menu);
+        if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
+        var labels = new string[count];
+        for (int i = 0; i < count; ++i) {
+            var label = new StringBuilder(256);
+            if (GetMenuItemID(menu, i) != (uint)(i + 1) ||
+                GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+                throw new InvalidOperationException("Expected a sequential Paperroom list.");
+            labels[i] = label.ToString();
+        }
+        return labels;
+    }
     private static int MenuPosition(IntPtr menu, uint itemId, string caption, bool prefix) {
         int count = GetMenuItemCount(menu);
         if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
@@ -612,7 +628,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $CanvasSave -or $Item -notin 1, 11
+    $saving = $CanvasSave -or $Item -notin 1, 9, 11
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -922,6 +938,68 @@ function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
     [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$ExactText)
     $null = Wait-For "exact workspace search filter $FieldId" {
         [PaperroomHighlightGui]::Read($edit) -ceq $ExactText
+    }
+}
+function Collection-Prompt([string]$Caption, [string]$Value = '') {
+    $prompt = Wait-For "collection prompt $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    if ($Value) { Type-SearchFilter $prompt 101 $Value }
+    Finish-Revision $prompt 1
+}
+function Collection-MenuLabels {
+    $menu = Wait-For 'actual collection row picker' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
+    }
+    [PaperroomHighlightGui]::CurrentMenuLabels($window,$process.Id,$menu)
+}
+function Choose-CollectionRow([string]$CaptionPrefix) {
+    $options = @(Collection-MenuLabels)
+    $matches = @(for ($i=0; $i -lt $options.Count; $i++) {
+        if ($options[$i].StartsWith($CaptionPrefix,[StringComparison]::Ordinal)) { $i+1 }
+    })
+    if ($matches.Count -ne 1) { throw "The exact synthetic row '$CaptionPrefix' was not unique in $($options -join ' | ')." }
+    Native-Menu 120 $matches[0] $CaptionPrefix -MenuOpen -CaptionPrefix
+}
+function Open-SortCollection {
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 1 '開啟集合看板…' -MenuOpen
+    Native-Menu 109 1 'SortAudition' -MenuOpen
+    $null = Wait-For 'collection layout opened' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+}
+function Open-SortNamedView([int]$Index, [string]$Name) {
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
+    Native-Menu 120 $Index "${Name}（表格）" -MenuOpen
+}
+function Assert-RankedRows([string[]]$Expected) {
+    Native-Menu 120 3 '開啟資料列…'
+    $labels = @(Collection-MenuLabels)
+    if ($labels.Count -ne $Expected.Count) { throw "Wrong result count in the actual row picker: $($labels -join ' | ')." }
+    for ($i=0; $i -lt $Expected.Count; $i++) {
+        if ($labels[$i] -cnotmatch ('^待處理　'+[regex]::Escape($Expected[$i])+'  \(\d+\)$')) {
+            throw "Wrong order in the actual row picker: $($labels -join ' | ')."
+        }
+    }
+    Native-Menu 120 1 "待處理　$($Expected[0])  (" -MenuOpen -CaptionPrefix
+    $null = Wait-For 'the first ranked row opens its original note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $Expected[0] -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟集合資料列'
+    }
+    Write-Host "Observed ordered collection rows through the actual menu: $($Expected -join ', ')."
+}
+function Set-SortColumn([string]$Column) {
+    Native-Menu 120 2 '新增排序…' -MenuOpen
+    if ($Column -eq 'formula') {
+        Native-Menu 120 3 '公式結果…' -MenuOpen
+        Native-Menu 120 1 '審閱順位' -MenuOpen
+        Native-Menu 120 1 '數字結果' -MenuOpen
+        Native-Menu 120 2 '降冪' -MenuOpen
+    } else {
+        Native-Menu 120 5 '彙總加總…' -MenuOpen
+        Collection-Prompt '關聯或彙總欄位' '明細'
+        Collection-Prompt '彙總加總欄位' '工時'
+        Native-Menu 120 1 '升冪' -MenuOpen
     }
 }
 function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {
@@ -1516,6 +1594,111 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+    $sortFolder = Join-Path $root 'derived-sort-workspace'
+    [void][IO.Directory]::CreateDirectory($sortFolder)
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $sortFolder 'Paperroom.exe')
+    $sortDb = Join-Path $sortFolder 'paperroom-data/notes.sqlite3'
+    $sortCsv = Join-Path $root 'SortAudition.csv'
+    $sortFixture = @'
+標題,工時
+Rank-A,7
+Rank-B,7
+Rank-Bad,壞值
+Rank-Empty,
+Rank-Zero,0
+Lookup-High,8
+Lookup-Low,2
+'@
+    [IO.File]::WriteAllText($sortCsv,$sortFixture,[Text.UTF8Encoding]::new($false))
+    $csvHash = (Get-FileHash -LiteralPath $sortCsv).Hash
+    $process = Start-Notebook $sortFolder
+    $window = $process.MainWindowHandle
+    Native-File 9 '匯入 CSV 表格…' $sortCsv '已從 CSV 匯入 7 列'
+    Native-Menu 109 14 '屬性型別…'
+    Native-Menu 109 1 '設定屬性型別…' -MenuOpen
+    Collection-Prompt '設定工作區屬性型別' '工時'
+    Native-Menu 109 1 '數字' -MenuOpen
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 2 '新增集合…' -MenuOpen
+    Collection-Prompt '新增集合' 'SortAudition'
+    $null = Wait-For 'new native collection' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+    foreach ($title in @('Rank-A','Rank-B','Rank-Bad','Rank-Empty','Rank-Zero','Lookup-High','Lookup-Low')) {
+        Native-Menu 120 1 '加入筆記…'
+        Choose-CollectionRow "$title  ("
+        Collection-Prompt '加入集合'
+    }
+    foreach ($pair in @(@('Rank-A','Lookup-High'),@('Rank-B','Lookup-Low'))) {
+        Native-Menu 120 19 '編輯資料列關聯…'
+        Choose-CollectionRow "待處理　$($pair[0])  (#"
+        Native-Menu 120 1 '新增同集合關聯…' -MenuOpen
+        Choose-CollectionRow "同集合　待處理　$($pair[1])  (#"
+        Collection-Prompt '新增集合關聯' '明細'
+    }
+    Native-Menu 120 4 '新增公式…'
+    Collection-Prompt '新增公式' '審閱順位'
+    Collection-Prompt '新增公式' 'typed("工時")'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 1 '儲存新檢視…' -MenuOpen
+    Collection-Prompt '儲存新檢視' 'Ranked'
+    Native-Menu 120 2 '表格' -MenuOpen
+    Collection-Prompt '集合檢視'
+    Collection-Prompt '集合檢視' 'Rank-'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    Set-SortColumn 'formula'
+    Set-SortColumn 'rollup'
+    Native-Menu 120 5 '儲存變更' -MenuOpen
+    Assert-RankedRows @('Rank-B','Rank-A','Rank-Zero','Rank-Bad','Rank-Empty')
+    Open-SortCollection
+    Open-SortNamedView 1 'Ranked'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    Native-Menu 120 9 '查看衍生欄位的篩選或排序錯誤…' -MenuOpen
+    $problems = Wait-For 'native rule problem report' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','衍生欄位的篩選與排序錯誤',1)
+    }
+    $details = [PaperroomHighlightGui]::Read((Control $problems 101))
+    if ([regex]::Matches($details,'排序　公式「審閱順位」').Count -ne 2 -or !$details.Contains('工時')) {
+        throw "Expected two legacy invalid fields in the sorting diagnostics."
+    }
+    Finish-Revision $problems 1
+    Native-Menu 120 6 '取消所有未儲存變更' -MenuOpen
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 3 '顯示全部資料列（看板）' -MenuOpen
+    Native-Menu 120 18 '編輯資料列的型別欄位…'
+    Choose-CollectionRow '待處理　Lookup-High  ('
+    Native-Menu 120 1 '工時　8' -MenuOpen -CaptionPrefix
+    Collection-Prompt '工時' '1'
+    Open-SortNamedView 1 'Ranked'
+    Assert-RankedRows @('Rank-A','Rank-B','Rank-Zero','Rank-Bad','Rank-Empty')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $sortFolder
+    $window = $process.MainWindowHandle
+    Open-SortCollection
+    Open-SortNamedView 1 'Ranked'
+    Assert-RankedRows @('Rank-A','Rank-B','Rank-Zero','Rank-Bad','Rank-Empty')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from pathlib import Path
+from contextlib import closing
+import json,sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    spec,keyword=db.execute("SELECT rules_json,keyword FROM collection_views WHERE name='Ranked'").fetchone()
+    assert keyword=="Rank-" and json.loads(spec)==[False,[],[["\u5be9\u95b1\u9806\u4f4d","formula-number",True],["\u660e\u7d30","rollup-sum",False,"\u5de5\u6642"]]]
+    vals=dict(db.execute("SELECT n.title,p.value FROM notes n JOIN note_properties p ON n.id=p.note_id WHERE p.key=?",
+                         ("\u5de5\u6642",)))
+    assert vals["Rank-Bad"]=="\u58de\u503c" and vals["Rank-Empty"]=="" and vals["Rank-Zero"]=="0" and vals["Lookup-High"]=="1"
+    assert db.execute("SELECT count(*) FROM note_relations").fetchone()==(2,)
+print("Verified exact saved view rules, invalid and empty values, live target edit, stable links and SQLite integrity.")
+'@ | python - $sortDb
+    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $sortCsv).Hash -cne $csvHash) {
+        throw 'Saved ordering proof or original CSV bytes changed.'
+    }
+    Write-Host 'PASS: native named collection view uses live numeric formula and rollup sorts with deterministic ties, zero before invalid and empty, native diagnostics, an edited related value, and identical order after restart.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

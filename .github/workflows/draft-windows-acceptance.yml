@@ -24,12 +24,15 @@ jobs:
         shell: pwsh
     env:
       PINNED_SOURCE: acdffdffaa10f9919d39494a14de6d83517484fc
+      PINNED_QA_SOURCE: 48292c95ae5ac9984cb89a24945931cd6110490b
       PINNED_EXE_SHA: 1ded46b1811b0a9ffe56dc343addb64ffe7e46681e523fd442777edc5bb87b53
       PINNED_PROVENANCE_SHA: cb55d60cd4a863f63fac455fe359297099b4530da08e0d4bdfec2df94c253073
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          # Keep the old binary paired with the QA revision already reviewed for it.
+          # The unsigned candidate workflow tests the current branch and its current QA.
+          ref: ${{ env.PINNED_QA_SOURCE }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -55,7 +58,7 @@ jobs:
             'scripts/windows-reviewed-notice-package.py'
           )
           $head = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong QA checkout.' }
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:PINNED_QA_SOURCE) { throw 'Wrong pinned QA checkout.' }
           git merge-base --is-ancestor $env:PINNED_SOURCE $head
           if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
           $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)

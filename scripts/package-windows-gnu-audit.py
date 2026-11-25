@@ -127,13 +127,13 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
         raise ValueError("Use a fresh output path")
     exe_path = work / f"proof_a/out/{TARGET}/release/paperroom.exe"
     binary = exe_path.read_bytes()
-    second_path = work / f"different_source_b/out/{TARGET}/release/paperroom.exe"
+    second_path = work / f"proof_b/out/{TARGET}/release/paperroom.exe"
     second = second_path.read_bytes()
     is_identical = binary == second
     if not is_identical and not permit_different_rebuild:
         raise ValueError("Two independent builds produced different EXE bytes")
     for candidate in (binary, second):
-        for root in (work, work / "proof_a/src", work / "different_source_b/src"):
+        for root in (work, work / "proof_a/src", work / "proof_b/src"):
             name = str(root)
             if name.encode() in candidate or name.encode("utf-16-le") in candidate:
                 raise ValueError("An absolute build path entered the PE")
@@ -143,7 +143,7 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
     vendor = (work / "gnu").resolve()
     std = sysroot.resolve()
     members = runtime_members(work / "proof_a/final.map", vendor, std)
-    if members != runtime_members(work / "different_source_b/final.map", vendor, std):
+    if members != runtime_members(work / "proof_b/final.map", vendor, std):
         raise ValueError("Live runtime inputs differ between independent builds")
 
     entries = {EXE: binary}

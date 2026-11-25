@@ -357,9 +357,12 @@ public static class PaperroomHighlightGui {
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(0x11, 0, 0), Key(0x5A, 0, 0), Key(0x5A, 0, 2), Key(0x11, 0, 2) });
     }
+    public static bool EditorHasFocus(IntPtr owner, uint pid, IntPtr edit) {
+        return ForegroundIsOwned(owner, pid) && DialogFocus(owner) == edit &&
+            GetWindowThreadProcessId(edit, out uint editPid) != 0 && editPid == pid;
+    }
     public static void TypeEditorText(IntPtr owner, uint pid, IntPtr edit, string prefix) {
-        if (!ForegroundIsOwned(owner, pid) || DialogFocus(owner) != edit ||
-            GetWindowThreadProcessId(edit, out uint editPid) == 0 || editPid != pid ||
+        if (!EditorHasFocus(owner, pid, edit) ||
             prefix.Length == 0 || prefix.Length > 256 || prefix.Contains("\r"))
             throw new InvalidOperationException("Expected the owned editor and bounded LF-only input.");
         foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
@@ -552,6 +555,9 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
 function Replace-EditorText([IntPtr]$Field, [string]$Text) {
     $point = [PaperroomHighlightGui]::ControlPoint($window, $process.Id, $Field, 'Edit')
     [PaperroomHighlightGui]::MouseAction($window, $process.Id, $Field, $point, 0)
+    $null = Wait-For 'clicked editor received focus before replacement' {
+        [PaperroomHighlightGui]::EditorHasFocus($window, $process.Id, $Field)
+    }
     [void][PaperroomHighlightGui]::Send($Field, 0x00B1, [IntPtr]::Zero, [IntPtr](-1))
     [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x08)
     if ($Text.Length -gt 0) { [PaperroomHighlightGui]::TypeEditorText($window, $process.Id, $Field, $Text) }

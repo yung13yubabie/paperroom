@@ -1191,6 +1191,10 @@ impl App {
                 self.show_note_outline();
                 return;
             }
+            if action == 6 {
+                if let Err(error) = self.import_vault() { self.show_error(error); }
+                return;
+            }
             self.mutate(|app| {
                 let is_notion_zip = action == 2;
                 let action = match action {
@@ -1198,7 +1202,6 @@ impl App {
                     2 => ("Notion Markdown ZIP\0*.zip\0\0", "zip", None),
                     20 => ("Markdown ZIP\0*.zip\0\0", "zip", None),
                     3 => ("Markdown 筆記\0*.md\0\0", "md", Some("note.md")),
-                    6 => return app.import_vault(),
                     7 => {
                         let mut today: SYSTEMTIME = std::mem::zeroed();
                         GetLocalTime(&mut today);
@@ -1339,14 +1342,22 @@ impl App {
     unsafe fn import_vault(&mut self) -> Result<()> {
         unsafe {
             let Some(path) = folder_dialog(self.hwnd)? else { return Ok(()); };
-            let vault = crate::vault::read(&path)?;
-            let media = crate::store::migration_media::plan(&path, &vault)?;
-            let report = media.report(vault.pages.len(), vault.skipped.saturating_sub(media.file_count()));
+            let review = crate::store::vault_import_review::VaultFolderReview::read(&path)?;
+            let report = format!(
+                "確認後會建立獨立的匯入批次。未解析的連結會保留原文。\r\n\r\n{}",
+                review.report(),
+            );
+            if !crate::dialog::preview_decision(
+                self.hwnd, "預覽 Vault 資料夾匯入", &report, "確認匯入", "取消匯入",
+            )? { return Ok(()); }
+            let (vault, media) = review.verify()?;
             let status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", vault.pages.len(), media.count());
             let name = path.file_name().and_then(|part| part.to_str()).unwrap_or("Obsidian");
-            let root = self.notebook.import_vault_with_media(&format!("匯入：{name}"), vault.pages, media)?;
-            self.open_import(root, &status);
-            crate::dialog::show_text(self.hwnd, "匯入報告", &report)?;
+            self.mutate(|app| {
+                let root = app.notebook.import_vault_with_media(&format!("匯入：{name}"), vault.pages, media)?;
+                app.open_import(root, &status);
+                crate::dialog::show_text(app.hwnd, "匯入報告", review.report())
+            });
             Ok(())
         }
     }

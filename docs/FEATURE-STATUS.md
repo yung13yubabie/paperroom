@@ -52,7 +52,7 @@
 | 區塊 ID 嵌入 | 部分 | 同工作區可插入並顯示唯一 ID 的 Markdown 區塊。原廠區塊物件與匯入格式仍待做。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [操作步驟](UI-ACCEPTANCE.md#同步區塊vault-嵌入與日誌月曆) |
 | 數學公式排版 | 未實作 | 資料公式與數學排版各自獨立。 | [官方](https://www.notion.com/help/math-equations) · [markdown.rs](../src/markdown.rs) |
 | 連結其他頁 | 部分 | 支援紙間 ID 與已解析的 Wiki 連結。 | [官方](https://www.notion.com/help/create-links-and-backlinks) · [note_links.rs](../src/note_links.rs) |
-| 反向連結 | 部分 | 支援紙間 ID 與已解析的 Wiki 連結。 | [官方](https://www.notion.com/help/create-links-and-backlinks) · [note_links.rs](../src/note_links.rs) |
+| 反向連結 | 部分 | 紙間連結、已解析的 WikiLinks 與匯入 Vault 的相對 Markdown 連結都有反向連結。清單顯示來源路徑與筆記 ID，可回到來源筆記。 | [官方](https://www.notion.com/help/create-links-and-backlinks) · [紙間操作](UI-ACCEPTANCE.md#markdown-筆記連結與反向連結) |
 | 附件 | 部分 | 從 Markdown ZIP 匯入包內能解析的相對附件，保留來源路徑和位元。支援類型及容量有限，PDF 可離線翻頁及標註。 | [官方](https://www.notion.com/help/images-files-and-media) · [pdf_view_ui.rs](../src/pdf_view_ui.rs) |
 | 圖片 | 部分 | 限定檔案類型與容量，PDF 可離線翻頁、畫框。 | [官方](https://www.notion.com/help/images-files-and-media) · [pdf_view_ui.rs](../src/pdf_view_ui.rs) |
 | PDF | 部分 | 限定檔案類型與容量，PDF 可離線翻頁、畫框。 | [官方](https://www.notion.com/help/images-files-and-media) · [pdf_view_ui.rs](../src/pdf_view_ui.rs) |
@@ -158,8 +158,8 @@
 | YAML aliases 作為查找索引 | 部分 | 匯入 Vault 的來源搜尋可比對常見 YAML 別名。可用唯一別名找未連結提及，原始碼編輯器的自動連結建議仍待做。 | [官方](https://obsidian.md/help/aliases) · [vault_search.rs](../src/vault_search.rs) |
 | 區塊引用 | 部分 | 可搜尋並複製唯一區塊的工作區連結，預覽後跳到區塊，再按 F9 返回。傳入連結報告可檢視同批次來源與重複或遺失的 ID。已支援同一批次內的文字區塊嵌入和反向追查。自動產生區塊 ID 及原 Vault 檔的即時偵測仍待做。 | [官方](https://obsidian.md/help/links) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
 | 頁面嵌入 | 部分 | 同一批次的整篇 Markdown、標題段落及唯一區塊可在閱讀模式嵌入。媒體或插件提供的嵌入仍待做。 | [官方](https://obsidian.md/help/embeds) · [transclusion.rs](../src/transclusion.rs) |
-| 明確反向連結 | 已驗證 | 由已解析的筆記參照列出。 | [官方](https://obsidian.md/help/plugins/backlinks) · [note_links.rs](../src/note_links.rs) |
-| 明確傳出連結 | 已驗證 | 由已解析的筆記參照列出。 | [官方](https://obsidian.md/help/plugins/outgoing-links) · [note_links.rs](../src/note_links.rs) |
+| 明確反向連結 | 已驗證 | 可從已解析的 Markdown、WikiLinks 或紙間連結回到來源筆記。來源路徑與 ID 可區分同名筆記。 | [官方](https://obsidian.md/help/plugins/backlinks) · [紙間操作](UI-ACCEPTANCE.md#markdown-筆記連結與反向連結) |
+| 明確傳出連結 | 已驗證 | 可開啟匯入 Vault 的相對 Markdown 連結、WikiLinks 及紙間連結。新插入的紙間連結可搜尋路徑或別名，並在改名後指向同一筆記。 | [官方](https://obsidian.md/help/plugins/outgoing-links) · [紙間操作](UI-ACCEPTANCE.md#markdown-筆記連結與反向連結) |
 | 圖譜 | 部分 | 局部、工作區和匯入 Vault 三種範圍，已解析的邊可查有向最短路徑，並以節點返回筆記。 | [官方](https://obsidian.md/help/plugins/graph) · [note_links.rs](../src/note_links.rs) |
 | 未連結提及 | 部分 | 可在同一匯入批次用唯一名稱或別名找未連結提及，可加來源完整標籤，確認後建立工作區連結。持續顯示、文字篩選、排序及外部 Vault 連結格式待做。 | [官方](https://obsidian.md/help/plugins/backlinks) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
 | 搜尋 | 部分 | 全域標題／正文片語可用標籤及 Vault 來源資料夾篩選，預覽上下文並跳到命中位置。原有 Vault 的別名、資料夾及標籤搜尋仍可用。完整查詢語言待做。 | [官方](https://obsidian.md/help/plugins/search) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |

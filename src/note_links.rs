@@ -54,6 +54,14 @@ fn mapped_link_target(
     }
 }
 
+pub(crate) fn note_link_markup(id: i64, token: &str, title: &str) -> String {
+    let label: String = title.chars().map(|ch| {
+        if ch.is_control() || matches!(ch, '[' | ']' | '|' | '\\') { ' ' } else { ch }
+    }).collect();
+    let label = if label.trim().is_empty() { "筆記" } else { label.trim() };
+    format!("[[{NATIVE_NOTE_PREFIX}{id}:{token}|{label}]]")
+}
+
 impl Notebook {
     pub(crate) fn graph_vault(&self, id: i64) -> Result<Option<i64>> {
         Ok(self.connection.query_row("SELECT import_root FROM vault_paths
@@ -78,7 +86,7 @@ impl Notebook {
             let mut stmt = tx.prepare(
                 "SELECT p.note_id,p.relative_path FROM vault_paths p
                  JOIN notes n ON n.id=p.note_id
-                 WHERE p.import_root=?1 AND n.trash_root IS NULL",
+                 WHERE p.import_root=?1",
             )?;
             files = stmt.query_map([root], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -94,20 +102,14 @@ impl Notebook {
             let path = fragment.map_or(destination.as_str(), |index| &destination[..index]);
             let id = if path.is_empty() && anchor.is_some() {
                 Some(note.row.id)
-            } else if path.strip_prefix(NATIVE_NOTE_PREFIX)
-                .is_some_and(|destination| anchor.is_some() || destination.contains(':'))
-            {
-                if let Some(id) = native_note_target(&tx, path)? {
-                    active.query_row([id], |row| row.get(0)).optional()?
-                } else {
-                    None
-                }
+            } else if path.starts_with(NATIVE_NOTE_PREFIX) {
+                native_note_target(&tx, path)?
             } else if let Some(source_path) = &source_path {
                 mapped_link_target(&index, source_path, &parts, reference.syntax, &destination, path)
             } else {
                 None
             };
-            if let Some(note_id) = id {
+            if let Some(note_id) = id && active.exists([note_id])? {
                 let label = if reference.label.trim().is_empty() { destination }
                             else { reference.label };
                 found.push(VaultNoteLink { note_id, label, anchor, anchor_syntax: reference.syntax });

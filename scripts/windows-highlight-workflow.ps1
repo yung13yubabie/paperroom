@@ -953,6 +953,30 @@ function Assert-SearchSelection([int]$FieldId, [string]$Text, [string]$Status) {
     }
     Write-Host "Verified exact native UTF-16 range $start..$($start+$Text.Length): $Text"
 }
+function Open-LinkedFixture([string]$Title, [string]$Folder) {
+    $dialog = Open-WorkspaceSearch
+    Type-SearchFilter $dialog 101 $Title
+    Type-SearchFilter $dialog 103 $Folder
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For "linked fixture $Folder/$Title opened" {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $Title -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
+}
+function Find-LinkTarget([string]$Target) {
+    Native-Menu 120 1 '插入筆記連結…'
+    $dialog = Wait-For 'workspace link target prompt' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','插入筆記連結',1)
+    }
+    Type-SearchFilter $dialog 101 $Target
+    Finish-Revision $dialog 1
+}
+function Click-WorkspaceButton([int]$Id) {
+    $control = Control $window $Id
+    $point = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,$control)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$control,$point,0)
+}
 function Read-PreviewMark([bool]$Expected, [string]$Phase) {
     $preview = Control $window 121
     $null = Wait-For 'native RichEdit preview visible' { [PaperroomHighlightGui]::IsWindowVisible($preview) }
@@ -1516,6 +1540,121 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+
+    $linkVault = Join-Path $root 'LinkFixture'
+    foreach ($folder in '現場','甲','乙') {
+        [void][IO.Directory]::CreateDirectory((Join-Path $linkVault $folder))
+    }
+    $linkBody = "# 入口`r`n`r`n[到乙](../乙/LinkTwin.md)`r`n[到標題](../乙/LinkTwin.md#細節)`r`n[[LinkTwin|有歧義]]`r`n[外部](https://example.invalid/LinkTwin.md)`r`n"
+    $senderFile = Join-Path $linkVault '現場/LinkSender.md'
+    [IO.File]::WriteAllText($senderFile,$linkBody,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $linkVault '甲/LinkTwin.md'),"甲的原文",[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $linkVault '乙/LinkTwin.md'),"# 細節`r`n乙的原文",[Text.UTF8Encoding]::new($false))
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $linkVault '附件綁定 0 筆，未解析 0 筆'
+    Open-LinkedFixture 'LinkSender' '現場'
+    Native-Menu 120 2 '前往　到乙　｜ LinkTwin　｜ 乙/LinkTwin.md' -CaptionPrefix
+    $null = Wait-For 'plain Markdown opened the correct same-name target' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkTwin' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('乙的原文')
+    }
+    Native-Menu 120 2 '反向連結　LinkSender　｜ 現場/LinkSender.md' -CaptionPrefix
+    $null = Wait-For 'clicked Markdown backlink returned to the source' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkSender'
+    }
+    Native-Menu 120 3 '前往　到標題 #細節' -CaptionPrefix
+    $dialog = Wait-For 'native Markdown heading excerpt' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#細節',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $dialog 101)).Contains('乙的原文')) {
+        throw 'The Markdown heading preview did not show the expected same-name source.'
+    }
+    Finish-Revision $dialog 1
+    $headingEditor = Control $window 104
+    $null = Wait-For 'Markdown heading source selection after closing preview' {
+        $span = [PaperroomHighlightGui]::Send($headingEditor,0x00B0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+        [PaperroomHighlightGui]::IsWindowVisible($headingEditor) -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '標題連結：第 1 行，細節' -and
+        ($span -band 0xffff) -eq 0 -and ($span -shr 16) -eq '# 細節'.Length
+    }
+    Write-Host 'Verified the Markdown heading excerpt and exact source selection.'
+    Native-Menu 120 2 '反向連結　LinkSender　｜ 現場/LinkSender.md' -CaptionPrefix
+    $null = Wait-For 'returned from heading to backlink source' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkSender'
+    }
+    Find-LinkTarget 'MissingLinkTarget'
+    $null = Wait-For 'unknown link target produced an empty picker message' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '沒有符合條件的連結目標。'
+    }
+    Find-LinkTarget '甲/LinkTwin.md'
+    $pick = @'
+from pathlib import Path
+from contextlib import closing
+import json,sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
+    rows=db.execute("SELECT p.import_root,p.note_id,i.token FROM vault_paths p JOIN notes n ON n.id=p.import_root "
+                    "JOIN note_link_identities i ON i.note_id=p.note_id "
+                    "WHERE n.title='\u532f\u5165\uff1aLinkFixture' AND p.relative_path='\u7532/LinkTwin.md'").fetchall()
+    assert len(rows)==1
+    print(json.dumps(rows[0]))
+'@ | python - $liveDb
+    if ($LASTEXITCODE -ne 0 -or !$pick) { throw 'Could not validate the exact same-name link target.' }
+    $ids = $pick | ConvertFrom-Json
+    Native-Menu 120 1 "LinkTwin　匯入：LinkFixture (#$($ids[0])) / 甲/LinkTwin.md　[#$($ids[1])]" -MenuOpen
+    $markup = "[[paperroom:note:$($ids[1]):$($ids[2])|LinkTwin]]"
+    $null = Wait-For 'new link appended to the original text and saved' {
+        [PaperroomHighlightGui]::Read((Control $window 104)) -ceq ($linkBody+$markup) -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+    }
+    Open-LinkedFixture 'LinkTwin' '甲'
+    Click-WorkspaceButton 110
+    $null = Wait-For 'rename editor opened for the selected exact target' {
+        [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) -and
+        [PaperroomHighlightGui]::Read((Control $window 104)) -ceq '甲的原文'
+    }
+    Replace-EditorText (Control $window 103) 'LinkRenamed'
+    $null = Wait-For 'renamed target saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'LinkSender' '現場'
+    Native-Menu 120 4 '前往　LinkTwin　｜ LinkRenamed　｜ 甲/LinkTwin.md' -CaptionPrefix
+    $null = Wait-For 'renamed stable link opened the original note after restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkRenamed' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('甲的原文')
+    }
+    Native-Menu 113 3 '移到垃圾桶'
+    $dialog = Wait-For 'trash confirmation for exact link target' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'移到垃圾桶')
+    }
+    Finish-Revision $dialog 1
+    $null = Wait-For 'trashed link target is no longer active' { [PaperroomHighlightGui]::Read((Control $window 103)) -cne 'LinkRenamed' }
+    Open-LinkedFixture 'LinkSender' '現場'
+    Native-Menu 120 4 '開啟筆記關聯圖…'
+    $null = Wait-For 'no undeleted namesake took over a missing or ambiguous link' {
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '關聯圖操作'
+    }
+    Click-WorkspaceButton 107
+    $null = Wait-For 'exact title in trash can be restored' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkRenamed' -and
+        [PaperroomHighlightGui]::Read((Control $window 113)) -ceq '還原'
+    }
+    Click-WorkspaceButton 113
+    $null = Wait-For 'original link target restored' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkRenamed' -and
+        [PaperroomHighlightGui]::Read((Control $window 113)) -ceq '更多'
+    }
+    Native-Menu 120 2 '反向連結　LinkSender　｜ 現場/LinkSender.md' -CaptionPrefix
+    $null = Wait-For 'restored stable link has the original backlink' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkSender'
+    }
+    if ([IO.File]::ReadAllText($senderFile) -cne $linkBody) { throw 'Link insertion changed the original imported Vault file.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native Markdown note and heading links, precise backlinks with source path, no result, stable same-name insertion, rename and reopen, trash without retargeting, restoration and preserved source file.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

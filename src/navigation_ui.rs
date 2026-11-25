@@ -114,6 +114,34 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn insert_note_link(&mut self) -> Result<()> {
+        unsafe {
+            let Some(query) = crate::dialog::prompt(self.hwnd, "插入筆記連結",
+                "輸入目標標題、Vault 路徑或完整別名。留白列出全部筆記。", "", 4096)?
+            else { return Ok(()); };
+            let hits = self.notebook.quick_notes(&query)?;
+            if hits.is_empty() {
+                label(self.widgets.status, "沒有符合條件的連結目標。");
+                return Ok(());
+            }
+            let Some(i) = choose_navigation_page(self.hwnd, self.widgets.links, hits.len(), |i| &hits[i].label)
+            else { return Ok(()); };
+            let mut link = self.notebook.markup_for_picked_note(&hits[i])?;
+            let append = !self.editing;
+            if append { self.toggle_edit(); }
+            if !self.editing || !self.editor_ready {
+                return Err("正文編輯器未就緒，尚未插入連結。".into());
+            }
+            if append {
+                let text = read_text(self.widgets.body)?;
+                SendMessageW(self.widgets.body, EM_SETSEL, text.encode_utf16().count(), -1);
+                if !text.is_empty() && !text.ends_with(['\r', '\n']) { link.insert_str(0, "\r\n"); }
+            }
+            self.replace_selection(&link);
+            Ok(())
+        }
+    }
+
 
     unsafe fn copy_block_link_ui(&mut self) -> Result<()> {
         unsafe {

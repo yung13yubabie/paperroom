@@ -1,5 +1,6 @@
 use super::super::{Notebook, Note, Result, Row, read_row};
-use super::{NATIVE_NOTE_PREFIX, native_note_target};
+use super::{NATIVE_NOTE_PREFIX, mapped_link_target, native_note_target};
+use crate::markdown::{self, AnchorSyntax};
 use crate::store::transclusion::{embed_references, resolve_embed_target};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -81,30 +82,26 @@ impl Notebook {
                 nodes.insert(row.id,IndexNode {row,location});
             }
         }
-        let indexes:HashMap<_,_>=vaults.iter().map(|(root,files)|(*root,crate::vault::WikiIndex::new(files))).collect();
-        // A missing embed must not start showing a namesake merely because
-        // one of the original candidates was moved into the recycle bin.
-        let mut archived = HashMap::<i64, Vec<(i64, String)>>::new();
-        if tx.prepare("SELECT 1 FROM notes n LEFT JOIN vault_paths p ON p.note_id=n.id
-            WHERE n.trash_root IS NULL AND (?1 IS NULL OR p.import_root=?1)
-            AND instr(n.body,'![[')>0")?.exists([root])? {
+        // Include trash in disambiguation, then exclude those IDs from edges.
+        // Removing one of two namesakes must never repoint a link to the other.
+        if !vaults.is_empty() {
             let mut stmt = tx.prepare("SELECT p.import_root,p.note_id,p.relative_path FROM vault_paths p
                 JOIN notes n ON n.id=p.note_id WHERE n.trash_root IS NOT NULL
                 AND (?1 IS NULL OR p.import_root=?1)")?;
             let mut rows = stmt.query([root])?;
             while let Some(row) = rows.next()? {
-                archived.entry(row.get(0)?).or_default().push((row.get(1)?, row.get(2)?));
+                if let Some(paths) = vaults.get_mut(&row.get::<_, i64>(0)?) {
+                    paths.push((row.get(1)?, row.get(2)?));
+                }
             }
         }
-        let embed_indexes: HashMap<_, _> = archived.iter().filter_map(|(root, archived)| {
-            vaults.get(root).map(|active| (*root, crate::vault::WikiIndex::including(active, archived)))
-        }).collect();
+        let indexes: HashMap<_, _> = vaults.iter().map(|(root, files)| (*root, crate::vault::NoteLinkPaths::new(files))).collect();
         let mut edges=BTreeSet::new();
         let mut consumed=0usize;
         {
             let mut stmt=tx.prepare("SELECT n.id,n.body FROM notes n LEFT JOIN vault_paths p ON n.id=p.note_id
                 WHERE n.trash_root IS NULL AND (?1 IS NULL OR p.import_root=?1)
-                AND instr(n.body,'[[')>0 ORDER BY n.id")?;
+                AND instr(n.body,'[')>0 ORDER BY n.id")?;
             let mut bindings = tx.prepare(
                 "SELECT destination,target_id FROM note_title_link_bindings WHERE source_id=?1",
             )?;
@@ -118,28 +115,33 @@ impl Notebook {
                 if focus.is_none() && consumed>MAX_GRAPH_TEXT {
                     return Err("需解析的含連結正文超過 64 MiB，請縮小關聯圖範圍。".into());
                 }
-                let keys = crate::markdown::wiki_targets(body);
+                let references = markdown::note_references(body);
                 let location = &nodes[&id].location;
                 let mut bound = HashMap::<String,i64>::new();
-                if !keys.is_empty() && location.is_none() {
+                if location.is_none() && references.iter().any(|link| link.syntax == AnchorSyntax::Wiki) {
                     let records = bindings.query_map([id], |row| Ok((row.get(0)?,row.get(1)?)))?;
                     bound = records.collect::<rusqlite::Result<_>>()?;
                 }
-                let direct = keys.into_iter().map(|key| {
-                    if key.starts_with(NATIVE_NOTE_PREFIX) {
-                        let path = key.split('#').next().unwrap_or(&key);
+                let parts = location.as_ref().map(|(_, path)| path.split('/').map(str::to_owned).collect::<Vec<_>>());
+                let direct = references.into_iter().map(|reference| {
+                    let key = reference.destination.as_str();
+                    let path = key.split_once('#').map_or(key, |(path, _)| path);
+                    if path.starts_with(NATIVE_NOTE_PREFIX) {
                         return native_note_target(&tx, path);
                     }
-                    Ok(if let Some((root,path))=location {
-                        indexes[root].resolve(path,&key)
-                    } else {
+                    Ok(if let Some((root, source)) = location {
+                        mapped_link_target(&indexes[root], source, parts.as_deref().unwrap_or_default(),
+                            reference.syntax, key, path)
+                    } else if reference.syntax == AnchorSyntax::Wiki {
                         key.strip_prefix('#').and_then(|s|s.parse().ok())
-                            .or_else(|| bound.get(&key).copied())
-                            .or_else(||titles.get(&key).copied().flatten())
+                            .or_else(|| bound.get(key).copied())
+                            .or_else(||titles.get(key).copied().flatten())
+                    } else {
+                        None
                     })
                 });
                 let vault = location.as_ref().map(|(root, path)|
-                    (path.as_str(), embed_indexes.get(root).unwrap_or(&indexes[root])));
+                    (path.as_str(), &indexes[root].wiki));
                 let embeds = embed_references(body).map(|reference|
                     resolve_embed_target(&tx, id, vault, &reference.destination));
                 for target in direct.chain(embeds) {
@@ -210,6 +212,53 @@ mod tests {
             VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<?1
         ) INSERT INTO notes(title) SELECT printf('合成頁%d',n) FROM seq", [MAX_GRAPH_NODES as i64+1])?;
         assert!(db.link_index(Scope::Workspace,None).err().unwrap().to_string().contains("5,000"));
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_edges_follow_original_vault_paths_and_ambiguous_paths_do_not_retarget() -> Result<()> {
+        let dir = crate::store::tests::data_dir();
+        let path = dir.join("notes.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let body = "[直接](../乙/同名.md) [標題](../乙/同名.md#節) [歧義](同名.md) [[同名|歧義]] `[程式碼](../甲/程式.md)` [外部](https://example.invalid/同名.md)";
+        let page = |file: &str, title: &str, text: &str| ImportedPage {
+            parts: file.split('/').map(str::to_owned).collect(),
+            title: title.into(), body: text.into(),
+        };
+        let root = db.import_vault("Vault", vec![
+            page("甲/源.md", "源", body), page("同名.md", "同名", "外層"),
+            page("甲/同名.md", "同名", "同層"), page("乙/同名.md", "同名", "# 節"),
+            page("甲/程式.md", "程式", ""),
+        ])?;
+        let find = |file| db.connection.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
+            (root, file), |r| r.get::<_, i64>(0),
+        );
+        let source = find("甲/源.md")?;
+        let target = find("乙/同名.md")?;
+        let collision = find("同名.md")?;
+        let source_note = db.note(source)?.unwrap();
+        assert_eq!(db.related(&source_note)?.0.iter().map(|r| r.id).collect::<Vec<_>>(), [target]);
+        let refs = db.vault_note_links(&source_note)?;
+        assert_eq!(refs.iter().map(|r| (r.note_id, r.anchor.as_deref())).collect::<Vec<_>>(),
+            [(target, None), (target, Some("#節"))]);
+        db.trash(collision)?;
+        assert_eq!(db.related(&source_note)?.0.iter().map(|r| r.id).collect::<Vec<_>>(), [target]);
+        assert_eq!(db.vault_note_links(&source_note)?.len(), 2);
+        db.save(target, 1, "已改標題", "# 節")?;
+        drop(db);
+
+        let db = Notebook::open(&path, false)?;
+        let target_note = db.note(target)?.unwrap();
+        assert_eq!(target_note.row.title, "已改標題");
+        assert_eq!(db.related(&target_note)?.1[0].id, source);
+        assert_eq!(db.link_index(Scope::Vault(root), None)?.shortest_path(source, target), Some(vec![source, target]));
+        assert_eq!(db.note(source)?.unwrap().body, body);
+        db.trash(target)?;
+        assert!(db.vault_note_links(&source_note)?.is_empty());
+        assert!(db.related(&source_note)?.0.is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 }

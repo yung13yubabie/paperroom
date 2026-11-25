@@ -297,6 +297,54 @@ mod tests {
     }
 
     #[test]
+    fn clicking_an_aligned_text_box_does_not_invalidate_persisted_undo() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("offline-undo.sqlite3");
+        let (board, anchor, text) = {
+            let mut db = Notebook::open(&path, false)?;
+            let board = db.create_board("離線復原")?;
+            let anchor = db.add(None, "定位卡", "")?;
+            db.add_card_on(board, anchor)?;
+            db.move_card_on(board, anchor, 16, 16)?;
+            let text = db.add_board_text(board, "保留文字")?;
+            let mut object = db.objects_on(board)?.remove(0);
+            (object.x, object.y) = (480, 170);
+            db.move_board_object(board, &object)?;
+            let expected = read_layout(&db.connection, board)?.into_iter().map(|(rect, _)| rect).collect::<Vec<_>>();
+            assert_eq!(db.arrange_board_selection(board, &expected, BoardArrangement::Left)?, 1);
+            (board, anchor, text)
+        };
+        {
+            let db = Notebook::open(&path, false)?;
+            let receipt = db.board_layout_undo(board)?;
+            let clicked = db.objects_on(board)?.remove(0);
+            assert_eq!((clicked.id, clicked.x, clicked.y), (text, 16, 170));
+            // Native mouse-up for a text box uses this method even for a click with no drag.
+            db.move_board_object(board, &clicked)?;
+            assert_eq!(db.objects_on(board)?[0].version, clicked.version);
+            db.undo_board_layout(board, &receipt)?;
+            let restored = db.objects_on(board)?.remove(0);
+            assert_eq!((restored.id, restored.x, restored.y, restored.text.as_str()), (text, 480, 170, "保留文字"));
+            assert_eq!(restored.version, clicked.version + 1);
+            assert_eq!((db.cards_on(board)?[0].id, db.cards_on(board)?[0].x), (anchor, 16));
+            assert!(db.board_layout_undo(board)?.is_empty());
+
+            let expected = read_layout(&db.connection, board)?.into_iter().map(|(rect, _)| rect).collect::<Vec<_>>();
+            assert_eq!(db.arrange_board_selection(board, &expected, BoardArrangement::Left)?, 1);
+            let receipt = db.board_layout_undo(board)?;
+            let mut moved = db.objects_on(board)?.remove(0);
+            moved.x = 600;
+            db.move_board_object(board, &moved)?;
+            assert!(db.undo_board_layout(board, &receipt).is_err());
+            assert!(db.move_board_object(board, &moved).is_err()); // stale with current coordinates
+            let last = db.objects_on(board)?.remove(0);
+            assert_eq!((last.x, last.version), (600, moved.version + 1));
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn arrangement_and_undo_survive_v21_migration_backup_and_refuse_collisions_or_stale_receipts() -> Result<()> {
         let dir = super::super::tests::data_dir();
         let path = dir.join("whiteboard.sqlite");

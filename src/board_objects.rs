@@ -297,7 +297,11 @@ impl Notebook {
         Ok((x, y) == preferred)
     }
     pub(crate) fn move_board_object(&self,board:i64,o:&Object)->Result<()> {
-        if self.connection.execute("UPDATE board_objects SET x=?1,y=?2,version=version+1 WHERE board_id=?3 AND id=?4 AND version=?5",
+        // A native mouse-up can reach here without movement. Do not make a
+        // persisted layout-undo receipt stale merely for a click.
+        if self.connection.execute("UPDATE board_objects SET x=?1,y=?2,
+            version=CASE WHEN x<>?1 OR y<>?2 THEN version+1 ELSE version END
+            WHERE board_id=?3 AND id=?4 AND version=?5",
             params![o.x,o.y,board,o.id,o.version])?!=1{return Err("物件已變更，請重新開啟白板。".into());}
         Ok(())
     }

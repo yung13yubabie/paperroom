@@ -166,7 +166,7 @@ impl Notebook {
         Ok(id)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn add_pdf_text_from_source(
         &self, attachment: i64, source: &[u8], mark: PdfPageText<'_>, comment: &str,
     ) -> Result<i64> {

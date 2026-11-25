@@ -1016,6 +1016,63 @@ mod tests {
     }
 
     #[test]
+    fn rendered_pdf_highlight_board_card_reopens_on_the_same_source_pixels() -> Result<()> {
+        use crate::pdf_render::render_page;
+        use std::fs;
+
+        let dir = super::super::tests::data_dir();
+        let workspace = dir.join("實際摘錄.sqlite3");
+        let input = dir.join("剪輯範圍.pdf");
+        let pdf = include_bytes!("../tests/fixtures/storyboard-zh/剪輯範圍.pdf");
+        fs::write(&input, pdf)?;
+        let page = 2;
+        let raster = render_page(pdf.to_vec(), page)?;
+        let selection = raster.text.select([0.43, 0.639], [0.89, 0.639]).ok_or("missing fixture selection")?;
+        assert_eq!(selection.quote, "Synthetic shot; selection B");
+        let expected = raster.highlighted_bgra(&selection.regions).ok_or("missing highlight")?;
+        assert_ne!(expected, raster.bgra);
+
+        let (board, source, attachment, annotation, card) = {
+            let mut db = Notebook::open(&workspace, true)?;
+            let board = db.create_board("版面摘錄")?;
+            let source = db.add(None, "原稿", "")?;
+            let duplicate = db.add(None, "同名副本", "")?;
+            let attachment = db.import_attachment(source, &input)?;
+            let other = db.import_attachment(duplicate, &input)?;
+            assert_ne!(other, attachment);
+            let (_, source_bytes) = db.read_pdf_attachment(attachment)?;
+            let mark = PdfPageText { page, quote: &selection.quote, regions: &selection.regions };
+            assert!(db.add_pdf_text_from_source(attachment, b"stale viewer bytes", mark, "不能保存").is_err());
+            assert!(db.list_pdf_annotations(attachment)?.is_empty());
+            let annotation = db.add_pdf_text_from_source(attachment, &source_bytes, mark, "保留原稿來源")?;
+            let card = db.create_pdf_excerpt_card(board, annotation)?;
+            (board, source, attachment, annotation, card)
+        };
+        fs::remove_file(&input)?;
+        {
+            let db = Notebook::open(&workspace, true)?;
+            let board_cards = db.pdf_excerpt_cards_on_board(board)?;
+            assert_eq!(board_cards.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [card]);
+            let hit = db.pdf_excerpt_source(card)?.ok_or("excerpt did not return to a source")?;
+            assert_eq!((hit.note_id, hit.attachment_id, hit.page, hit.id), (source, attachment, page, annotation));
+            assert_eq!(hit.quote, selection.quote);
+            let regions = db.pdf_annotation_focus_regions(hit.attachment_id, hit.page, hit.id)?;
+            assert_eq!(regions, selection.regions);
+            let (_, restored_bytes) = db.read_pdf_attachment(hit.attachment_id)?;
+            assert_eq!(restored_bytes.as_slice(), pdf);
+            let restored = render_page(restored_bytes, hit.page)?;
+            assert_eq!(restored.highlighted_bgra(&regions).as_deref(), Some(expected.as_slice()));
+
+            db.remove_attachment(attachment)?;
+            assert!(db.pdf_excerpt_source(card)?.is_none());
+            assert!(db.pdf_excerpt_snapshot(card)?.is_none());
+            assert!(db.note(card)?.unwrap().body.contains(&selection.quote));
+        }
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn excerpt_cards_are_atomic_independent_notes_with_stable_pdf_sources() -> Result<()> {
         let dir = super::super::tests::data_dir();
         let db_path = dir.join("notes.sqlite3");

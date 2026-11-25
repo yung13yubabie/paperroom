@@ -206,7 +206,7 @@ def verify_windows_zip(path, index_sha, commit, exe_sha, receipt_sha, rust_sha):
 
 
 
-def stage_qa_zip(destination, exe, commit, exe_sha, receipt_sha, rust_sha, notice_root):
+def stage_qa_zip(destination, exe, commit, exe_sha, receipt_sha, rust_sha, notice_root, rust_library_notice=None):
     parent = destination.parent.resolve(strict=True)
     temp_roots = [Path(tempfile.gettempdir()).resolve()]
     if os.environ.get("RUNNER_TEMP"):
@@ -225,6 +225,14 @@ def stage_qa_zip(destination, exe, commit, exe_sha, receipt_sha, rust_sha, notic
         member = f"licenses/pdf-assets/{name}"
         notices.append({"path": member, "role": "embedded-pdf-notice", "sha256": digest})
         payload[member] = text
+    if rust_library_notice is not None:
+        if rust_sha is None:
+            raise ValueError("the pinned receipt does not record a Rust library notice")
+        text = read_file(rust_library_notice, MAX_NOTICE)
+        if sha(text) != rust_sha:
+            raise ValueError("the supplied Rust library notice does not match the pinned receipt")
+        notices.append({"path": RUST_NOTICE, "role": "rust-toolchain-notice", "sha256": rust_sha})
+        payload[RUST_NOTICE] = text
     index = json.dumps({
         "schema_version": 1, "source_commit": commit, "exe_sha256": exe_sha,
         "provenance_sha256": receipt_sha, "notices": notices,
@@ -232,8 +240,8 @@ def stage_qa_zip(destination, exe, commit, exe_sha, receipt_sha, rust_sha, notic
     guide = (
         "# Paperroom internal QA sample only\n\n"
         "Candidate packaging verification. Do not publish or redistribute this ZIP. "
-        "These four supplementary notices do not document all dependencies, "
-        "the Rust standard library, or MSVC redistribution terms.\n\n"
+        "These reviewed notices cover only the listed files. "
+        "The complete dependency and MSVC redistribution records are outside this sample.\n\n"
         f"Candidate Paperroom.exe SHA-256: {exe_sha}\n"
     ).encode()
     with tempfile.NamedTemporaryFile(dir=parent, prefix=".paperroom-qa-", suffix=".zip", delete=False) as temp:
@@ -267,6 +275,8 @@ def main(argv=None):
     zip_mode.add_argument("--windows-zip", type=Path)
     zip_mode.add_argument("--stage-qa-zip", type=Path)
     parser.add_argument("--notice-index-sha256")
+    parser.add_argument("--rust-library-notice", type=Path,
+                        help="include an exact receipt-matched Rust library notice in the staged QA ZIP")
     args = parser.parse_args(argv)
     try:
         commit = exact_digest(args.commit, 40)
@@ -278,11 +288,14 @@ def main(argv=None):
         count, rust_sha = verify_receipt(read_file(args.provenance, MAX_INDEX), receipt_sha, exe_sha)
         if (args.windows_zip is None) != (args.notice_index_sha256 is None):
             raise ValueError("Windows ZIP and reviewed notice-index digest must be supplied together")
+        if args.rust_library_notice is not None and args.stage_qa_zip is None:
+            raise ValueError("a supplied Rust library notice requires --stage-qa-zip")
         notice_root = ROOT / "docs" / "third-party" / "pdf-assets"
         embedded = verify_embedded(exe, notice_root)
         zip_info = {"status": "not supplied"}
         if args.stage_qa_zip is not None:
-            zip_info = stage_qa_zip(args.stage_qa_zip, exe, commit, exe_sha, receipt_sha, rust_sha, notice_root)
+            zip_info = stage_qa_zip(args.stage_qa_zip, exe, commit, exe_sha, receipt_sha, rust_sha,
+                                    notice_root, args.rust_library_notice)
         elif args.windows_zip is not None:
             zip_info = verify_windows_zip(args.windows_zip, exact_digest(args.notice_index_sha256),
                                           commit, exe_sha, receipt_sha, rust_sha)

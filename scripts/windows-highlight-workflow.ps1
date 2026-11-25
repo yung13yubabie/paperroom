@@ -23,6 +23,34 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class PaperroomHighlightGui {
     [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThread {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput {
+        public int X, Y;
+        public uint Data, Flags, Time;
+        public UIntPtr Extra;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyInput {
+        public ushort VirtualKey, Scan;
+        public uint Flags, Time;
+        public UIntPtr Extra;
+    }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputData {
+        [FieldOffset(0)] public MouseInput Mouse;
+        [FieldOffset(0)] public KeyInput Key;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input {
+        public uint Kind;
+        public InputData Data;
+    }
     private delegate bool EnumWindow(IntPtr hwnd, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, EnumWindow callback, IntPtr state);
@@ -31,6 +59,13 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect region);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint relation);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThread info);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint SendInput(uint count, Input[] input, int size);
+    [DllImport("user32.dll")] private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
@@ -88,7 +123,58 @@ public static class PaperroomHighlightGui {
         if (matches.Count > 1) throw new InvalidOperationException("Ambiguous owned " + kind + " window.");
         return matches.Count == 1 ? matches[0] : IntPtr.Zero;
     }
-    public static int MenuPosition(IntPtr popup, uint itemId, string caption) {
+    public static bool ForegroundIsOwned(IntPtr owner, uint pid) {
+        uint thread = GetWindowThreadProcessId(owner, out uint owningPid);
+        return thread != 0 && owningPid == pid &&
+            GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid) == thread &&
+            foregroundPid == pid;
+    }
+    public static string DescribeWindows(IntPtr owner, uint pid) {
+        var text = new StringBuilder();
+        IntPtr foreground = GetForegroundWindow();
+        GetWindowThreadProcessId(foreground, out uint foregroundPid);
+        text.Append("Foreground pid=").Append(foregroundPid).Append(" class=").Append(Kind(foreground));
+        uint thread = GetWindowThreadProcessId(owner, out uint owningPid);
+        if (thread == 0 || owningPid != pid) return text.Append("; owned main window unavailable").ToString();
+        var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
+        if (GetGUIThreadInfo(thread, ref gui)) {
+            text.Append("; GUI flags=0x").Append(gui.Flags.ToString("X")).Append(" menuOwner=").Append(Kind(gui.MenuOwner));
+        }
+        EnumThreadWindows(thread, (hwnd, ignored) => {
+            if (IsWindowVisible(hwnd) && GetWindowThreadProcessId(hwnd, out uint actual) != 0 && actual == pid) {
+                text.Append("; owned ").Append(Kind(hwnd)).Append(" [").Append(Caption(hwnd)).Append(']');
+            }
+            return true;
+        }, IntPtr.Zero);
+        return text.ToString();
+    }
+    private static Input Key(ushort key, bool up) {
+        uint flags = key == 0x24 || key == 0x28 ? 1u : 0u; // Extended Home / Down.
+        if (up) flags |= 2; // KEYEVENTF_KEYUP.
+        return new Input { Kind = 1, Data = new InputData { Key = new KeyInput { VirtualKey = key, Flags = flags } } };
+    }
+    public static void SelectMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
+        if (OwnedWindow(owner, pid, "#32768", null, 0) != popup || popup == IntPtr.Zero)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        int position = MenuPosition(popup, itemId, caption);
+        foreach (int key in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(key) < 0) throw new InvalidOperationException("An input modifier is held; refusing to send menu keys.");
+        var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
+        uint thread = GetWindowThreadProcessId(owner, out uint ignoredPid);
+        if (!GetGUIThreadInfo(thread, ref gui) || (gui.Flags & 0x14) == 0 || gui.MenuOwner != owner)
+            throw new InvalidOperationException("The isolated app is not the current native menu owner.");
+        var keys = new List<Input> { Key(0x24, false), Key(0x24, true) }; // Home.
+        for (int i = 0; i < position; i++) { keys.Add(Key(0x28, false)); keys.Add(Key(0x28, true)); }
+        keys.Add(Key(0x0D, false)); keys.Add(Key(0x0D, true)); // Enter.
+        if (!ForegroundIsOwned(owner, pid))
+            throw new InvalidOperationException("The isolated test app lost foreground before menu input.");
+        int size = Marshal.SizeOf<Input>();
+        if (size != (IntPtr.Size == 8 ? 40 : 28)) throw new InvalidOperationException("Unexpected Windows INPUT size.");
+        uint actual = SendInput((uint)keys.Count, keys.ToArray(), size);
+        if (actual != keys.Count)
+            throw new InvalidOperationException("SendInput delivered " + actual + "/" + keys.Count + " keyboard changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
+    }
+    private static int MenuPosition(IntPtr popup, uint itemId, string caption) {
         // Native popup menu windows return their HMENU for MN_GETHMENU.
         IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
         int count = GetMenuItemCount(menu);
@@ -98,6 +184,8 @@ public static class PaperroomHighlightGui {
             var title = new StringBuilder(256);
             GetMenuStringW(menu, (uint)index, title, title.Capacity, 0x400);
             if (title.ToString() != caption) throw new InvalidOperationException("Unexpected menu label: " + title);
+            if ((GetMenuState(menu, (uint)index, 0x400) & 3) != 0)
+                throw new InvalidOperationException("The required native menu item is disabled.");
             return index;
         }
         throw new InvalidOperationException("The required menu item is absent: " + caption);
@@ -139,16 +227,15 @@ function Command([IntPtr]$Owner, [int]$Id) {
     }
 }
 function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
+    if (![PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id)) {
+        [void][PaperroomHighlightGui]::SetForegroundWindow($window)
+        $null = Wait-For 'isolated app foreground' { [PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id) }
+    }
     Command $window $OwnerControl
     $menu = Wait-For "menu containing $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0) }
-    $position = [PaperroomHighlightGui]::MenuPosition($menu, $Item, $Caption)
-    Write-Host "Verified native menu command $Item and label $Caption."
-    $keys = @(0x24) + (@(0x28) * $position) + @(0x0D) # Home, item-position Down strokes, Enter.
-    foreach ($key in $keys) {
-        if (![PaperroomHighlightGui]::PostMessageW($menu, 0x100, [IntPtr]$key, [IntPtr]1)) {
-            throw "Could not select $Caption in the native menu."
-        }
-    }
+    [PaperroomHighlightGui]::SelectMenu($window, $process.Id, $menu, $Item, $Caption)
+    Write-Host "Verified native menu command $Item and sent Windows keyboard input for $Caption."
+    $null = Wait-For "native menu closed after $Caption" { ![PaperroomHighlightGui]::IsWindowVisible($menu) }
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status) {
     Native-Menu 109 $Item $Caption
@@ -227,12 +314,12 @@ function Read-PreviewMark([bool]$Expected) {
                 if (![PaperroomHighlightGui]::PrintWindow($preview, $dc, 1)) { throw 'RichEdit client capture failed.' }
             } finally { $graphics.ReleaseHdc($dc) }
         } finally { $graphics.Dispose() }
-        $mark = [Drawing.Color]::FromArgb(255,232,131).ToArgb()
+        $mark = [Drawing.Color]::FromArgb(255,232,131).ToArgb() -band 0xFFFFFF
         $colors = [Collections.Generic.HashSet[int]]::new()
         $hits = 0
         for ($y = 1; $y -lt $rect.Bottom; $y += 3) {
             for ($x = 1; $x -lt $rect.Right; $x += 3) {
-                $value = $bitmap.GetPixel($x, $y).ToArgb()
+                $value = $bitmap.GetPixel($x, $y).ToArgb() -band 0xFFFFFF
                 if ($value -eq $mark) { $hits++ }
                 [void]$colors.Add($value)
             }
@@ -272,6 +359,7 @@ if export != "-":
         assert archive.read(f"markdown/{note}.md") == raw, "HTML ZIP changed raw Markdown"
         html = archive.read(f"pages/{note}.html")
         assert html.count(b"<mark>") == 1 and b"<mark>" + text + b"</mark>" in html
+        assert "==\u4fdd\u7559==".encode("utf-8") in html, "unmarked literal was changed"
 print(f"Read-only SQLite check: note version {version}, exact raw bytes, {len(marks)} exact byte range(s).")
 '@ | python - $Database $source $title $selected $markValue $zipValue
     if ($LASTEXITCODE -ne 0) { throw 'SQLite or HTML ZIP verification failed.' }
@@ -289,12 +377,13 @@ $html = Join-Path $root 'workspace.zip'
 $title = 'QA Window Highlight'
 $selected = '選取📝'
 $process = $null
+$window = [IntPtr]::Zero
 try {
     foreach ($folder in $live,$restored) {
         [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
         Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
     }
-    $manuscript = "---`nqa: highlight`n---`n`n前方 📘選取📝 後方`n"
+    $manuscript = "---`nqa: highlight`n---`n`n前方 📘選取📝 後方`n`n==保留==`n"
     [IO.File]::WriteAllText($source, $manuscript, [Text.UTF8Encoding]::new($false))
     Write-Host "Exercise exact Windows EXE SHA-256 $ExeSha256."
     $process = Start-Notebook $live
@@ -325,11 +414,10 @@ try {
         throw 'Standalone Markdown export changed the original bytes.'
     }
     Native-File 4 '備份工作區…' $backup '工作區備份已完成'
-    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 '
     Close-Notebook $process
     $process.Dispose()
     $process = $null
-    Assert-Database $liveDb $true $html
+    Assert-Database $liveDb $true
     Assert-Database $backup $true
 
     $originalBackupHash = (Get-FileHash -LiteralPath $backup).Hash
@@ -338,6 +426,7 @@ try {
     $window = $process.MainWindowHandle
     Select-Note $title
     Read-PreviewMark $true
+    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 '
     $null = Open-Editor
     Native-Menu 113 26 '清除本篇螢光標記…'
     $cancel = Wait-For 'clear-highlight confirmation' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '清除螢光標記', 7) }
@@ -356,9 +445,15 @@ try {
     $process.Dispose()
     $process = $null
     Assert-Database $restoreDb $false
+    Assert-Database $backup $true $html
     Assert-Database $liveDb $true
     if ((Get-FileHash -LiteralPath $backup).Hash -cne $originalBackupHash) { throw 'Backup bytes changed.' }
     Write-Host 'PASS: native highlight, preview, normal reopen, exact Markdown, Backup, isolated restore, HTML and cancel/clear.'
+} catch {
+    if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
+        Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))
+    }
+    throw
 } finally {
     if ($process) {
         if (!$process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }

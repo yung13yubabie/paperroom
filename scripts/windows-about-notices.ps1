@@ -15,8 +15,6 @@ using System.Text;
 using System.Runtime.InteropServices;
 public static class PaperroomAbout {
     public delegate bool EnumProc(IntPtr w, IntPtr p);
-    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left,top,right,bottom; }
-    [StructLayout(LayoutKind.Sequential)] public struct Point { public int x,y; }
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb,IntPtr p);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr w,out int pid);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr w,StringBuilder b,int n);
@@ -27,8 +25,44 @@ public static class PaperroomAbout {
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool PostMessage(IntPtr w,uint msg,IntPtr a,IntPtr b);
     [DllImport("user32.dll")] static extern int GetMenuItemCount(IntPtr menu);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetMenuString(IntPtr menu,uint item,StringBuilder text,int size,uint flags);
-    [DllImport("user32.dll")] static extern bool GetMenuItemRect(IntPtr window,IntPtr menu,uint item,out Rect rect);
-    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window,ref Point point);
+    [StructLayout(LayoutKind.Sequential)] struct Mouse {
+        public int x,y; public uint data,flags,time; public UIntPtr extra;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Key {
+        public ushort vk,scan; public uint flags,time; public UIntPtr extra;
+    }
+    [StructLayout(LayoutKind.Explicit)] struct Payload {
+        [FieldOffset(0)] public Key key;
+        [FieldOffset(0)] public Mouse mouse;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Input { public uint type; public Payload data; }
+    [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint n,Input[] input,int size);
+    [DllImport("user32.dll")] static extern uint GetMenuState(IntPtr menu,uint item,uint byPosition);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
+    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr w);
+    static int ProcessOf(IntPtr w) { int pid; GetWindowThreadProcessId(w,out pid); return pid; }
+    public static string State(int pid) {
+        var result = new StringBuilder("foregroundIsCandidate=").Append(ProcessOf(GetForegroundWindow())==pid);
+        EnumWindows((w,p)=>{
+            if(ProcessOf(w)!=pid) return true;
+            var cls=new StringBuilder(100); GetClassName(w,cls,100);
+            result.Append(" [").Append(cls).Append(" visible=").Append(IsWindowVisible(w))
+                  .Append(" enabled=").Append(IsWindowEnabled(w)).Append(" owned=").Append(GetWindow(w,4)!=IntPtr.Zero).Append("]");
+            return true;
+        },IntPtr.Zero); return result.ToString();
+    }
+    static void Press(int pid,ushort vk) {
+        if(ProcessOf(GetForegroundWindow())!=pid) throw new Exception("Candidate lost foreground: "+State(pid));
+        var keys = new Input[2];
+        for(int i=0;i<2;i++){
+            keys[i].type=1;
+            keys[i].data.key.vk=vk;
+            keys[i].data.key.flags=(uint)((vk==0x23?1:0)|(i==1?2:0));
+        }
+        if(SendInput(2,keys,Marshal.SizeOf(typeof(Input)))!=2)
+            throw new Exception("SendInput failed ("+Marshal.GetLastWin32Error()+"): "+State(pid));
+    }
     public static IntPtr Find(int pid,string cls,IntPtr owner) {
         IntPtr found=IntPtr.Zero;
         EnumWindows((w,p)=>{int id; GetWindowThreadProcessId(w,out id); var name=new StringBuilder(128);
@@ -55,13 +89,22 @@ public static class PaperroomAbout {
         for(uint i=0;i<count;i++){
             var text=new StringBuilder(256); GetMenuString(menu,i,text,256,0x400);
             if(text.ToString()!=label) continue;
-            Rect r; if(!GetMenuItemRect(IntPtr.Zero,menu,i,out r)) break;
-            var pt=new Point{x=(r.left+r.right)/2,y=(r.top+r.bottom)/2};
-            if(!ScreenToClient(popup,ref pt)) break;
-            IntPtr xy=(IntPtr)((pt.y<<16)|(pt.x&65535));
-            if(!PostMessage(popup,0x200,IntPtr.Zero,xy) || !PostMessage(popup,0x201,(IntPtr)1,xy) ||
-               !PostMessage(popup,0x202,IntPtr.Zero,xy)) break;
-            return;
+            int pid=ProcessOf(popup);
+            // About is the final item. Use the real menu keyboard loop; this also
+            // works when the menu scrolls on a small desktop. Never activate a
+            // row until Win32 reports the requested row is actually highlighted.
+            if(i!=count-1) throw new Exception("About is no longer the final File item.");
+            Press(pid,0x23); // VK_END
+            var timer=System.Diagnostics.Stopwatch.StartNew();
+            while(timer.ElapsedMilliseconds<4000) {
+                uint state=GetMenuState(menu,i,0x400);
+                if(state!=0xffffffff && (state&0x80)!=0 && (state&3)==0 && IsWindowVisible(popup)) {
+                    Press(pid,0x0d); // VK_RETURN
+                    return;
+                }
+                System.Threading.Thread.Sleep(40);
+            }
+            throw new Exception("Native menu did not highlight About: "+State(pid));
         }
         throw new Exception("Could not select the named About item from the native popup.");
     }
@@ -75,7 +118,7 @@ function Wait-Window([string]$Class,[IntPtr]$Owner) {
         if ($window -ne [IntPtr]::Zero) { return $window }
         Start-Sleep -Milliseconds 100
     }
-    throw "Did not observe expected native window class $Class."
+    throw "Did not observe $Class. Candidate state: $([PaperroomAbout]::State($app.Id))"
 }
 
 function Stop-Cleanly([IntPtr]$Window) {
@@ -117,6 +160,7 @@ try {
 
     $app = Start-Portable
     $main = Wait-Window 'PaperroomWindow' 0
+    [void][PaperroomAbout]::SetForegroundWindow($main)
     $button = [PaperroomAbout]::GetDlgItem($main,109)
     if ([PaperroomAbout]::Text($button) -cne '檔案' -or -not [PaperroomAbout]::PostMessage($button,245,0,0)) {
         throw 'File button unavailable.'

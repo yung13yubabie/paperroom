@@ -162,6 +162,34 @@ class NoticeBundleTests(unittest.TestCase):
         self.assertFalse(wrong.exists())
         self.assertFalse(list(self.folder.glob(".paperroom-qa-*")))
 
+    def test_qa_stage_checks_the_exact_rust_library_notice_before_writing(self):
+        root = verify.ROOT / "docs" / "third-party" / "pdf-assets"
+        notice = self.folder / "COPYRIGHT-library.html"
+        notice.write_bytes(self.rust)
+        out = self.folder / "with-rust.zip"
+        result = verify.stage_qa_zip(out, self.exe, COMMIT, self.exe_sha, self.receipt_sha,
+                                     verify.sha(self.rust), root, notice)
+        self.assertTrue(result["rust_copyright_library_match"])
+        self.assertFalse(result["notice_scope_complete"])
+        self.assertEqual(result["listed_notice_count"], 5)
+        with ZipFile(out) as z:
+            self.assertEqual(z.read(verify.RUST_NOTICE), self.rust)
+            index = json.loads(z.read(verify.INDEX))
+            self.assertIn({"path": verify.RUST_NOTICE, "role": "rust-toolchain-notice",
+                           "sha256": verify.sha(self.rust)}, index["notices"])
+
+        missing = self.folder / "missing-receipt-hash.zip"
+        with self.assertRaisesRegex(ValueError, "does not record"):
+            verify.stage_qa_zip(missing, self.exe, COMMIT, self.exe_sha, self.receipt_sha,
+                                None, root, notice)
+        self.assertFalse(missing.exists())
+        notice.write_bytes(self.rust + bytes([10]))
+        wrong = self.folder / "wrong-rust.zip"
+        with self.assertRaisesRegex(ValueError, "does not match the pinned receipt"):
+            verify.stage_qa_zip(wrong, self.exe, COMMIT, self.exe_sha, self.receipt_sha,
+                                verify.sha(self.rust), root, notice)
+        self.assertFalse(wrong.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

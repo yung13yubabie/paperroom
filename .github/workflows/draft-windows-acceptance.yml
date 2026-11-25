@@ -110,8 +110,14 @@ jobs:
         run: |
           python -B ./scripts/test_windows_notice_bundle.py
           if ($LASTEXITCODE -ne 0) { throw 'Notice-bundle verifier tests failed.' }
+          $toolchain = '1.100.0-x86_64-pc-windows-msvc'
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain notice source is unavailable.' }
+          $sysroot = rustup run $toolchain rustc --print sysroot
+          if ($LASTEXITCODE -ne 0 -or !$sysroot) { throw 'The pinned Rust sysroot was unavailable.' }
+          $rustNotice = Join-Path $sysroot 'share/doc/rust/COPYRIGHT-library.html'
           $staged = Join-Path $env:PAPERROOM_ACCEPTANCE_ROOT 'paperroom-notice-QA.zip'
-          python -B ./scripts/verify-windows-notice-bundle.py --exe $env:PAPERROOM_EXE --exe-sha256 $env:PINNED_EXE_SHA --provenance $env:PAPERROOM_RECEIPT --provenance-sha256 $env:PINNED_PROVENANCE_SHA --commit $env:PINNED_SOURCE --stage-qa-zip $staged
+          python -B ./scripts/verify-windows-notice-bundle.py --exe $env:PAPERROOM_EXE --exe-sha256 $env:PINNED_EXE_SHA --provenance $env:PAPERROOM_RECEIPT --provenance-sha256 $env:PINNED_PROVENANCE_SHA --commit $env:PINNED_SOURCE --stage-qa-zip $staged --rust-library-notice $rustNotice
           if ($LASTEXITCODE -ne 0) { throw 'The notice evidence does not match this candidate.' }
 
       - name: Open About and read the four notices through the native GUI

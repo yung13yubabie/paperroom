@@ -1,0 +1,156 @@
+name: Paperroom native CRT comparison (draft only)
+on:
+  push:
+    branches: ['dev/offline-workspace-handoff']
+    paths: ['.github/workflows/paperroom-crt-probe.yml']
+permissions:
+  contents: read
+jobs:
+  crt-comparison:
+    if: github.repository == 'yung13yubabie/paperroom' && github.event_name == 'push' && github.ref == 'refs/heads/dev/offline-workspace-handoff'
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BASE_SHA: f5e4d577087c22b4620c9fc9517558aced3fdd93
+      RUSTUP_TOOLCHAIN: 1.100.0
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Compare dynamic and static CRT using one native toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $head = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong checkout SHA.' }
+          $parent = git rev-parse --verify 'HEAD^'
+          if ($LASTEXITCODE -ne 0 -or $parent -cne $env:BASE_SHA) { throw 'Probe must be one commit from the pinned source.' }
+          $changed = @(git diff --name-only --no-renames $env:BASE_SHA $head)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/paperroom-crt-probe.yml') {
+            throw 'Application source or another file differs from the approved base.'
+          }
+          $lock = [IO.File]::ReadAllText((Join-Path $PWD 'Cargo.lock')).Replace("`r`n","`n")
+          $lockHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($lock))).ToLowerInvariant()
+          if ($lockHash -cne 'edf5c1da7d7239aa150f1b5469226d8b050656f62525b68800172624f900fe8c') { throw 'Wrong lock bytes.' }
+
+          $finder = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $finder -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio C++ toolset unavailable.' }
+          try {
+            Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll') *> $null
+            Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' *> $null
+            $dumpbin = (Get-Command dumpbin.exe -CommandType Application).Source
+            $linker = (Get-Command link.exe -CommandType Application).Source
+            $cc = (Get-Command cl.exe -CommandType Application).Source
+          } catch { throw 'Native Visual Studio tools could not be initialized.' }
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $linker
+          $env:CC_x86_64_pc_windows_msvc = $cc
+
+          $bootstrap = @(rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target $env:TARGET 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain provisioning failed.' }
+          $rustcInfo = @(rustc -vV)
+          if ($LASTEXITCODE -ne 0 -or $rustcInfo -notcontains "host: $env:TARGET" -or
+              $rustcInfo -notcontains "release: $env:RUSTUP_TOOLCHAIN") { throw 'Not the pinned native x64 MSVC toolchain.' }
+          $fetched = @(cargo fetch --locked --target $env:TARGET 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'Locked package fetch failed.' }
+
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          $common = @('-C', 'link-arg=/PDBALTPATH:%_PDB%')
+          $roots = @{ '/paperroom' = $env:GITHUB_WORKSPACE; '/cargo' = $cargoHome; '/toolchain' = $rustupHome; '/build-temp' = $env:RUNNER_TEMP }
+          foreach ($token in $roots.Keys | Sort-Object { $roots[$_].Length }) {
+            $path = [IO.Path]::GetFullPath($roots[$token]).TrimEnd('\', '/')
+            $common += "--remap-path-prefix=$($path.Replace('/', '\'))=$token"
+            $common += "--remap-path-prefix=$($path.Replace('\', '/'))=$token"
+          }
+          Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+          $env:CARGO_NET_OFFLINE = 'true'
+          $env:CARGO_TERM_COLOR = 'never'
+          $env:CARGO_INCREMENTAL = '0'
+          $env:CC_ENABLE_DEBUG_OUTPUT = '1'
+
+          function DllNames($lines) {
+            @($lines | ForEach-Object {
+              if ("$_" -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1].ToLowerInvariant() }
+            } | Sort-Object -Unique)
+          }
+          $summary = @("# Paperroom CRT comparison", "Base: $env:BASE_SHA", "Probe checkout: $head", "Cargo.lock SHA-256: $lockHash",
+            "MSVC tools: cl $((Get-Item $cc).VersionInfo.FileVersion), link $((Get-Item $linker).VersionInfo.FileVersion)",
+            ($rustcInfo -join '; '), 'Test-only; no published or downloadable artifacts.')
+          $errors = @()
+          foreach ($mode in 'default', 'static') {
+            $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "paperroom-crt-$mode"
+            $flags = @($common)
+            if ($mode -ceq 'static') { $flags += @('-C', 'target-feature=+crt-static') }
+            $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
+            $phase = 'new target directory'
+            try {
+              if (Test-Path -LiteralPath $env:CARGO_TARGET_DIR) { throw 'Target dir is not fresh.' }
+              $phase = 'full native Rust suite'
+              $log = @(cargo test --offline --locked --target $env:TARGET 2>&1)
+              $exitCode = $LASTEXITCODE
+              $testLines = @($log | ForEach-Object { "$_" } | Where-Object { $_ -match '^test result:' })
+              if ($exitCode -ne 0 -or $testLines.Count -ne 1 -or
+                  $testLines[0] -notmatch '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+                throw 'Full native suite did not finish with zero failed, ignored and filtered tests.'
+              }
+              $summary += "$mode test: $($testLines[0])"
+
+              $phase = 'candidate link and map'
+              $map = Join-Path $env:RUNNER_TEMP "paperroom-$mode.map"
+              $build = @(cargo rustc --offline --locked --release --target $env:TARGET -vv -- -C "link-arg=/MAP:$map" -C 'link-arg=/VERBOSE:LIB' 2>&1)
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $map -PathType Leaf)) { throw 'Native build or map capture failed.' }
+              $phase = 'bundled SQLite compiler flag'
+              $flag = if ($mode -ceq 'static') { 'MT' } else { 'MD' }
+              $cRows = @($build | ForEach-Object { "$_" } | Where-Object {
+                $_ -match 'sqlite3\.c' -and $_ -match ('(?:^|["\s])[-/]{0}(?:["\s]|$)' -f $flag)
+              })
+              $otherFlag = if ($flag -ceq 'MT') { 'MD' } else { 'MT' }
+              $mixed = @($cRows | Where-Object { $_ -match ('(?:^|["\s])[-/]{0}(?:["\s]|$)' -f $otherFlag) })
+              if ($cRows.Count -lt 1 -or $mixed.Count) { throw "Bundled SQLite compiler flag $flag was not evidenced unambiguously." }
+
+              $phase = 'PE imports and CRT map markers'
+              $exe = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release\paperroom.exe"
+              $d = @(& $dumpbin /DEPENDENTS $exe)
+              if ($LASTEXITCODE -ne 0) { throw 'DUMPBIN /DEPENDENTS failed.' }
+              $i = @(& $dumpbin /IMPORTS $exe)
+              if ($LASTEXITCODE -ne 0) { throw 'DUMPBIN /IMPORTS failed.' }
+              $deps = @(DllNames $d)
+              $all = @(DllNames ($d + $i))
+              if ($deps.Count -lt 1 -or $all.Count -lt 1) { throw 'No parsed native DLL evidence.' }
+              if ($mode -ceq 'default' -and $deps -notcontains 'vcruntime140.dll') { throw 'Baseline no longer reproduces observed direct v14 runtime import.' }
+              if ($mode -ceq 'static' -and @($all | Where-Object { $_ -match '^(?:vcruntime|msvcp|concrt)[0-9][a-z0-9_]*\.dll$' }).Count) {
+                throw 'Static probe still imports an MSVC runtime DLL.'
+              }
+              $mapText = [IO.File]::ReadAllText($map)
+              $hints = @([regex]::Matches($mapText, '(?i)\b(?:libcmt|libvcruntime|libucrt)(?:\.lib)?(?=[:()\s]|$)') |
+                ForEach-Object { $_.Value.ToLowerInvariant() } | Sort-Object -Unique)
+              if ($mode -ceq 'static' -and $hints.Count -eq 0) { throw 'No static CRT map markers: attribution remains blocked.' }
+              $summary += "$mode EXE SHA-256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
+              $summary += "$mode imports (direct + parsed /IMPORTS): $($all -join ', ')"
+              $summary += "$mode SQLite C flag: $flag; linker-map CRT markers (not a legal inventory): $($hints -join ', ')"
+              $summary += "$mode map SHA-256: $((Get-FileHash -LiteralPath $map -Algorithm SHA256).Hash)"
+
+              $phase = 'native three-profile storage smoke'
+              $smoke = @(./scripts/windows-storage.ps1 -Exe $exe 6>&1 2>&1)
+              foreach ($profile in 'default', 'portable', 'portable-marker') {
+                $marks = @($smoke | ForEach-Object { "$_" } | Where-Object { $_ -ceq "$profile recovery and SQLite integrity passed." })
+                if ($marks.Count -ne 1) { throw "Missing actual storage smoke completion for $profile." }
+              }
+              $summary += "$mode real storage/recovery smoke passed in default, portable, and portable-marker modes."
+            } catch {
+              # Do not print arbitrary compiler/PowerShell diagnostic text or runner-local paths.
+              $errors += "$mode failed in phase: $phase"
+            }
+          }
+          $dirty = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { $errors += 'Probe workspace is not clean.' }
+          $summary += $errors
+          $summary | ForEach-Object { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $_; Write-Host $_ }
+          if ($errors.Count) { throw ($errors -join '; ') }
+          Write-Host 'Both native probe builds passed. Clean desktop and distribution clearance are separate.'

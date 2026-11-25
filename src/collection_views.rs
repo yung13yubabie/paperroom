@@ -1,5 +1,5 @@
 //! Named collection views select existing rows without changing membership or notes.
-use super::{Notebook, Result, Row};
+use super::{Notebook, Result, Row, collection_group_folds::GroupValue};
 #[cfg(windows)]
 pub(crate) use super::collections::{ChildDraft, CollectionTemplate, RelationMember, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -1331,7 +1331,7 @@ impl Notebook {
 
     pub(crate) fn presented_collection_lanes(
         &self, collection: i64, view: Option<&CollectionView>,
-    ) -> Result<Vec<(String,Vec<Row>)>> {
+    ) -> Result<Vec<(GroupValue,Vec<Row>)>> {
         let rows = self.filtered_collection_rows(collection, view)?;
         let group_key = view.and_then(|view| view.presentation.group_key.as_deref());
         let group = group_key.map(|key| self.collection_values(collection,key)).transpose()?;
@@ -1339,12 +1339,12 @@ impl Notebook {
             .is_some_and(|rules| !rules.sorts.is_empty()))
         {
             // Tables and lists preserve global sort order while still displaying the real status.
-            let mut ordered = Vec::<(String, Vec<Row>)>::new();
+            let mut ordered = Vec::<(GroupValue, Vec<Row>)>::new();
             for (row, status) in rows {
-                if let Some((previous, run)) = ordered.last_mut() && *previous == status {
+                if let Some((previous, run)) = ordered.last_mut() && previous.0.as_ref() == Some(&status) {
                     run.push(row);
                 } else {
-                    ordered.push((status, vec![row]));
+                    ordered.push((GroupValue(Some(status)), vec![row]));
                 }
             }
             return Ok(ordered);
@@ -1357,9 +1357,7 @@ impl Notebook {
             };
             lanes.entry(group).or_default().push(row);
         }
-        Ok(lanes.into_iter().map(|(group, rows)|
-            (group.map_or_else(|| "未設定".into(), |value|value.replace(['\r','\n','\t']," ")), rows)
-        ).collect())
+        Ok(lanes.into_iter().map(|(group, rows)| (GroupValue(group), rows)).collect())
     }
 
     pub(crate) fn calendar_collection_rows(
@@ -1479,7 +1477,7 @@ impl Notebook {
     }
 }
 
-fn collection_view_rows(db: &Connection, collection: i64, id: Option<i64>) -> Result<Vec<CollectionView>> {
+pub(super) fn collection_view_rows(db: &Connection, collection: i64, id: Option<i64>) -> Result<Vec<CollectionView>> {
     let mut stmt = db.prepare("SELECT id,name,layout,status,keyword,filter_key,filter_kind,filter_value,calendar_key,group_key,sort_key,sort_kind,sort_desc,calendar_month,calendar_week_day,calendar_from,calendar_until,list_mode,calendar_end_key,rules_json,settings_revision,timeline_mode FROM collection_views
                                             WHERE collection_id=?1 AND (?2 IS NULL OR id=?2) ORDER BY name COLLATE NOCASE,id")?;
     let rows = stmt.query_map(params![collection, id], |r| {

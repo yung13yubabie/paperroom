@@ -3059,6 +3059,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     . (Join-Path $PSScriptRoot 'windows-note-history-state.ps1')
     . (Join-Path $PSScriptRoot 'windows-collection-due-filters.ps1')
     . (Join-Path $PSScriptRoot 'windows-collection-display-columns.ps1')
+    . (Join-Path $PSScriptRoot 'windows-collection-group-folds.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

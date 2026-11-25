@@ -1,4 +1,4 @@
-use super::*;
+use super::{*, collection_group_ui::CollectionLine};
 use crate::store::collection_display::MAX_DISPLAY_COLUMNS;
 use std::collections::HashMap;
 
@@ -71,12 +71,12 @@ impl App {
                 && view.calendar.is_none() && view.week.is_none() && view.timeline.is_none() => view,
             _ => return Err("請先開啟這個集合的表格或清單。".into()),
         };
-        let rows: Vec<_> = view.lanes.iter().flat_map(|(group, rows)| rows.iter().map(move |note| (group, note))).collect();
+        let rows: Vec<_> = view.expanded_lanes().flat_map(|(group, rows)| rows.iter().map(move |note| (group, note))).collect();
         let chosen = unsafe { choose(self.hwnd, self.widgets.links, &rows,
-            |(group, note)| format!("{group}　{}  ({})", note.title, note.id)) };
+            |(group, note)| format!("{}　{}  ({})", group.label(), note.title, note.id)) };
         let Some((group, note)) = chosen.map(|index| rows[index]) else { return Ok(()) };
         let group_key = view.saved_view.as_ref().and_then(|saved| saved.presentation.group_key.as_deref()).unwrap_or("狀態");
-        let mut report = format!("筆記標題　{}\r\n{group_key}　{group}", note.title);
+        let mut report = format!("筆記標題　{}\r\n{group_key}　{}", note.title, group.label());
         if let Some(columns) = &view.display_columns {
             for column in columns {
                 write!(report, "\r\n{}　{}", column.key, column.value(note.id))?;
@@ -131,10 +131,15 @@ impl App {
             let mut rect = RECT { left: left + padding, top: first, right, bottom: first + step };
             unsafe { draw_text(dc, self.fonts[4], TEAL, "沒有符合條件的資料列。", &mut rect, DT_SINGLELINE); }
         }
-        for (offset, (group, note)) in view.lanes.iter().flat_map(|(group, rows)| rows.iter().map(move |note| (group, note)))
-            .skip(view.row).take(visible).enumerate()
-        {
-            draw_row(first + offset as i32 * step, Some((group, note)));
+        for (offset, line) in view.table_lines().skip(view.row).take(visible).enumerate() {
+            let y = first + offset as i32 * step;
+            match line {
+                CollectionLine::Heading(group, count, folded) => {
+                    let rect = RECT { left, top: y, right, bottom: y + step - 1 };
+                    unsafe { self.paint_collection_fold_header(dc, rect, group, count, folded); }
+                }
+                CollectionLine::Note(group, note) => draw_row(y, Some((&group.label(), note))),
+            }
         }
     }
 }

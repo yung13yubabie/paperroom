@@ -5,7 +5,7 @@ use crate::store::collection_views::{
     Presentation, PropertyFilter, RelationMember, ScheduleAdjustment, ScheduledRow, SortRule, SortSource, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body,
 };
 use crate::store::typed_properties::PropertyType;
-use super::collection_display_ui::DisplayProperty;
+use super::{collection_display_ui::DisplayProperty, collection_group_ui::CollectionLine};
 
 #[derive(Clone, Copy)]
 struct FilterRoom {
@@ -100,10 +100,15 @@ impl Kanban {
         self.saved_view.as_ref().is_some_and(|view|view.presentation.list_mode)
     }
 
+    pub(super) fn first_table_line(&self, top: i32, step: i32) -> i32 {
+        if self.is_list() && self.display_columns.is_none() { top } else { top + step }
+    }
+
     pub(super) fn max_scroll_row(&self) -> usize {
         if let Some((_, rows)) = &self.timeline { return rows.len().saturating_sub(1); }
-        let sizes = self.lanes.iter().map(|(_,rows)|rows.len());
-        let count = if self.is_table() { sizes.sum() } else { sizes.max().unwrap_or(0) };
+        let count = if self.is_table() { self.table_lines().count() } else {
+            self.expanded_lanes().map(|(_, rows)| rows.len()).max().unwrap_or(0)
+        };
         count.saturating_sub(1)
     }
 }
@@ -129,12 +134,17 @@ impl App {
                 .chain(active.timeline.iter().flat_map(|(_, rows)| rows.iter().map(|entry| &entry.row)));
             return Ok(ordered.filter_map(|row|by_id.remove(&row.id)).collect());
         }
-        if !view.as_ref().is_some_and(|view| view.presentation.group_key.is_some() || !view.sort_rules().is_empty()) {
+        let folds = match &self.extras.workspace {
+            Some(WorkspaceView::Kanban(active)) if active.id == id => active.group_folds.as_ref(),
+            _ => None,
+        };
+        if folds.is_none() && !view.as_ref().is_some_and(|view| view.presentation.group_key.is_some() || !view.sort_rules().is_empty()) {
             return Ok(rows);
         }
         let mut by_id: std::collections::HashMap<_,_> =
             rows.into_iter().map(|(row,status)| (row.id,(row,status))).collect();
         Ok(self.notebook.presented_collection_lanes(id,view.as_ref())?.into_iter()
+            .filter(|(group, _)| !folds.is_some_and(|folds| folds.contains(group)))
             .flat_map(|(_,rows)| rows).filter_map(|row|by_id.remove(&row.id)).collect())
     }
 
@@ -187,7 +197,8 @@ impl App {
         } else {
             None
         };
-        let mut view = Kanban { id,title,saved_view,column,row,checkbox,display_columns,calendar,week,timeline,timeline_drag:None,lanes };
+        let group_folds = saved_view.as_ref().map(|view| self.notebook.collection_group_folds(view)).transpose()?.flatten();
+        let mut view = Kanban { id,title,saved_view,column,row,checkbox,display_columns,calendar,week,timeline,timeline_drag:None,lanes,group_folds };
         view.row = row.min(view.max_scroll_row());
         unsafe { self.activate_workspace(WorkspaceView::Kanban(view)); }
         Ok(())
@@ -1305,9 +1316,10 @@ impl App {
     }
 
     pub(super) unsafe fn click_collection_view(&mut self, lp: LPARAM) -> Result<()> {
+        let (x,y) = (lp as u16 as i16 as i32,(lp >> 16) as u16 as i16 as i32);
+        let area = unsafe { self.board_area() };
+        if unsafe { self.click_collection_fold(area, x, y)? } { return Ok(()); }
         if let Some(WorkspaceView::Kanban(view)) = &self.extras.workspace {
-            let (x,y) = (lp as u16 as i16 as i32,(lp >> 16) as u16 as i16 as i32);
-            let area = unsafe { self.board_area() };
             if let Some((week,_)) = &view.week {
                 let grid = self.calendar_grid(area);
                 if grid.right-grid.left>=7 && x>=grid.left && x<grid.right && y>=grid.top && y<grid.bottom {
@@ -1320,13 +1332,14 @@ impl App {
             }
             if view.is_list() {
                 let (left,right,top,step) = self.collection_table_rect(area);
-                let top = if view.display_columns.is_some() { top + step } else { top };
+                let top = view.first_table_line(top, step);
                 if x>=left && x<right && y>=top && y<top+((area.bottom-top)/step)*step {
                     let offset = ((y-top)/step) as usize;
-                    if let Some(note) = view.lanes.iter().flat_map(|(_,rows)|rows).nth(view.row+offset) {
-                        let note = note.id;
-                        unsafe { self.open_import(note,"已開啟清單筆記"); }
-                    }
+                    let note = match view.table_lines().nth(view.row+offset) {
+                        Some(CollectionLine::Note(_, note)) => Some(note.id),
+                        _ => None,
+                    };
+                    if let Some(note) = note { unsafe { self.open_import(note,"已開啟清單筆記"); } }
                 }
                 return Ok(());
             }
@@ -1622,14 +1635,17 @@ impl App {
                 let mut row = RECT {left,top,right,bottom:top+step};
                 draw_text(dc,self.fonts[4],TEAL,"沒有符合條件的資料列。",&mut row,DT_SINGLELINE);
             }
-            for (index,(status,note)) in view.lanes.iter().flat_map(|(status,rows)|rows.iter().map(move |row|(status,row)))
-                .skip(view.row).take(visible).enumerate()
-            {
+            for (index, line) in view.table_lines().skip(view.row).take(visible).enumerate() {
                 let y = top+index as i32*step;
                 let mut row = RECT {left,top:y,right,bottom:y+step-1};
-                fill(dc,&row,if index%2==0 { PAPER } else { MINT });
-                row.left += self.scaled(8);
-                draw_text(dc,self.fonts[4],INK,&format!("{}　·　{status}",note.title),&mut row,DT_SINGLELINE|DT_END_ELLIPSIS);
+                match line {
+                    CollectionLine::Heading(group, count, folded) => self.paint_collection_fold_header(dc, row, group, count, folded),
+                    CollectionLine::Note(group, note) => {
+                        fill(dc,&row,if index%2==0 { PAPER } else { MINT });
+                        row.left += self.scaled(8);
+                        draw_text(dc,self.fonts[4],INK,&format!("{}　·　{}",note.title,group.label()),&mut row,DT_SINGLELINE|DT_END_ELLIPSIS);
+                    }
+                }
             }
         }
     }
@@ -1650,7 +1666,7 @@ impl App {
             rows.iter().map(move |row| (status,row))
         }).nth(view.row+offset) else { return Ok(()) };
         let checked = self.notebook.toggle_collection_checkbox(
-            view.id,row.id,status,key,values.get(&row.id).map(String::as_str),
+            view.id,row.id,status.0.as_deref().unwrap_or_default(),key,values.get(&row.id).map(String::as_str),
         )?;
         let (id,title,saved) = (view.id,view.title.clone(),view.saved_view.clone());
         unsafe {
@@ -1694,12 +1710,20 @@ impl App {
                 return;
             }
             let visible = ((area.bottom-top-step)/step).max(0) as usize;
-            for (offset,(status,note)) in view.lanes.iter().flat_map(|(s,rows)|rows.iter().map(move |r|(s,r)))
-                .skip(view.row).take(visible).enumerate() {
-                let state = view.checkbox.as_ref().map_or("",|(_,values)| {
-                    checkbox_label(values.get(&note.id).map(String::as_str))
-                });
-                draw_row(top+(offset as i32+1)*step,status,&note.title,state,false);
+            for (offset, line) in view.table_lines().skip(view.row).take(visible).enumerate() {
+                let y = top+(offset as i32+1)*step;
+                match line {
+                    CollectionLine::Heading(group, count, folded) => {
+                        let rect = RECT {left,top:y,right,bottom:y+step-1};
+                        self.paint_collection_fold_header(dc, rect, group, count, folded);
+                    }
+                    CollectionLine::Note(group, note) => {
+                        let state = view.checkbox.as_ref().map_or("",|(_,values)| {
+                            checkbox_label(values.get(&note.id).map(String::as_str))
+                        });
+                        draw_row(y, &group.label(), &note.title, state, false);
+                    }
+                }
             }
         }
     }

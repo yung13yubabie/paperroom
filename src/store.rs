@@ -91,6 +91,8 @@ mod collections;
 pub(crate) use collections::CollectionEntry;
 #[path = "collection_display.rs"]
 pub(crate) mod collection_display;
+#[path = "collection_group_folds.rs"]
+pub(crate) mod collection_group_folds;
 #[path = "collection_field_rules.rs"]
 pub(crate) mod collection_field_rules;
 #[path = "collection_views.rs"]
@@ -127,7 +129,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 34;
+const SCHEMA_VERSION: i32 = 35;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -388,6 +390,9 @@ impl Notebook {
         // Version 33 adds saved date operators to rules_json. Older readers reject their IDs.
         if version < 34 {
             tx.execute_batch(collection_display::SCHEMA)?;
+        }
+        if version < 35 {
+            tx.execute_batch(collection_group_folds::SCHEMA)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -780,7 +785,9 @@ mod tests {
 
     pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "DROP TRIGGER record_prior_note_revision;
+            "DROP TRIGGER IF EXISTS reset_collection_group_folds;
+             DROP TABLE IF EXISTS collection_group_folds;
+             DROP TRIGGER record_prior_note_revision;
              DROP TRIGGER write_note_history;
              DROP VIEW capture_note_history;
              DROP TABLE note_revision_attachments;

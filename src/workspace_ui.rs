@@ -16,6 +16,8 @@ mod note_graph_ui;
 mod collection_view_ui;
 #[path = "collection_display_ui.rs"]
 mod collection_display_ui;
+#[path = "collection_group_ui.rs"]
+mod collection_group_ui;
 #[path = "collection_field_ui.rs"]
 mod collection_field_ui;
 #[path = "board_group_ui.rs"]
@@ -32,7 +34,8 @@ pub(super) enum WorkspaceView {
 pub(super) struct Kanban {
     id: i64,
     title: String,
-    lanes: Vec<(String, Vec<Row>)>,
+    lanes: Vec<(crate::store::collection_group_folds::GroupValue, Vec<Row>)>,
+    group_folds: Option<crate::store::collection_group_folds::GroupFolds>,
     column: usize,
     row: usize,
     saved_view: Option<crate::store::collection_views::CollectionView>,
@@ -570,7 +573,7 @@ impl App {
                 (14, previous), (15, next), (16, open_date), (17, edit_dates),
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
                 (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
-                (24, "表格與清單欄位…"),
+                (24, "表格與清單欄位…"), (25, "群組收合…"),
             ]);
             match action {
                 1 => {
@@ -582,6 +585,7 @@ impl App {
                 22 => return self.add_collection_row_ui(id, title, None),
                 23 => return self.collection_rule_menu(id),
                 24 => return self.collection_display_menu(id, title),
+                25 => return self.collection_fold_menu(id, title),
                 2 | 3 | 6 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = choose(hwnd, anchor, &rows, |(row, status)| {
@@ -957,8 +961,12 @@ impl App {
                     let mut title = RECT { left, top: area.top + self.scaled(10), right: left + width - self.scaled(16),
                                            bottom: area.top + self.scaled(42) };
                     fill(dc, &title, MINT);
-                    draw_text(dc, self.fonts[4], TEAL, &format!("{status}  ·  {}", rows.len()), &mut title,
-                              DT_SINGLELINE | DT_END_ELLIPSIS);
+                    let folded = view.is_folded(status);
+                    let heading = if view.group_folds.is_some() {
+                        Kanban::fold_heading(status, rows.len(), folded)
+                    } else { format!("{}  ·  {}", status.label(), rows.len()) };
+                    draw_text(dc, self.fonts[4], TEAL, &heading, &mut title, DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if folded { continue; }
                     let step = self.scaled(45).max(1);
                     for (offset, row) in rows.iter().skip(view.row).take(((area.bottom - title.bottom) / step).max(0) as usize).enumerate() {
                         let top = title.bottom + offset as i32 * step + self.scaled(6);

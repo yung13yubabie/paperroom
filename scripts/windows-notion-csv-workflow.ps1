@@ -138,7 +138,8 @@ $errorDialog = Wait-For 'malformed CSV refusal' {
 if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'CSV 每列欄位數必須一致')) {
     throw 'The refusal did not explain the malformed CSV.'
 }
-Finish-Revision $errorDialog 1
+[PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
+$null = Wait-For 'malformed CSV refusal closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
 Assert-NotionCsvWorkspace 'invalid'
 
 Select-Note "2｜$catalog"

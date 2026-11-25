@@ -281,19 +281,66 @@ public static class PaperroomHighlightGui {
         }
         throw new InvalidOperationException("The required menu item is absent: " + caption);
     }
-    public static IntPtr FilenameField(IntPtr dialog, uint pid) {
-        var matches = new List<IntPtr>();
+    private static IntPtr DialogFocus(IntPtr dialog) {
+        uint thread = GetWindowThreadProcessId(dialog, out uint ignoredPid);
+        var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
+        return thread != 0 && GetGUIThreadInfo(thread, ref gui) ? gui.Focus : IntPtr.Zero;
+    }
+    private static bool FilenameControlPath(IntPtr child, IntPtr dialog) {
+        for (IntPtr current = child; current != IntPtr.Zero && current != dialog; current = GetParent(current)) {
+            int id = GetDlgCtrlID(current);
+            string kind = Kind(current);
+            if ((id == 0x480 && String.Equals(kind, "Edit", StringComparison.OrdinalIgnoreCase)) ||
+                (id == 0x47c && kind.StartsWith("ComboBox", StringComparison.OrdinalIgnoreCase))) return true;
+        }
+        return false;
+    }
+    private static bool KnownDefaultName(IntPtr edit, string name) {
+        if (String.IsNullOrEmpty(name)) return false;
+        try {
+            string value = Read(edit).Trim().Trim('"');
+            return String.Equals(value, name, StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(value, System.IO.Path.GetFileNameWithoutExtension(name), StringComparison.OrdinalIgnoreCase);
+        } catch (InvalidOperationException) { return false; }
+    }
+    public static IntPtr FilenameField(IntPtr dialog, uint pid, string defaultName) {
+        if (GetWindowThreadProcessId(dialog, out uint dialogPid) == 0 || dialogPid != pid ||
+            !IsWindowVisible(dialog) || Kind(dialog) != "#32770") return IntPtr.Zero;
+        var canonical = new List<IntPtr>();
+        var defaults = new List<IntPtr>();
         EnumChildWindows(dialog, (hwnd, ignored) => {
-            if (!IsWindowVisible(hwnd) || !String.Equals(Kind(hwnd), "Edit", StringComparison.OrdinalIgnoreCase) ||
-                GetWindowThreadProcessId(hwnd, out uint found) == 0 || found != pid) return true;
-            for (IntPtr test = hwnd; test != IntPtr.Zero && test != dialog; test = GetParent(test)) {
-                int id = GetDlgCtrlID(test);
-                if (id == 0x480 || id == 0x47c) { matches.Add(hwnd); break; } // edt1 / cmb13, the file name field.
-            }
+            if (!IsWindowVisible(hwnd) || GetWindowThreadProcessId(hwnd, out uint found) == 0 || found != pid)
+                return true;
+            string kind = Kind(hwnd);
+            if (!String.Equals(kind, "Edit", StringComparison.OrdinalIgnoreCase) &&
+                !kind.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase)) return true;
+            if (FilenameControlPath(hwnd, dialog)) canonical.Add(hwnd);
+            if (KnownDefaultName(hwnd, defaultName)) defaults.Add(hwnd);
             return true;
         }, IntPtr.Zero);
-        if (matches.Count != 1) throw new InvalidOperationException("Could not locate a unique file name edit.");
-        return matches[0];
+        if (canonical.Count == 1) return canonical[0];
+        if (defaults.Count == 1) return defaults[0];
+        IntPtr focus = DialogFocus(dialog);
+        if (canonical.Count > 1 && canonical.Contains(focus) &&
+            (String.IsNullOrEmpty(defaultName) || defaults.Contains(focus))) return focus;
+        if (defaults.Count > 1 && defaults.Contains(focus)) return focus;
+        return IntPtr.Zero;
+    }
+    public static string DescribeFilenameControls(IntPtr dialog, uint pid) {
+        if (GetWindowThreadProcessId(dialog, out uint dialogPid) == 0 || dialogPid != pid)
+            return "Owned file dialog unavailable.";
+        var text = new StringBuilder("Dialog control IDs and classes:");
+        IntPtr focus = DialogFocus(dialog);
+        int count = 0;
+        EnumChildWindows(dialog, (hwnd, ignored) => {
+            if (GetWindowThreadProcessId(hwnd, out uint found) == 0 || found != pid) return true;
+            text.Append(" [").Append(Kind(hwnd)).Append(" id=").Append(GetDlgCtrlID(hwnd))
+                .Append(" parentID=").Append(GetDlgCtrlID(GetParent(hwnd)))
+                .Append(IsWindowVisible(hwnd) ? " visible" : " hidden")
+                .Append(hwnd == focus ? " focus]" : "]");
+            return ++count < 64;
+        }, IntPtr.Zero);
+        return text.ToString();
     }
 }
 '@
@@ -350,7 +397,20 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status) {
     Native-Menu 109 $Item $Caption
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
-    $edit = [PaperroomHighlightGui]::FilenameField($dialog, $process.Id)
+    $defaultName = switch ($Item) {
+        3 { 'note.md' }
+        4 { 'paperroom-backup.sqlite3' }
+        30 { 'paperroom-html.zip' }
+        default { '' }
+    }
+    try {
+        $edit = Wait-For "unique native file name field for $Caption" {
+            [PaperroomHighlightGui]::FilenameField($dialog, $process.Id, $defaultName)
+        }
+    } catch {
+        Write-Host ([PaperroomHighlightGui]::DescribeFilenameControls($dialog, $process.Id))
+        throw
+    }
     Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
     [PaperroomHighlightGui]::Write($edit, $Path)
     if ([PaperroomHighlightGui]::Read($edit) -cne $Path) { throw 'File dialog edited an unexpected path.' }

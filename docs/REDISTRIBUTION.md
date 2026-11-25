@@ -45,3 +45,7 @@ v0.1.1 Windows ZIP 的 `licenses/DEPENDENCIES.txt` 列出 Windows 依賴，並�
 草稿 ZIP 附四份內嵌的 PDF 補充通知與 Rust 標準函式庫版權原文。另從符合 Cargo.lock 雜湊的 crates.io 封存檔採集 Windows 目標相依的原文。清冊會列出沒有找到通知檔名的套件。讀取 Rust 1.100.0 的 `COPYRIGHT-library.html` 時，已核對內文沒有相對授權檔連結。它的外部連結仍需要網路。
 
 從 [草稿 PR](https://github.com/yung13yubabie/paperroom/pull/1) 指定的 CI 取得 GitHub 外層 ZIP，再解開裡面的 `Paperroom-v0.1.2-windows-x64-draft.zip`。以 CI 紀錄核對這兩層 ZIP、內含 EXE 和通知清冊的 SHA-256。草稿可用來核查包內實際檔案。正式發佈仍需確認未辨識組件及這次使用的 MSVC／Windows SDK 的適用條款。[Microsoft 的 Visual C++ 再散布說明](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170)
+
+## Microsoft CRT 對照
+
+草稿另外附上三個 Microsoft CRT 封存檔的同次連結證據。它以已觀察到的 MAP 成員起算，只從原生連結器搜尋過且符合當次版本的封存檔找成員。報告列出找到的封存檔雜湊、名稱匹配及尚未歸屬的位置。合成 C 探針另有報告，供比較連結選項引起的實際輸出差異。[CRT 與 SDK 通知](third-party/msvc-sdk/NOTICE.md)

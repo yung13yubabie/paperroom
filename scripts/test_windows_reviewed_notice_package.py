@@ -53,11 +53,14 @@ class ReviewedNoticePackage(unittest.TestCase):
         self.dependency = self.root / "dependency-inventory.tsv"
         self.dependency.write_bytes(pack.DEPENDENCY_HEADER + b"\n")
         self.link = self.root / "sanitized-link.json"
+        self.toolchain = {"vc_toolset_version": "14.44.35112", "sdk_version": "10.0.26100.0",
+                          "linker_version": "14.44.35207.1", "cl_version": "19.44.35207.1"}
         self.link.write_bytes(pack.json_bytes({
             "schema_version": 1, "exe_sha256": self.exe_sha, "source_commit": COMMIT,
             "map_sha256": "01" * 32, "verbose_stdout_sha256": "02" * 32,
             "map_header_matches_exe": True, "recognized_containers": [],
-            "map_observations": {"rows": []}, "verbose_selections": {"rows": []},
+            "map_observations": {"rows": [{"family": "libcmt", "member": "startup.obj", "symbol_rows": 2}]},
+            "verbose_selections": {"rows": []}, "toolchain": self.toolchain,
         }))
         self.zip = self.root / "notice.zip"
 
@@ -69,6 +72,70 @@ class ReviewedNoticePackage(unittest.TestCase):
     def build(self, include_link=True):
         return pack.build_package(self.zip, self.exe, self.receipt, self.dependency, self.root, self.expected(include_link),
                                   self.link if include_link else None)
+
+    def runtime(self):
+        candidate = {"schema_version": 1, "source_commit": COMMIT, "exe_sha256": self.exe_sha,
+                     "link_inventory_sha256": pack.notice.sha(self.link.read_bytes())}
+        versions = {name: self.toolchain[name] for name in pack.TOOLCHAIN_IDENTITY}
+        families = [
+            {"family": name, "search": {"trace_search_rows": 0, "absolute_paths": 0, "unbound_rows": 0,
+                                       "unapproved_paths": 0, "unreadable_approved_paths": 0},
+             "archives": [], "map_members": []} for name in pack.CRT_FAMILIES
+        ]
+        selected = families[0]
+        selected["search"].update(trace_search_rows=1, absolute_paths=1)
+        selected["archives"] = [{
+            "archive": "libcmt.lib", "origin": "msvc", "version": versions["vc_toolset_version"],
+            "sha256": "10" * 32, "archive_members": 200, "members_without_normalized_obj_basename": 1,
+        }]
+        selected["map_members"] = [{
+            "member": "startup.obj", "map_symbol_rows": 2, "observed_occurrences": 1,
+            "status": pack.CRT_MATCH, "archive_sha256": "10" * 32,
+        }]
+        proof = {**candidate, "target": pack.notice.TARGET, "toolchain": versions, "families": families,
+                 "scope": "Test-only archive correlation.", "map_sha256": "01" * 32,
+                 "verbose_stdout_sha256": "02" * 32, "verbose_stderr_sha256": None}
+        empty_stream = {"bytes": 0, "encoding": "utf-8-or-ansi", **dict.fromkeys(pack.PROBE_COUNTERS, 0)}
+        probe = {
+            **candidate, "toolchain": self.toolchain,
+            "comparison": {
+                "scope": pack.PROBE_SCOPE, "linker_version": "14.44.35207.1", "compiler_version": "19.44.35207.1",
+                "librarian_version": "14.44.35207.1",
+                "cases": [
+                    {"case": name, "verbosity_flag": flag, "explicit_crt_arguments": explicit,
+                     "canary_map_symbol_rows": 1, "crt_map_symbol_rows": 2, "synthetic_exe_sha256": "11" * 32,
+                     "stdout": empty_stream, "stderr": empty_stream}
+                    for name, (flag, explicit) in pack.PROBE_CASES.items()
+                ],
+            },
+            "installed_terms": {
+                **versions, "scope": pack.TERMS_SCOPE, "status": "installed version-specific metadata observed",
+                "checked_location_count": 8, "observed": [
+                    {"key": "sdk-version-license-rtf-1033", "bytes": 250, "sha256": "12" * 32,
+                     **dict.fromkeys(pack.TERMS_MARKERS, False)}
+                ],
+            },
+        }
+        return proof, probe
+
+    def runtime_files(self, proof, probe):
+        files = {
+            pack.CRT_PROOF: (self.root / "archive-proof.json", pack.json_bytes(proof)),
+            pack.CRT_NOTICE: (self.root / "authored-terms.md", "# 資料來源\n本專案撰寫的查核紀錄。\n".encode()),
+            pack.LINK_PROBE: (self.root / "link-probe.json", pack.json_bytes(probe)),
+        }
+        for path, content in files.values():
+            path.write_bytes(content)
+        expected = {
+            **self.expected(),
+            **{pack.RUNTIME_EVIDENCE[name][0]: pack.notice.sha(content) for name, (_, content) in files.items()},
+        }
+        return expected, files
+
+    def build_runtime(self, expected, files):
+        return pack.build_package(self.zip, self.exe, self.receipt, self.dependency, self.root, expected, self.link,
+                                  crt_proof=files[pack.CRT_PROOF][0], crt_notice=files[pack.CRT_NOTICE][0],
+                                  link_probe=files[pack.LINK_PROBE][0])
 
     def test_round_trip_binds_binary_toolchain_and_local_links(self):
         report = self.build()
@@ -180,6 +247,48 @@ class ReviewedNoticePackage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not account for every resolved"):
             pack.build_package(self.zip, self.exe, self.receipt, self.dependency, self.root, bound, self.link, root)
 
+    def test_runtime_proof_exact_members_and_expected_digests(self):
+        expected, files = self.runtime_files(*self.runtime())
+        report = self.build_runtime(expected, files)
+        with ZipFile(self.zip) as archive:
+            for name, (_, raw) in files.items():
+                self.assertEqual(archive.read(name), raw)
+            index = pack.notice.parse(archive.read(pack.INDEX))
+            self.assertEqual(set(archive.namelist()) & set(pack.RUNTIME_EVIDENCE), set(files))
+            self.assertFalse(index["notice_scope_complete"])
+            self.assertFalse(any(name.endswith((".lib", ".dll")) for name in archive.namelist()))
+        self.assertEqual(pack.verify_package(self.zip, report["package_sha256"], report["notice_index_sha256"],
+                                             expected), report)
+        wrong = {**expected, "crt_notice_sha256": "aa" * 32}
+        with self.assertRaisesRegex(ValueError, "CRT notice bytes differ"):
+            pack.verify_package(self.zip, report["package_sha256"], report["notice_index_sha256"], wrong)
+        with self.assertRaisesRegex(ValueError, "unexpected members"):
+            pack.verify_package(self.zip, report["package_sha256"], report["notice_index_sha256"], self.expected())
+
+    def test_runtime_source_trace_and_private_metadata_fail_without_zip(self):
+        for modify, error in (
+            (lambda proof, probe: proof.update(source_commit="0b" * 20), "another candidate"),
+            (lambda proof, probe: proof.update(verbose_stdout_sha256="ff" * 32), "traces differ"),
+            (lambda proof, probe: proof["families"][0]["map_members"].clear(), "exact link inventory MAP"),
+            (lambda proof, probe: probe["installed_terms"]["observed"][0].update(key=r"C:\private\Redist.txt"),
+             "unrecognized installed terms record"),
+            (lambda proof, probe: probe["comparison"]["cases"][0].update(synthetic_exe_sha256=self.exe_sha),
+             "separate canary"),
+        ):
+            with self.subTest(error=error):
+                proof, probe = self.runtime()
+                modify(proof, probe)
+                expected, files = self.runtime_files(proof, probe)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.build_runtime(expected, files)
+                self.assertFalse(self.zip.exists())
+        with self.assertRaisesRegex(ValueError, "require the exact sanitized link inventory"):
+            pack.identity(COMMIT, VERSION, self.exe_sha, "ab" * 32, "ac" * 32, crt_proof_sha="ad" * 32)
+        expected, files = self.runtime_files(*self.runtime())
+        with self.assertRaisesRegex(ValueError, "CRT archive proof together"):
+            pack.build_package(self.zip, self.exe, self.receipt, self.dependency, self.root, expected, self.link)
+        self.assertFalse(self.zip.exists())
+
     def test_cli_paths_and_component_digests(self):
         bound = self.expected(False)
         same = ["--commit", COMMIT, "--version", VERSION, "--exe-sha256", self.exe_sha, "--provenance-sha256",
@@ -192,6 +301,32 @@ class ReviewedNoticePackage(unittest.TestCase):
         report = pack.notice.parse(result.stdout)
         verified = cli("verify", *same, "--package", str(self.zip), "--package-sha256", report["package_sha256"],
                        "--notice-index-sha256", report["notice_index_sha256"])
+        self.assertEqual(pack.notice.parse(verified.stdout), report)
+
+    def test_cli_runtime_proof_and_notice_are_optional_hash_pairs(self):
+        bound, files = self.runtime_files(*self.runtime())
+        flags = {pack.CRT_PROOF: "--crt-proof", pack.CRT_NOTICE: "--crt-notice", pack.LINK_PROBE: "--link-probe"}
+        both = ["--commit", COMMIT, "--version", VERSION, "--exe-sha256", self.exe_sha, "--provenance-sha256",
+                bound["provenance_sha256"], "--dependency-inventory-sha256", bound["dependency_inventory_sha256"],
+                "--link-inventory-sha256", bound["link_inventory_sha256"]]
+        paths = []
+        for name, (path, _) in files.items():
+            flag = flags[name]
+            both.extend((flag + "-sha256", bound[pack.RUNTIME_EVIDENCE[name][0]]))
+            paths.extend((flag, str(path)))
+        prefix = [sys.executable, "-B", str(SCRIPT)]
+        build = subprocess.run(
+            [*prefix, "build", *both, *paths, "--output", str(self.zip), "--exe", str(self.exe),
+             "--provenance", str(self.receipt), "--dependency-inventory", str(self.dependency),
+             "--link-inventory", str(self.link), "--rust-sysroot", str(self.root)],
+            capture_output=True, text=True, check=True,
+        )
+        report = pack.notice.parse(build.stdout)
+        verified = subprocess.run(
+            [*prefix, "verify", *both, "--package", str(self.zip), "--package-sha256", report["package_sha256"],
+             "--notice-index-sha256", report["notice_index_sha256"]],
+            capture_output=True, text=True, check=True,
+        )
         self.assertEqual(pack.notice.parse(verified.stdout), report)
 
 

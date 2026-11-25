@@ -38,6 +38,9 @@ jobs:
       dependency_sha: ${{ steps.draft_package.outputs.dependency_sha }}
       registry_sha: ${{ steps.draft_package.outputs.registry_sha }}
       link_sha: ${{ steps.build.outputs.link_inventory_sha }}
+      crt_sha: ${{ steps.build.outputs.crt_sha }}
+      probe_sha: ${{ steps.build.outputs.probe_sha }}
+      crt_notice_sha: ${{ steps.draft_package.outputs.crt_notice_sha }}
       provenance_sha: ${{ steps.provenance.outputs.sha256 }}
       exe_sha: ${{ steps.verify.outputs.exe_hash }}
       version: ${{ steps.verify.outputs.version }}
@@ -67,16 +70,23 @@ jobs:
       - name: Test the same-link witness parser
         run: python -B ./scripts/test_windows_link_inventory.py
 
+      - name: Test the CRT archive witness parser
+        run: python -B ./scripts/test_windows_crt_archive_proof.py
+
       - name: Build the candidate and collect private same-link evidence
         id: build
         run: |
           $folder = Join-Path $env:RUNNER_TEMP 'paperroom-provenance'
           [void](New-Item -ItemType Directory -Path $folder)
           $inventory = Join-Path $folder 'paperroom-msvc-link-inventory.json'
-          $receipt = ./scripts/windows-link-collect.ps1 -Inventory $inventory -SourceCommit $env:GITHUB_SHA
+          $crt = Join-Path $folder 'msvc-crt-archives.json'
+          $probe = Join-Path $folder 'msvc-link-probe.json'
+          $receipt = ./scripts/windows-link-collect.ps1 -Inventory $inventory -CrtProof $crt -LinkProbe $probe -SourceCommit $env:GITHUB_SHA
           "exe_hash=$($receipt.ExeHash)" >> $env:GITHUB_OUTPUT
           "map_hash=$($receipt.MapHash)" >> $env:GITHUB_OUTPUT
           "link_inventory_sha=$($receipt.InventoryHash)" >> $env:GITHUB_OUTPUT
+          "crt_sha=$($receipt.CrtHash)" >> $env:GITHUB_OUTPUT
+          "probe_sha=$($receipt.ProbeHash)" >> $env:GITHUB_OUTPUT
 
       - name: Run Windows tests with locked dependencies
         run: cargo test --locked --target x86_64-pc-windows-msvc
@@ -170,6 +180,8 @@ jobs:
           VERSION: ${{ steps.verify.outputs.version }}
           PROVENANCE_HASH: ${{ steps.provenance.outputs.sha256 }}
           LINK_HASH: ${{ steps.build.outputs.link_inventory_sha }}
+          CRT_HASH: ${{ steps.build.outputs.crt_sha }}
+          PROBE_HASH: ${{ steps.build.outputs.probe_sha }}
         run: |
           python -B ./scripts/test_windows_reviewed_notice_package.py
           if ($LASTEXITCODE -ne 0) { throw 'Draft package tests failed.' }
@@ -179,6 +191,10 @@ jobs:
           $exe = Join-Path $env:RUNNER_TEMP 'paperroom-unsigned/Paperroom.exe'
           $provenance = Join-Path $evidence 'paperroom-msvc-provenance.json'
           $link = Join-Path $evidence 'paperroom-msvc-link-inventory.json'
+          $crt = Join-Path $evidence 'msvc-crt-archives.json'
+          $probe = Join-Path $evidence 'msvc-link-probe.json'
+          $crtNotice = 'docs/third-party/msvc-sdk/NOTICE.md'
+          $crtNoticeHash = (Get-FileHash -LiteralPath $crtNotice -Algorithm SHA256).Hash.ToLowerInvariant()
           $dependency = 'docs/third-party/dependency-inventory.tsv'
           $dependencyHash = (Get-FileHash -LiteralPath $dependency -Algorithm SHA256).Hash.ToLowerInvariant()
           $sysroot = rustc --print sysroot
@@ -192,7 +208,7 @@ jobs:
           python -B ./scripts/windows-registry-notices.py --exe $exe --exe-sha256 $env:EXE_HASH --provenance $provenance --provenance-sha256 $env:PROVENANCE_HASH --lock Cargo.lock --cargo-home $cargoHome --output $registry
           if ($LASTEXITCODE -ne 0) { throw 'Failed to collect audited notices from the locked crate archives.' }
           $registryHash = (Get-FileHash -LiteralPath (Join-Path $registry 'evidence/registry-notices.json') -Algorithm SHA256).Hash.ToLowerInvariant()
-          $data = python -B ./scripts/windows-reviewed-notice-package.py build --registry-notice-root $registry --output $output --exe $exe --exe-sha256 $env:EXE_HASH --provenance $provenance --provenance-sha256 $env:PROVENANCE_HASH --link-inventory $link --link-inventory-sha256 $env:LINK_HASH --dependency-inventory $dependency --dependency-inventory-sha256 $dependencyHash --commit $env:GITHUB_SHA --version $env:VERSION --rust-sysroot $sysroot
+          $data = python -B ./scripts/windows-reviewed-notice-package.py build --registry-notice-root $registry --crt-proof $crt --crt-proof-sha256 $env:CRT_HASH --crt-notice $crtNotice --crt-notice-sha256 $crtNoticeHash --link-probe $probe --link-probe-sha256 $env:PROBE_HASH --output $output --exe $exe --exe-sha256 $env:EXE_HASH --provenance $provenance --provenance-sha256 $env:PROVENANCE_HASH --link-inventory $link --link-inventory-sha256 $env:LINK_HASH --dependency-inventory $dependency --dependency-inventory-sha256 $dependencyHash --commit $env:GITHUB_SHA --version $env:VERSION --rust-sysroot $sysroot
           if ($LASTEXITCODE -ne 0) { throw 'The notice-inclusive draft ZIP did not pass staging.' }
           $result = $data | ConvertFrom-Json
           if ($result.notice_index_sha256 -cnotmatch '^[a-f0-9]{64}$' -or
@@ -204,6 +220,8 @@ jobs:
           "index_sha=$($result.notice_index_sha256)" >> $env:GITHUB_OUTPUT
           "dependency_sha=$dependencyHash" >> $env:GITHUB_OUTPUT
           "registry_sha=$registryHash" >> $env:GITHUB_OUTPUT
+          "crt_notice_sha=$crtNoticeHash" >> $env:GITHUB_OUTPUT
+          Write-Host "Checked CRT source note SHA-256 $crtNoticeHash."
           Write-Host "Draft ZIP $($result.package_sha256), notice index $($result.notice_index_sha256), EXE $env:EXE_HASH."
 
       - name: Upload the draft notice-inclusive ZIP
@@ -316,6 +334,9 @@ jobs:
       DEPENDENCY_HASH: ${{ needs.unsigned.outputs.dependency_sha }}
       REGISTRY_HASH: ${{ needs.unsigned.outputs.registry_sha }}
       LINK_HASH: ${{ needs.unsigned.outputs.link_sha }}
+      CRT_HASH: ${{ needs.unsigned.outputs.crt_sha }}
+      CRT_NOTICE_HASH: ${{ needs.unsigned.outputs.crt_notice_sha }}
+      PROBE_HASH: ${{ needs.unsigned.outputs.probe_sha }}
       PROVENANCE_HASH: ${{ needs.unsigned.outputs.provenance_sha }}
       EXE_HASH: ${{ needs.unsigned.outputs.exe_sha }}
       VERSION: ${{ needs.unsigned.outputs.version }}
@@ -362,7 +383,7 @@ jobs:
           } finally {
             $zip.Dispose()
           }
-          python -B ./scripts/windows-reviewed-notice-package.py verify --registry-notice-index-sha256 $env:REGISTRY_HASH --package $package --package-sha256 $env:PACKAGE_HASH --notice-index-sha256 $env:INDEX_HASH --exe-sha256 $env:EXE_HASH --provenance-sha256 $env:PROVENANCE_HASH --link-inventory-sha256 $env:LINK_HASH --dependency-inventory-sha256 $env:DEPENDENCY_HASH --commit $env:GITHUB_SHA --version $env:VERSION
+          python -B ./scripts/windows-reviewed-notice-package.py verify --registry-notice-index-sha256 $env:REGISTRY_HASH --crt-proof-sha256 $env:CRT_HASH --crt-notice-sha256 $env:CRT_NOTICE_HASH --link-probe-sha256 $env:PROBE_HASH --package $package --package-sha256 $env:PACKAGE_HASH --notice-index-sha256 $env:INDEX_HASH --exe-sha256 $env:EXE_HASH --provenance-sha256 $env:PROVENANCE_HASH --link-inventory-sha256 $env:LINK_HASH --dependency-inventory-sha256 $env:DEPENDENCY_HASH --commit $env:GITHUB_SHA --version $env:VERSION
           if ($LASTEXITCODE -ne 0) { throw 'The downloaded ZIP or its notice contents failed verification.' }
           $zip = [IO.Compression.ZipFile]::OpenRead($package)
           $exe = Join-Path $root 'Paperroom.exe'
@@ -392,3 +413,43 @@ jobs:
           if ($env:PAPERROOM_DOWNLOAD_ROOT -and (Test-Path -LiteralPath $env:PAPERROOM_DOWNLOAD_ROOT)) {
             Remove-Item -LiteralPath $env:PAPERROOM_DOWNLOAD_ROOT -Recurse -Force
           }
+
+  client-handoff:
+    name: Package the manual offline Windows client handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Archive the four exact handoff files and verify readback
+        run: |
+          git archive --format=zip --prefix=Paperroom-Windows-Offline-QA/ \
+            -o "$RUNNER_TEMP/Paperroom-Windows-Offline-QA.zip" HEAD:qa/windows-client-offline
+          python -B - "$RUNNER_TEMP/Paperroom-Windows-Offline-QA.zip" <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import hashlib
+          import sys
+          archive = Path(sys.argv[1])
+          root = "Paperroom-Windows-Offline-QA/"
+          with ZipFile(archive) as z:
+              assert z.testzip() is None
+              assert {n for n in z.namelist() if not n.endswith("/")} == {
+                  root + n for n in ("README.md", "EVIDENCE.md", "fixture.md", "checkpoint.ps1")
+              }
+              fixture = z.read(root + "fixture.md")
+              assert hashlib.sha256(fixture).hexdigest() == "27e9aed88fe0db6037d303e8e830270926b8222acfd0e6c6b387ab20b1af1ad4"
+              assert b"61e6e5ffb694702827c7e6fe031c638429b90105590649b732728b65805665c4" in z.read(root + "README.md")
+          print("Manual-only handoff ZIP SHA-256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          PY
+
+      - name: Upload only the manual offline test handoff
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-Windows-Offline-QA-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/Paperroom-Windows-Offline-QA.zip
+          if-no-files-found: error

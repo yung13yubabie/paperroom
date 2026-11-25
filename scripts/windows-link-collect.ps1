@@ -1,6 +1,8 @@
 # Capture the real final linker invocation for the executable that will be staged.
 param(
     [Parameter(Mandatory)][string]$Inventory,
+    [Parameter(Mandatory)][string]$CrtProof,
+    [Parameter(Mandatory)][string]$LinkProbe,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceCommit
 )
 Set-StrictMode -Version Latest
@@ -31,9 +33,22 @@ try {
     $nativeBin = [IO.Path]::GetFullPath((Join-Path $vcRoot 'bin/Hostx64/x64'))
     $linker = Join-Path $nativeBin 'link.exe'
     $compiler = Join-Path $nativeBin 'cl.exe'
-    if (!(Test-Path -LiteralPath $linker -PathType Leaf) -or !(Test-Path -LiteralPath $compiler -PathType Leaf)) {
-        throw 'The selected native developer shell has no x64 MSVC linker or compiler.'
+    $librarian = Join-Path $nativeBin 'lib.exe'
+    if (@($linker, $compiler, $librarian | Where-Object { !(Test-Path -LiteralPath $_ -PathType Leaf) }).Count) {
+        throw 'The selected native developer shell does not contain all required x64 MSVC tools.'
     }
+    $samePrior = (NumericVersion $linker) -ceq '14.44.35230.0' -and
+        (NumericVersion $compiler) -ceq '19.44.35230.0' -and
+        $env:VCToolsVersion -ceq '14.44.35207' -and $sdkVersion -ceq '10.0.26100.0' -and
+        $instance.installationVersion -ceq '17.14.37906.3' -and
+        $instance.productId -ceq 'Microsoft.VisualStudio.Product.Enterprise'
+    Write-Host "Selected CRT toolchain matches d3fcba6 recorded versions and edition: $samePrior."
+    $comparison = ./scripts/windows-link-verbose-probe.ps1 -Compiler $compiler -Linker $linker -Librarian $librarian | ConvertFrom-Json
+    foreach ($case in $comparison.cases) {
+        Write-Host ("Native link canary " + ($case | ConvertTo-Json -Depth 6 -Compress))
+    }
+    $terms = ./scripts/windows-runtime-terms.ps1 -SdkRoot $sdkRoot -SdkVersion $sdkVersion -VisualStudioRoot $vs -VcToolsetVersion $env:VCToolsVersion
+    Write-Host ("Installed legal metadata " + ($terms | ConvertTo-Json -Depth 6 -Compress))
     # Point the C build and the final Rust link at the same chosen native tools.
     $env:PATH = "$nativeBin;$env:PATH"
     $env:CC_x86_64_pc_windows_msvc = $compiler
@@ -97,7 +112,24 @@ try {
     }
     Write-Host "Same-link evidence SHA-256 $inventoryDigest for EXE $sha."
     Write-Host "MAP CRT families $($mapFamilies -join ', '), selected $($receipt.verbose_selections.attributed_loaded_rows) and unresolved $($receipt.verbose_selections.unattributed_loaded_rows) linker rows."
-    return [pscustomobject]@{ ExeHash = $sha; MapHash = $mapSha; InventoryHash = $inventoryDigest }
+    python -B ./scripts/windows-crt-archive-proof.py --exe $exe --exe-sha256 $sha --commit $SourceCommit --link-inventory $Inventory --link-inventory-sha256 $inventoryDigest --verbose $stdout --verbose-stderr $stderr --vc-tools-root $vcRoot --sdk-root $sdkRoot --vc-toolset-version $env:VCToolsVersion --sdk-version $sdkVersion > $CrtProof
+    if ($LASTEXITCODE -ne 0) { throw 'Could not compare the native archive membership with the same-link MAP.' }
+    $crtHash = (Get-FileHash -LiteralPath $CrtProof -Algorithm SHA256).Hash.ToLowerInvariant()
+    [ordered]@{
+        schema_version = 1
+        source_commit = $SourceCommit
+        exe_sha256 = $sha
+        link_inventory_sha256 = $inventoryDigest
+        toolchain = $receipt.toolchain
+        comparison = $comparison
+        installed_terms = $terms
+    } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $LinkProbe -Encoding utf8
+    $probeHash = (Get-FileHash -LiteralPath $LinkProbe -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host "Same-link CRT archive evidence $crtHash and separate diagnostic evidence $probeHash."
+    return [pscustomobject]@{
+        ExeHash = $sha; MapHash = $mapSha; InventoryHash = $inventoryDigest
+        CrtHash = $crtHash; ProbeHash = $probeHash
+    }
 } finally {
     Remove-Item Env:PAPERROOM_REAL_LINK, Env:PAPERROOM_LINK_TRACE -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $private -Recurse -Force

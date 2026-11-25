@@ -23,6 +23,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class PaperroomHighlightGui {
     [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo { public uint Size; public Rect Monitor, Work; public uint Flags; }
+    public struct MenuSelection { public Point Point; public int Scroll; }
     [StructLayout(LayoutKind.Sequential)]
     private struct GuiThread {
         public uint Size, Flags;
@@ -36,21 +40,7 @@ public static class PaperroomHighlightGui {
         public UIntPtr Extra;
     }
     [StructLayout(LayoutKind.Sequential)]
-    private struct KeyInput {
-        public ushort VirtualKey, Scan;
-        public uint Flags, Time;
-        public UIntPtr Extra;
-    }
-    [StructLayout(LayoutKind.Explicit)]
-    private struct InputData {
-        [FieldOffset(0)] public MouseInput Mouse;
-        [FieldOffset(0)] public KeyInput Key;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Input {
-        public uint Kind;
-        public InputData Data;
-    }
+    private struct Input { public uint Kind; public MouseInput Mouse; }
     private delegate bool EnumWindow(IntPtr hwnd, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, EnumWindow callback, IntPtr state);
@@ -66,6 +56,14 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll", SetLastError=true)]
     private static extern uint SendInput(uint count, Input[] input, int size);
     [DllImport("user32.dll")] private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")] private static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint item, out Rect rect);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    private static extern bool GetMonitorInfoW(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
@@ -148,35 +146,98 @@ public static class PaperroomHighlightGui {
         }, IntPtr.Zero);
         return text.ToString();
     }
-    private static Input Key(ushort key, bool up) {
-        uint flags = key == 0x24 || key == 0x28 ? 1u : 0u; // Extended Home / Down.
-        if (up) flags |= 2; // KEYEVENTF_KEYUP.
-        return new Input { Kind = 1, Data = new InputData { Key = new KeyInput { VirtualKey = key, Flags = flags } } };
+    private static Point Center(Rect rect) {
+        return new Point { X = rect.Left + (rect.Right - rect.Left) / 2, Y = rect.Top + (rect.Bottom - rect.Top) / 2 };
     }
-    public static void SelectMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
-        if (OwnedWindow(owner, pid, "#32768", null, 0) != popup || popup == IntPtr.Zero)
+    private static bool Contains(Rect rect, Point point) {
+        return point.X >= rect.Left && point.X < rect.Right && point.Y >= rect.Top && point.Y < rect.Bottom;
+    }
+    private static Rect VisibleRect(IntPtr hwnd) {
+        if (!GetWindowRect(hwnd, out Rect rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top)
+            throw new InvalidOperationException("The native window has no real rectangle.");
+        var monitor = new MonitorInfo { Size = (uint)Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfoW(MonitorFromWindow(hwnd, 2), ref monitor))
+            throw new InvalidOperationException("Could not locate the native window monitor.");
+        return new Rect {
+            Left = Math.Max(rect.Left, monitor.Monitor.Left), Top = Math.Max(rect.Top, monitor.Monitor.Top),
+            Right = Math.Min(rect.Right, monitor.Monitor.Right), Bottom = Math.Min(rect.Bottom, monitor.Monitor.Bottom)
+        };
+    }
+    public static Point Cursor() {
+        if (!GetCursorPos(out Point point)) throw new InvalidOperationException("Could not read the pointer.");
+        return point;
+    }
+    public static void RestoreCursor(Point original, Point expected) {
+        if (GetCursorPos(out Point current) && current.X == expected.X && current.Y == expected.Y)
+            SetCursorPos(original.X, original.Y);
+    }
+    public static Point ButtonPoint(IntPtr owner, uint pid, IntPtr button) {
+        if (GetParent(button) != owner ||
+            GetWindowThreadProcessId(button, out uint buttonPid) == 0 || buttonPid != pid ||
+            !IsWindowVisible(button) || Kind(button) != "Button")
+            throw new InvalidOperationException("Expected an owned native toolbar button.");
+        var rect = VisibleRect(button);
+        Point point = Center(rect);
+        if (!Contains(rect, point) || WindowFromPoint(point) != button)
+            throw new InvalidOperationException("The toolbar button is not exposed at its center.");
+        return point;
+    }
+    public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
-        int position = MenuPosition(popup, itemId, caption);
-        foreach (int key in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
-            if (GetAsyncKeyState(key) < 0) throw new InvalidOperationException("An input modifier is held; refusing to send menu keys.");
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
         uint thread = GetWindowThreadProcessId(owner, out uint ignoredPid);
         if (!GetGUIThreadInfo(thread, ref gui) || (gui.Flags & 0x14) == 0 || gui.MenuOwner != owner)
             throw new InvalidOperationException("The isolated app is not the current native menu owner.");
-        var keys = new List<Input> { Key(0x24, false), Key(0x24, true) }; // Home.
-        for (int i = 0; i < position; i++) { keys.Add(Key(0x28, false)); keys.Add(Key(0x28, true)); }
-        keys.Add(Key(0x0D, false)); keys.Add(Key(0x0D, true)); // Enter.
-        if (!ForegroundIsOwned(owner, pid))
-            throw new InvalidOperationException("The isolated test app lost foreground before menu input.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero); // MN_GETHMENU for inspected #32768.
+        int position = MenuPosition(menu, itemId, caption);
+        Rect menuRect = VisibleRect(popup);
+        // NULL selects the popup's screen-space item geometry.
+        bool hasItem = GetMenuItemRect(IntPtr.Zero, menu, (uint)position, out Rect row);
+        Point point = Center(row);
+        if (hasItem && row.Right > row.Left && row.Bottom > row.Top &&
+            Contains(menuRect, point) && WindowFromPoint(point) == popup)
+            return new MenuSelection { Point = point };
+
+        int above = -1, below = -1;
+        for (int i = 0; i < GetMenuItemCount(menu); i++) {
+            if (!GetMenuItemRect(IntPtr.Zero, menu, (uint)i, out Rect visibleRow)) continue;
+            Point center = Center(visibleRow);
+            if (!Contains(menuRect, center) || WindowFromPoint(center) != popup) continue;
+            if (i < position) above = i;
+            if (i > position && below < 0) below = i;
+        }
+        int scroll = above >= 0 && below < 0 ? -1 : below >= 0 && above < 0 ? 1 : 0;
+        if (scroll == 0 || menuRect.Bottom - menuRect.Top < 24)
+            throw new InvalidOperationException("No verified visible rectangle or scroll direction for menu item " + itemId + ".");
+        point = new Point { X = Center(menuRect).X, Y = scroll < 0 ? menuRect.Bottom - 7 : menuRect.Top + 7 };
+        if (!Contains(menuRect, point) || WindowFromPoint(point) != popup)
+            throw new InvalidOperationException("The clipped menu scroll edge is obscured.");
+        return new MenuSelection { Point = point, Scroll = scroll };
+    }
+    public static void MouseAction(IntPtr owner, uint pid, IntPtr target, Point point, int scroll) {
+        foreach (int key in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(key) < 0) throw new InvalidOperationException("An input modifier is held.");
+        if (!ForegroundIsOwned(owner, pid) || GetWindowThreadProcessId(target, out uint targetPid) == 0 ||
+            targetPid != pid || WindowFromPoint(point) != target)
+            throw new InvalidOperationException("The physical input point is no longer on the foreground test window.");
+        if (!SetCursorPos(point.X, point.Y)) throw new InvalidOperationException("Could not move to the verified input point.");
+        Point actualPoint = Cursor();
+        if (!ForegroundIsOwned(owner, pid) || WindowFromPoint(actualPoint) != target ||
+            actualPoint.X != point.X || actualPoint.Y != point.Y)
+            throw new InvalidOperationException("The pointer target changed before physical input.");
+        var input = scroll == 0
+            ? new[] { new Input { Mouse = new MouseInput { Flags = 0x0002 } },
+                      new Input { Mouse = new MouseInput { Flags = 0x0004 } } }
+            : new[] { new Input { Mouse = new MouseInput { Flags = 0x0800, Data = unchecked((uint)(scroll * 120)) } } };
         int size = Marshal.SizeOf<Input>();
         if (size != (IntPtr.Size == 8 ? 40 : 28)) throw new InvalidOperationException("Unexpected Windows INPUT size.");
-        uint actual = SendInput((uint)keys.Count, keys.ToArray(), size);
-        if (actual != keys.Count)
-            throw new InvalidOperationException("SendInput delivered " + actual + "/" + keys.Count + " keyboard changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
+        uint actual = SendInput((uint)input.Length, input, size);
+        if (actual != input.Length)
+            throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
+                " mouse changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
-    private static int MenuPosition(IntPtr popup, uint itemId, string caption) {
-        // Native popup menu windows return their HMENU for MN_GETHMENU.
-        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+    private static int MenuPosition(IntPtr menu, uint itemId, string caption) {
         int count = GetMenuItemCount(menu);
         if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
         for (int index = 0; index < count; index++) {
@@ -231,17 +292,36 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
         [void][PaperroomHighlightGui]::SetForegroundWindow($window)
         $null = Wait-For 'isolated app foreground' { [PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id) }
     }
-    Command $window $OwnerControl
-    $menu = Wait-For "menu containing $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0) }
-    [PaperroomHighlightGui]::SelectMenu($window, $process.Id, $menu, $Item, $Caption)
-    Write-Host "Verified native menu command $Item and sent Windows keyboard input for $Caption."
-    $null = Wait-For "native menu closed after $Caption" { ![PaperroomHighlightGui]::IsWindowVisible($menu) }
+    $original = [PaperroomHighlightGui]::Cursor()
+    $point = $original
+    try {
+        $button = Control $window $OwnerControl
+        $point = [PaperroomHighlightGui]::ButtonPoint($window, $process.Id, $button)
+        [PaperroomHighlightGui]::MouseAction($window, $process.Id, $button, $point, 0)
+        $menu = Wait-For "menu containing $Caption" {
+            [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0)
+        }
+        for ($attempt = 0; $attempt -lt 18; $attempt++) {
+            $selection = [PaperroomHighlightGui]::PlanMenu($window, $process.Id, $menu, $Item, $Caption)
+            $point = $selection.Point
+            [PaperroomHighlightGui]::MouseAction($window, $process.Id, $menu, $point, $selection.Scroll)
+            if ($selection.Scroll -eq 0) {
+                Write-Host "Verified and clicked native menu command $Item at ($($point.X),$($point.Y)): $Caption."
+                $null = Wait-For "native menu closed after $Caption" { ![PaperroomHighlightGui]::IsWindowVisible($menu) }
+                return
+            }
+            Start-Sleep -Milliseconds 180 # A clipped menu may scroll while the pointer remains over the arrow.
+        }
+        throw "Could not expose native menu command $Item in the bounded scroll."
+    } finally {
+        [PaperroomHighlightGui]::RestoreCursor($original, $point)
+    }
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status) {
     Native-Menu 109 $Item $Caption
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
     $edit = [PaperroomHighlightGui]::FilenameField($dialog, $process.Id)
-    Write-Host "Verified the common file dialog for $Caption."
+    Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
     [PaperroomHighlightGui]::Write($edit, $Path)
     if ([PaperroomHighlightGui]::Read($edit) -cne $Path) { throw 'File dialog edited an unexpected path.' }
     Command $dialog 1

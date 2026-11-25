@@ -104,8 +104,8 @@ def dependency_graph(metadata, exe_hash, target=TARGET):
             continue
         roles[source].add(role)
         for dep in nodes[source]["deps"]:
-            target = dep["pkg"]
-            proc_macro = any("proc-macro" in item["kind"] for item in packages[target]["targets"])
+            dependency = dep["pkg"]
+            proc_macro = any("proc-macro" in item["kind"] for item in packages[dependency]["targets"])
             kinds = dep["dep_kinds"]
             if not kinds:
                 raise ValueError("reachable dependency has no dependency-kind evidence")
@@ -116,8 +116,8 @@ def dependency_graph(metadata, exe_hash, target=TARGET):
                 if kind not in (None, "build"):
                     raise ValueError("unknown Cargo dependency kind")
                 target_role = "host-build" if role == "host-build" or kind == "build" or proc_macro else role
-                edges.add((source, target, role, target_role, kind or "normal"))
-                pending.append((target, target_role))
+                edges.add((source, dependency, role, target_role, kind or "normal"))
+                pending.append((dependency, target_role))
 
     records = []
     for opaque, platform_roles in roles.items():

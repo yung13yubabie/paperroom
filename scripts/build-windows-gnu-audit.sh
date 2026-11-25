@@ -16,6 +16,7 @@ mkdir "$work/debs" "$work/gnu" "$work/metadata"
 export LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0
 export SOURCE_DATE_EPOCH="$(git -C "$repo" log -1 --format=%ct "$source_commit")"
 export CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 rustc "+$rust_toolchain" -vV > "$work/metadata/rustc.txt"
 grep -qx 'release: 1.100.0' "$work/metadata/rustc.txt"
@@ -64,12 +65,19 @@ if [[ "${PAPERROOM_ALREADY_FETCHED:-0}" != 1 ]]; then
     cargo "+$rust_toolchain" fetch --locked --manifest-path "$work/proof_a/src/Cargo.toml"
 fi
 
+# Both compiler invocations get the same mapping list. Only one source and
+# output root can match a given path, and the last matching prefix wins.
+export RUSTFLAGS="--remap-path-prefix=$work=/build-temp --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$sysroot=/toolchain"
+export CFLAGS_x86_64_pc_windows_gnu="-ffile-prefix-map=$work=/build-temp -ffile-prefix-map=$CARGO_HOME=/cargo -g0"
+for label in proof_a different_source_b; do
+    RUSTFLAGS+=" --remap-path-prefix=$work/$label/src=/paperroom --remap-path-prefix=$work/$label/out=/target"
+    CFLAGS_x86_64_pc_windows_gnu+=" -ffile-prefix-map=$work/$label/src=/paperroom -ffile-prefix-map=$work/$label/out=/target"
+done
+
 build() (
     label="$1"
     cd "$work/$label/src"
     export CARGO_TARGET_DIR="$work/$label/out"
-    export RUSTFLAGS="--remap-path-prefix=$work=/build-temp --remap-path-prefix=$PWD=/paperroom --remap-path-prefix=$CARGO_TARGET_DIR=/target --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$sysroot=/toolchain"
-    export CFLAGS_x86_64_pc_windows_gnu="-ffile-prefix-map=$work=/build-temp -ffile-prefix-map=$PWD=/paperroom -ffile-prefix-map=$CARGO_TARGET_DIR=/target -ffile-prefix-map=$CARGO_HOME=/cargo -g0"
     cargo "+$rust_toolchain" rustc --offline --locked --release --target "$target" --bin paperroom \
         -- -C link-arg=-Wl,--no-insert-timestamp -C link-arg=-static-libgcc -C link-arg=-Wl,-Map,final.map
     mv -- final.map "$work/$label/final.map"
@@ -89,7 +97,8 @@ fi
 artifact="out/$target/release/paperroom.exe"
 exe="$work/proof_a/$artifact"
 rebuild="$work/different_source_b/$artifact"
-if ! cmp -- "$exe" "$rebuild"; then
+if ! cmp -s -- "$exe" "$rebuild"; then
+    printf 'The two fresh GNU EXEs differ.\n'
     python3 -B "$repo/scripts/package-windows-gnu-audit.py" compare "$exe" "$rebuild"
     exit 1
 fi

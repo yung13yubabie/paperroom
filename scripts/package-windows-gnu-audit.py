@@ -240,6 +240,15 @@ def describe_difference(first, second):
     print(f"PE sizes {len(a)} / {len(b)}, header lengths {a_header} / {b_header}")
     print(f"Different header byte offsets: {[i for i, (x, y) in enumerate(zip(a[:a_header], b[:b_header])) if x != y][:48]}")
     print(f"Sections with size, offset or content differences: {differences}")
+    for name, left, right in differences:
+        if not left or not right:
+            continue
+        size_a, start_a = left
+        size_b, start_b = right
+        section_a = a[start_a:start_a+size_a]
+        section_b = b[start_b:start_b+size_b]
+        offsets = [i for i, pair in enumerate(zip(section_a, section_b)) if pair[0] != pair[1]]
+        print(f"{name}: {len(offsets)} changed overlapping bytes, first offsets {offsets[:16]}")
 
 
 def main():

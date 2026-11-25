@@ -47,6 +47,8 @@ pub(super) struct Canvas {
     bundle: Option<crate::store::canvas_bundle::CanvasBundleView>,
     projection: Cell<Option<Projection>>,
     drag: Option<Drag>,
+    camera: Option<crate::canvas_projection::Camera>,
+    pan: Option<canvas_view_ui::Pan>,
 }
 
 impl WorkspaceView {
@@ -67,7 +69,7 @@ impl WorkspaceView {
             Self::Kanban(view) if view.is_list() => "點選資料列開啟筆記　滾輪捲動清單",
             Self::Kanban(view) if view.checkbox.is_some() => "點選右欄切換勾選　資料列會依照篩選更新",
             Self::Kanban(_) => "使用看板操作新增或移動資料列　滾輪捲動卡片",
-            Self::Canvas(_) => "拖曳節點移動，拖曳右下角縮放節點　Esc 取消",
+            Self::Canvas(_) => "中鍵拖曳平移　滾輪縮放　左鍵拖曳節點或右下角　Esc 取消拖曳",
             Self::Pdf(_) => "在 PDF 頁面上拖曳選區　使用 PDF 操作換頁或檢視本頁標註",
             Self::Graph(_) => "捲動查看更多連結，點選節點即可開啟筆記",
         }
@@ -180,9 +182,10 @@ impl App {
 
     unsafe fn activate_canvas(&mut self, id: i64, title: String, doc: crate::canvas::Document) -> Result<()> {
         let bundle = self.notebook.canvas_bundle_view(id)?;
+        let camera = self.notebook.canvas_camera(id)?;
         unsafe {
             self.activate_workspace(WorkspaceView::Canvas(Canvas {
-                id, title, doc, bundle, projection: Cell::new(None), drag: None,
+                id, title, doc, bundle, projection: Cell::new(None), drag: None, camera, pan: None,
             }));
         }
         Ok(())
@@ -366,8 +369,14 @@ impl App {
                         self.cancel_canvas_drag();
                         self.canvas_edit_menu(id)?;
                     } else if action == 8 {
-                        view.projection.set(None);
-                        self.present();
+                        self.notebook.set_canvas_camera(id, None)?;
+                        self.cancel_canvas_drag();
+                        if let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_mut() {
+                            view.camera = None;
+                            view.projection.set(None);
+                        }
+                        InvalidateRect(self.hwnd, &self.board_area(), 0);
+                        label(self.widgets.status, "已將畫布調整至視窗。");
                     } else if action == 9 {
                         if let Some(path) = file_dialog(hwnd, "JSON Canvas ZIP\0*.zip\0\0", "zip", Some("canvas.zip"))? {
                             self.notebook.export_canvas_bundle(id, &path)?;
@@ -706,7 +715,7 @@ impl App {
             return;
         }
         if matches!(self.extras.workspace, Some(WorkspaceView::Canvas(_))) {
-            if let Err(error) = unsafe { self.canvas_input(msg, lp) } {
+            if let Err(error) = unsafe { self.canvas_input(msg, wp, lp) } {
                 unsafe { self.show_error(error); }
             }
             return;

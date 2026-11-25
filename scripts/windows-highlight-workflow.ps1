@@ -59,6 +59,7 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect region);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint relation);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -251,6 +252,35 @@ public static class PaperroomHighlightGui {
         if (!ForegroundIsOwned(owner, pid)) return IntPtr.Zero;
         IntPtr alert = GetForegroundWindow();
         return Kind(alert) == "#32770" && Caption(alert) == caption ? alert : IntPtr.Zero;
+    }
+    public static Rect CanvasArea(IntPtr owner, uint pid) {
+        if (!ForegroundIsOwned(owner, pid) || !GetClientRect(owner, out Rect client))
+            throw new InvalidOperationException("Expected the foreground Canvas client.");
+        int dpi = (int)GetDpiForWindow(owner);
+        if (dpi < 96 || dpi > 288) throw new InvalidOperationException("Unexpected Canvas DPI.");
+        int S(int x) => (x*dpi + 48)/96;
+        var top = new Point { X = S(client.Right >= S(1030) ? 330 : 303), Y = S(100) };
+        var end = new Point { X = client.Right-S(27)-1, Y = client.Bottom-S(49)-1 };
+        if (!ClientToScreen(owner, ref top) || !ClientToScreen(owner, ref end) ||
+            WindowFromPoint(top) != owner || WindowFromPoint(end) != owner)
+            throw new InvalidOperationException("The synthetic Canvas is obscured.");
+        return new Rect { Left=top.X, Top=top.Y, Right=end.X+1, Bottom=end.Y+1 };
+    }
+    public static Point CanvasCursor(IntPtr owner, uint pid, int x, int y) {
+        var point = new Point { X=x, Y=y };
+        if (!ForegroundIsOwned(owner, pid) || WindowFromPoint(point) != owner ||
+            !SetCursorPos(x,y)) throw new InvalidOperationException("Expected an exposed Canvas pointer position.");
+        return point;
+    }
+    public static void MiddleButton(IntPtr owner, uint pid, bool down) {
+        if (!ForegroundIsOwned(owner, pid) || (down && WindowFromPoint(Cursor()) != owner))
+            throw new InvalidOperationException("The middle button target changed.");
+        SendPhysical(new[] { Mouse(down ? 0x20u : 0x40u) });
+    }
+    public static bool CanvasCaptured(IntPtr owner, uint pid) {
+        uint thread = GetWindowThreadProcessId(owner, out uint actual);
+        var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
+        return thread != 0 && actual == pid && GetGUIThreadInfo(thread, ref gui) && gui.Capture == owner;
     }
     public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
@@ -562,7 +592,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $Item -ne 1
+    $saving = $Item -notin 1, 11
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -649,6 +679,67 @@ function Native-VaultExport([string]$Title, [string]$Path, [string]$ExpectedErro
     Native-Menu 109 34 '匯出 Vault ZIP（含來源附件）…'
     Native-Menu 109 $choice "$Title  (#" -MenuOpen -CaptionPrefix
     Native-File 34 '匯出 Vault ZIP（含來源附件）…' $Path '已匯出 2 篇 Markdown 與 2 個來源附件。' -AlreadyOpened -ExpectedError $ExpectedError
+}
+function Read-CanvasInk {
+    $area = [PaperroomHighlightGui]::CanvasArea($window, $process.Id)
+    $w = $area.Right - $area.Left
+    $h = $area.Bottom - $area.Top
+    $bitmap = [Drawing.Bitmap]::new($w,$h,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try { $graphics.CopyFromScreen($area.Left,$area.Top,0,0,[Drawing.Size]::new($w,$h)) }
+        finally { $graphics.Dispose() }
+        $pixels = $bitmap.LockBits([Drawing.Rectangle]::new(0,0,$w,$h),[Drawing.Imaging.ImageLockMode]::ReadOnly,
+                                   [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        try {
+            $data = [byte[]]::new($pixels.Stride * $h)
+            [Runtime.InteropServices.Marshal]::Copy($pixels.Scan0,$data,0,$data.Length)
+            $left=$w; $top=$h; $right=-1; $bottom=-1
+            for ($y=0; $y -lt $h; $y++) {
+                $offset=$y*$pixels.Stride
+                for ($x=0; $x -lt $w; $x++) {
+                    $i=$offset+4*$x
+                    if ($data[$i] -eq 125 -and $data[$i+1] -eq 33 -and $data[$i+2] -eq 237) {
+                        if ($x -lt $left) { $left=$x }; if ($x -gt $right) { $right=$x }
+                        if ($y -lt $top) { $top=$y }; if ($y -gt $bottom) { $bottom=$y }
+                    }
+                }
+            }
+            if ($right -lt $left) { return $null }
+            [pscustomobject]@{ L=$left; T=$top; R=$right; B=$bottom; W=$right-$left+1; H=$bottom-$top+1;
+                               ScreenX=$area.Left; ScreenY=$area.Top }
+        } finally { $bitmap.UnlockBits($pixels) }
+    } finally { $bitmap.Dispose() }
+}
+function Read-CanvasStamp([string]$Database, [string]$Source) {
+    $stamp = @'
+from pathlib import Path
+from contextlib import closing
+import json,sqlite3,sys
+database,source=map(Path,sys.argv[1:])
+with closing(sqlite3.connect(database.as_uri()+'?mode=ro',uri=True)) as db:
+    rows=db.execute("SELECT c.source,v.x,v.y,v.scale FROM saved_canvases c LEFT JOIN canvas_cameras v "
+                    "ON v.canvas_id=c.id WHERE c.title='CanvasViewFixture'").fetchall()
+    assert len(rows)==1 and rows[0][0].encode('utf-8')==source.read_bytes(), 'Canvas source changed during navigation'
+    print(json.dumps(rows[0][1:]))
+'@ | python - $Database $Source
+    if ($LASTEXITCODE -ne 0 -or !$stamp) { throw 'Could not verify the saved Canvas source and view.' }
+    return [string]$stamp
+}
+function Pan-Canvas($Bounds, [int]$Dx, [int]$Dy, [switch]$Cancel) {
+    $x = $Bounds.ScreenX + $Bounds.L + [int]($Bounds.W/2)
+    $y = $Bounds.ScreenY + $Bounds.T + [int]($Bounds.H/2)
+    $null = [PaperroomHighlightGui]::CanvasCursor($window,$process.Id,$x,$y)
+    [PaperroomHighlightGui]::MiddleButton($window,$process.Id,$true)
+    try {
+        $null = Wait-For 'Canvas middle button capture' { [PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+        $null = [PaperroomHighlightGui]::CanvasCursor($window,$process.Id,$x+$Dx,$y+$Dy)
+        if ($Cancel) {
+            [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
+            $null = Wait-For 'Canvas Escape released capture' { ![PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+        }
+    } finally { [PaperroomHighlightGui]::MiddleButton($window,$process.Id,$false) }
+    $null = Wait-For 'Canvas middle button released capture' { ![PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
 }
 function Start-Notebook([string]$Folder) {
     $binary = Join-Path $Folder 'Paperroom.exe'
@@ -1058,6 +1149,52 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native Vault folder import, duplicate snapshots, portable image and text attachment export, extraction, reimport and reopen, and safe refusal.'
+    $canvasFile = Join-Path $root 'CanvasViewFixture.canvas'
+    $canvasJson = '{"nodes":[{"id":"a","type":"text","x":0,"y":0,"width":100,"height":70,"text":"First","color":"#ed217d"},{"id":"b","type":"text","x":230,"y":110,"width":95,"height":65,"text":"Second"}],"edges":[{"id":"c","fromNode":"a","toNode":"b","label":"kept"}],"extra":{"marker":true}}'
+    [IO.File]::WriteAllText($canvasFile,$canvasJson,[Text.UTF8Encoding]::new($false))
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $canvasFile '中鍵拖曳平移'
+    $before = Wait-For 'painted exact Canvas node accent' { Read-CanvasInk }
+    if ((Read-CanvasStamp $liveDb $canvasFile) -cne '[null, null, null]') { throw 'A new Canvas should start in fit view.' }
+    Pan-Canvas $before 54 28
+    $moved = Wait-For 'painted Canvas pan' {
+        $ink = Read-CanvasInk
+        if ($ink -and [Math]::Abs($ink.L-$before.L-54) -le 2 -and [Math]::Abs($ink.T-$before.T-28) -le 2) { $ink }
+    }
+    if ($moved.W -ne $before.W) { throw 'Panning changed the rendered node size.' }
+    $pointer = [PaperroomHighlightGui]::CanvasCursor($window,$process.Id,$moved.ScreenX+$moved.L+[int]($moved.W/2),
+                                                        $moved.ScreenY+$moved.T+[int]($moved.H/2))
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$window,$pointer,1)
+    $zoom = Wait-For 'painted Canvas zoom' { $ink=Read-CanvasInk; if ($ink -and $ink.W -gt $moved.W) { $ink } }
+    if ([Math]::Abs(($zoom.L+$zoom.R)-($moved.L+$moved.R)) -gt 4 -or
+        [Math]::Abs(($zoom.T+$zoom.B)-($moved.T+$moved.B)) -gt 4) {
+        throw 'Zoom lost its pointer anchor.'
+    }
+    $savedView = Read-CanvasStamp $liveDb $canvasFile
+    if ($savedView -ceq '[null, null, null]') { throw 'Pan and zoom did not store a view.' }
+    Pan-Canvas $zoom 29 23 -Cancel
+    if ((Read-CanvasStamp $liveDb $canvasFile) -cne $savedView) { throw 'Canceled pan changed persisted state.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-Menu 109 12 '開啟已匯入的 Canvas…'
+    Native-Menu 109 1 'CanvasViewFixture' -MenuOpen
+    $reopened = Wait-For 'reopened painted Canvas view' { Read-CanvasInk }
+    if ($reopened.L -ne $zoom.L -or $reopened.T -ne $zoom.T -or $reopened.W -ne $zoom.W -or
+        (Read-CanvasStamp $liveDb $canvasFile) -cne $savedView) { throw 'Reopening changed the saved view.' }
+    Native-Menu 120 8 '將畫布調整至視窗'
+    $null = Wait-For 'native fit command' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將畫布調整至視窗。' }
+    $null = Wait-For 'painted fit view' {
+        $ink=Read-CanvasInk
+        $ink -and $ink.L -eq $before.L -and $ink.T -eq $before.T -and $ink.W -eq $before.W
+    }
+    if ((Read-CanvasStamp $liveDb $canvasFile) -cne '[null, null, null]') { throw 'Fit command did not clear the prior view.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: physical Canvas middle-button pan and wheel zoom, pointer anchoring, Escape cancel, native reopen and fit, with byte-identical Canvas JSON.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

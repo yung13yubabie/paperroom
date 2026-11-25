@@ -241,7 +241,7 @@ mod tests {
         assert!(!crate::markdown::preview_marked(raw, &[]).contains(r"\highlight"));
         assert_eq!(
             db.connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            26,
+            i64::from(super::super::SCHEMA_VERSION),
         );
         drop(db);
         fs::remove_dir_all(dir)?;

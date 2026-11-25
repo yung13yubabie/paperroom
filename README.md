@@ -97,6 +97,8 @@ cargo build --locked --release --target x86_64-pc-windows-gnu
 
 匯出的 Vault ZIP 可一併保存有明確來源的圖片和附件。解壓後可在其他 Markdown 工具讀取，也可回匯到紙間的另一個批次。[資料夾與附件往返](docs/UI-ACCEPTANCE.md#vault-資料夾與附件往返)
 
+Canvas 可用中鍵拖曳平移、以滾輪縮放，重開後接回同一份畫布的視野。[Canvas 操作](docs/UI-ACCEPTANCE.md#canvas-平移縮放與重開)
+
 這批候選加入同步區塊、Vault 文字嵌入及日誌月曆。在閱讀模式可查看引用內容，從「管理本篇同步區塊」可開啟或修改原文。日誌月曆用日期找回日誌，即使標題已改名。資料庫結構維持第 22 版，試用前仍建議另存工作區備份。[操作步驟](docs/UI-ACCEPTANCE.md#同步區塊vault-嵌入與日誌月曆)
 
 第 22 版工作區候選加入白板對齊、等距及一次復原。研究 ZIP 的 Canvas 圖片路徑可保留繁中檔名。具名檢視可使用本機的週、月區間，並複製或調整同層篩選條件。也可查看 Vault 未連結提及，以及從跨頁待辦直接回到原筆記。升級前請先用現行版本備份。[候選操作及限制](docs/UI-ACCEPTANCE.md#第-22-版候選)

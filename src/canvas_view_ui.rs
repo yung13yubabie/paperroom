@@ -4,6 +4,12 @@ use crate::store::canvas_edit::CanvasEdit;
 use crate::store::canvas_bundle::{CanvasAssetState, CanvasBundleImage};
 use serde_json::Value;
 
+pub(super) struct Pan {
+    projection: Projection,
+    start: [i32; 2],
+    current: [i32; 2],
+}
+
 fn coordinates(rect: RECT) -> Rect {
     [rect.left, rect.top, rect.right, rect.bottom]
 }
@@ -132,14 +138,16 @@ impl App {
     pub(super) unsafe fn cancel_canvas_drag(&mut self) -> bool {
         unsafe {
             let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_mut() else { return false; };
-            if view.drag.take().is_none() { return false; }
+            let had_drag = view.drag.take().is_some();
+            let had_pan = view.pan.take().is_some();
+            if !had_drag && !had_pan { return false; }
             if GetCapture() == self.hwnd { ReleaseCapture(); }
             InvalidateRect(self.hwnd, &self.board_area(), 0);
             true
         }
     }
 
-    pub(super) unsafe fn canvas_input(&mut self, msg: u32, lp: LPARAM) -> Result<()> {
+    pub(super) unsafe fn canvas_input(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) -> Result<()> {
         unsafe {
             if matches!(msg, WM_CAPTURECHANGED | WM_CANCELMODE) {
                 self.cancel_canvas_drag();
@@ -149,11 +157,48 @@ impl App {
             let area = coordinates(client);
             let grip = self.scaled(10);
             let inset = self.scaled(12);
-            let point = [lp as u16 as i16 as i32, (lp >> 16) as u16 as i16 as i32];
+            let mut cursor = POINT { x: lp as u16 as i16 as i32, y: (lp >> 16) as u16 as i16 as i32 };
+            if msg == WM_MOUSEWHEEL && ScreenToClient(self.hwnd, &mut cursor) == 0 {
+                return Ok(());
+            }
+            let point = [cursor.x, cursor.y];
+            let dpi = self.dpi;
             let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_mut() else { return Ok(()); };
+            let visible = view.projection.get().filter(|p| p.area == area && p.inset == inset);
             match msg {
-                WM_LBUTTONDOWN if view.drag.is_none() => {
-                    if let Some(projection) = view.projection.get().filter(|p| p.area == area && p.inset == inset)
+                WM_MOUSEWHEEL if view.drag.is_none() && view.pan.is_none() => {
+                    let wheel = (wp >> 16) as u16 as i16;
+                    if let Some(projection) = visible.filter(|_| projection::contains(area, point) && wheel != 0) {
+                        let camera = projection.zoom(point, wheel, dpi);
+                        self.notebook.set_canvas_camera(view.id, Some(camera))?;
+                        view.camera = Some(camera);
+                        view.projection.set(Some(Projection::camera(area, inset, dpi, camera)));
+                        InvalidateRect(self.hwnd, &client, 0);
+                    }
+                }
+                WM_MBUTTONDOWN if view.drag.is_none() && view.pan.is_none() => {
+                    if let Some(projection) = visible.filter(|_| projection::contains(area, point)) {
+                        SetCapture(self.hwnd);
+                        if GetCapture() == self.hwnd {
+                            view.pan = Some(Pan { projection, start: point, current: point });
+                        }
+                    }
+                }
+                WM_MBUTTONUP => {
+                    if let Some(pan) = view.pan.take() {
+                        let captured = GetCapture() == self.hwnd;
+                        if captured { ReleaseCapture(); }
+                        InvalidateRect(self.hwnd, &client, 0);
+                        if captured && pan.projection.area == area && pan.projection.inset == inset && point != pan.start {
+                            let camera = pan.projection.pan(pan.start, point, dpi);
+                            self.notebook.set_canvas_camera(view.id, Some(camera))?;
+                            view.camera = Some(camera);
+                            view.projection.set(Some(Projection::camera(area, inset, dpi, camera)));
+                        }
+                    }
+                }
+                WM_LBUTTONDOWN if view.drag.is_none() && view.pan.is_none() => {
+                    if let Some(projection) = visible
                         && let Some((id, geometry, resize)) = projection::hit_node(&view.doc, projection, point, grip)
                     {
                         SetCapture(self.hwnd);
@@ -165,7 +210,10 @@ impl App {
                     }
                 }
                 WM_MOUSEMOVE => {
-                    if let Some(drag) = &mut view.drag {
+                    if let Some(pan) = &mut view.pan {
+                        pan.current = point;
+                        InvalidateRect(self.hwnd, &client, 0);
+                    } else if let Some(drag) = &mut view.drag {
                         drag.current = point;
                         InvalidateRect(self.hwnd, &client, 0);
                     }
@@ -198,9 +246,13 @@ impl App {
             let inset = self.scaled(12);
             let projection = view.projection.get()
                 .filter(|p| p.area == area && p.inset == inset)
+                .or_else(|| view.camera.map(|camera| Projection::camera(area, inset, self.dpi, camera)))
                 .or_else(|| Projection::fit(&view.doc, area, inset));
             view.projection.set(projection);
             let Some(projection) = projection else { return; };
+            let projection = view.pan.as_ref().filter(|pan| pan.projection.area == area && pan.projection.inset == inset)
+                .map_or(projection, |pan| Projection::camera(area, inset, self.dpi,
+                    pan.projection.pan(pan.start, pan.current, self.dpi)));
             let active = view.drag.as_ref()
                 .filter(|drag| drag.projection.area == area && drag.projection.inset == inset)
                 .map(|drag| (drag.id.as_str(), drag.geometry()));

@@ -1,5 +1,5 @@
 use super::{Notebook, Result, properties};
-use crate::{canvas, formula};
+use crate::{canvas, canvas_projection::Camera, formula};
 use rusqlite::{OptionalExtension, params};
 
 pub(super) const MAX_CANVAS_STORAGE_BYTES: i64 = 64 * 1024 * 1024;
@@ -18,7 +18,38 @@ CREATE TABLE collection_formulas(
 );
 ";
 
+pub(super) const CAMERA_SCHEMA: &str = "
+CREATE TABLE canvas_cameras(
+    canvas_id INTEGER PRIMARY KEY REFERENCES saved_canvases(id) ON DELETE CASCADE,
+    x REAL NOT NULL CHECK(x BETWEEN -4e15 AND 4e15),
+    y REAL NOT NULL CHECK(y BETWEEN -4e15 AND 4e15),
+    scale REAL NOT NULL CHECK(scale BETWEEN 1e-16 AND 12.0)
+);
+";
+
 impl Notebook {
+    pub(crate) fn canvas_camera(&self, id: i64) -> Result<Option<Camera>> {
+        let camera = self.connection.query_row(
+            "SELECT x,y,scale FROM canvas_cameras WHERE canvas_id=?1", [id],
+            |row| Ok(Camera { origin: [row.get(0)?, row.get(1)?], scale: row.get(2)? }),
+        ).optional()?;
+        Ok(camera.filter(|camera| camera.valid()))
+    }
+
+    pub(crate) fn set_canvas_camera(&self, id: i64, camera: Option<Camera>) -> Result<()> {
+        if let Some(camera) = camera {
+            if !camera.valid() { return Err("畫布視野超出可保存範圍。".into()); }
+            self.connection.execute(
+                "INSERT INTO canvas_cameras(canvas_id,x,y,scale) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(canvas_id) DO UPDATE SET x=excluded.x,y=excluded.y,scale=excluded.scale",
+                params![id, camera.origin[0], camera.origin[1], camera.scale],
+            )?;
+        } else {
+            self.connection.execute("DELETE FROM canvas_cameras WHERE canvas_id=?1", [id])?;
+        }
+        Ok(())
+    }
+
     pub fn save_canvas(&self, title: &str, canvas: &canvas::Document) -> Result<i64> {
         let title = super::clean_title(title);
         let changed = self.connection.execute(
@@ -106,6 +137,50 @@ impl Notebook {
         )?;
         let rows = query.query_map([collection], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    #[test]
+    fn canvas_view_upgrades_v26_reopens_and_backs_up_without_editing_json() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("views.db");
+        let backup = dir.join("backup.db");
+        let raw = r#"{"nodes":[{"id":"p","type":"text","x":4,"y":-2,"width":20,"height":15,"text":"圖"}],"edges":[]}"#;
+        let (id, other) = {
+            let legacy = Notebook::open(&path, false)?;
+            let doc = canvas::parse(raw.into())?;
+            let id = legacy.save_canvas("畫布", &doc)?;
+            let other = legacy.save_canvas("第二份", &doc)?;
+            super::super::tests::remove_v27_schema(&legacy.connection)?;
+            legacy.connection.pragma_update(None, "user_version", 26)?;
+            (id, other)
+        };
+        let camera = Camera { origin: [12.25, -90.5], scale: 1.125 };
+        {
+            let upgraded = Notebook::open(&path, false)?;
+            assert_eq!(upgraded.canvas_camera(id)?, None);
+            upgraded.set_canvas_camera(id, Some(camera))?;
+            assert_eq!(upgraded.canvas_camera(other)?, None);
+            assert!(upgraded.set_canvas_camera(id, Some(Camera { origin: [f64::NAN, 0.0], scale: 1.0 })).is_err());
+            assert_eq!(upgraded.canvas_camera(id)?, Some(camera));
+            upgraded.backup(&backup)?;
+        }
+        for path in [&path, &backup] {
+            let db = Notebook::open(path, false)?;
+            assert_eq!(db.canvas_camera(id)?, Some(camera));
+            assert_eq!(db.read_canvas(id)?.as_str(), raw);
+            db.set_canvas_camera(id, None)?;
+            assert_eq!(db.canvas_camera(id)?, None);
+            db.set_canvas_camera(id, Some(camera))?;
+            db.remove_canvas(id, &db.read_canvas(id)?)?;
+            assert_eq!(db.canvas_camera(id)?, None);
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }
 

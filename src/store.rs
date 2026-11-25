@@ -106,7 +106,7 @@ pub use boards::DEFAULT_BOARD_ID;
 #[cfg(any(windows, test))]
 pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 
-const SCHEMA_VERSION: i32 = 26;
+const SCHEMA_VERSION: i32 = 27;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -345,6 +345,9 @@ impl Notebook {
         }
         if version < 26 {
             tx.execute_batch(note_highlights::SCHEMA)?;
+        }
+        if version < 27 {
+            tx.execute_batch(workspace::CAMERA_SCHEMA)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -709,7 +712,13 @@ mod tests {
         }
     }
 
+    pub(super) fn remove_v27_schema(connection: &Connection) -> Result<()> {
+        connection.execute("DROP TABLE canvas_cameras", [])?;
+        Ok(())
+    }
+
     pub(super) fn remove_v26_schema(connection: &Connection) -> Result<()> {
+        remove_v27_schema(connection)?;
         connection.execute_batch("DROP TRIGGER clear_changed_note_highlights; DROP TABLE note_highlights;")?;
         Ok(())
     }

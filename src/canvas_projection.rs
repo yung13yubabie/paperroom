@@ -2,14 +2,30 @@ use crate::canvas::{self, Document};
 use serde_json::Value;
 
 const MAX_COORDINATE: i64 = 1_000_000_000_000_000;
+const MAX_VIEW_ORIGIN: f64 = 4e15;
+const MIN_VIEW_SCALE: f64 = 1e-16;
+const MAX_VIEW_SCALE: f64 = 12.0;
 pub type Rect = [i32; 4];
 pub type Geometry = [i64; 4];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Camera {
+    pub origin: [f64; 2],
+    pub scale: f64,
+}
+
+impl Camera {
+    pub(crate) fn valid(self) -> bool {
+        self.origin.iter().all(|axis| axis.abs() <= MAX_VIEW_ORIGIN)
+            && (MIN_VIEW_SCALE..=MAX_VIEW_SCALE).contains(&self.scale)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Projection {
     pub area: Rect,
     pub inset: i32,
-    origin: [i64; 2],
+    origin: [f64; 2],
     scale: f64,
 }
 
@@ -33,12 +49,41 @@ impl Projection {
         }
         let scale_x = f64::from((area[2] - area[0] - 2 * inset).max(1)) / (right - left) as f64;
         let scale_y = f64::from((area[3] - area[1] - 2 * inset).max(1)) / (bottom - top) as f64;
-        Some(Self { area, inset, origin: [left, top], scale: scale_x.min(scale_y).min(1.5) })
+        Some(Self { area, inset, origin: [left as f64, top as f64], scale: scale_x.min(scale_y).min(1.5) })
+    }
+
+    pub(crate) fn camera(area: Rect, inset: i32, dpi: u32, camera: Camera) -> Self {
+        Self { area, inset, origin: camera.origin, scale: camera.scale * f64::from(dpi.max(1)) / 96.0 }
+    }
+
+    pub(crate) fn pan(self, start: [i32; 2], point: [i32; 2], dpi: u32) -> Camera {
+        let origin = std::array::from_fn(|i| {
+            let pixels = f64::from(point[i]) - f64::from(start[i]);
+            (self.origin[i] - pixels / self.scale).clamp(-MAX_VIEW_ORIGIN, MAX_VIEW_ORIGIN)
+        });
+        Camera { origin, scale: self.logical_scale(dpi) }
+    }
+
+    pub(crate) fn zoom(self, point: [i32; 2], wheel: i16, dpi: u32) -> Camera {
+        let previous = self.logical_scale(dpi);
+        let scale = (previous * 1.25f64.powf(f64::from(wheel) / 120.0))
+            .clamp(MIN_VIEW_SCALE, MAX_VIEW_SCALE);
+        let physical = scale * f64::from(dpi.max(1)) / 96.0;
+        let origin = std::array::from_fn(|i| {
+            let pixels = f64::from(point[i] - self.area[i] - self.inset);
+            (self.origin[i] + pixels / self.scale - pixels / physical)
+                .clamp(-MAX_VIEW_ORIGIN, MAX_VIEW_ORIGIN)
+        });
+        Camera { origin, scale }
+    }
+
+    fn logical_scale(self, dpi: u32) -> f64 {
+        (self.scale * 96.0 / f64::from(dpi.max(1))).clamp(MIN_VIEW_SCALE, MAX_VIEW_SCALE)
     }
 
     pub fn rectangle(self, [x, y, width, height]: Geometry) -> Rect {
-        let left = (self.area[0] + self.inset).saturating_add(((x - self.origin[0]) as f64 * self.scale) as i32);
-        let top = (self.area[1] + self.inset).saturating_add(((y - self.origin[1]) as f64 * self.scale) as i32);
+        let left = (self.area[0] + self.inset).saturating_add(((x as f64 - self.origin[0]) * self.scale) as i32);
+        let top = (self.area[1] + self.inset).saturating_add(((y as f64 - self.origin[1]) * self.scale) as i32);
         [
             left,
             top,
@@ -64,6 +109,32 @@ impl Projection {
             return None;
         }
         self.visible_rect([right - size, bottom - size, right, bottom])
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    #[test]
+    fn camera_pan_zoom_and_dpi_preserve_the_world_anchor() {
+        let area = [20, 40, 620, 460];
+        let before = Projection::camera(area, 12, 96, Camera { origin: [0.0, 0.0], scale: 1.5 });
+        let node = [100, 120, 80, 50];
+        let a = before.rectangle(node);
+        let panned = before.pan([200, 200], [250, 220], 96);
+        let moved = Projection::camera(area, 12, 96, panned);
+        let b = moved.rectangle(node);
+        assert_eq!([b[0] - a[0], b[1] - a[1]], [50, 20]);
+        let zoom = moved.zoom([b[0], b[1]], 120, 96);
+        assert_eq!(zoom.scale, 1.875);
+        let c = Projection::camera(area, 12, 96, zoom).rectangle(node);
+        assert!((c[0] - b[0]).abs() <= 1 && (c[1] - b[1]).abs() <= 1);
+        assert!(c[2] - c[0] > b[2] - b[0] && c[3] - c[1] > b[3] - b[1]);
+        let d = Projection::camera(area, 18, 144, zoom).rectangle(node);
+        assert!((2 * (d[2] - d[0]) - 3 * (c[2] - c[0])).abs() <= 2);
+        assert!(moved.zoom([b[0], b[1]], i16::MAX, 96).valid());
+        assert!(moved.zoom([b[0], b[1]], i16::MIN, 96).valid());
     }
 }
 

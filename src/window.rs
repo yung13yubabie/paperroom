@@ -2740,7 +2740,7 @@ unsafe extern "system" fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }
                 return 0;
             }
-            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_LBUTTONDBLCLK | WM_RBUTTONUP
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE | WM_LBUTTONDBLCLK | WM_RBUTTONUP
             | WM_MOUSEWHEEL | WM_CAPTURECHANGED | WM_CANCELMODE => {
                 if let Ok(mut app) = state.try_borrow_mut() {
                     app.board_input(msg, wp, lp);

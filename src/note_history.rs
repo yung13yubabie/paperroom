@@ -1,6 +1,9 @@
 use super::{Notebook, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+#[path = "note_history_diff.rs"]
+pub(crate) mod diff;
+
 // Saving a draft and recording the previous revision are one SQLite operation.
 // The live note is outside the bounded history, even when old revisions age out.
 pub(super) const SCHEMA: &str = "
@@ -64,12 +67,19 @@ impl Notebook {
         revision_content(&self.connection, note, revision)
     }
 
-    pub(crate) fn restore_note_revision(&self, note: i64, expected: i64, revision: i64) -> Result<()> {
+    pub(crate) fn restore_note_revision(&self, note: i64, expected: i64, revision: i64) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let (title, body) = revision_content(&tx, note, revision)?;
+        let current = tx.query_row(
+            "SELECT title,body FROM notes WHERE id=?1 AND version=?2 AND trash_root IS NULL",
+            params![note, expected], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?.ok_or("目前版本已變更。請重新開啟筆記並預覽。")?;
+        if current.0 == title && current.1 == body {
+            return Ok(false);
+        }
         super::save_in(&tx, note, expected, &title, &body)?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -158,6 +168,26 @@ mod tests {
         assert_eq!(db.note_revisions(note)?.len(), 30);
         drop(db);
         std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn equal_restore_is_a_noop_and_blank_restore_keeps_the_replaced_text() -> Result<()> {
+        let mut db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let note = db.add(None, "草稿", "")?;
+        let version = db.note(note)?.unwrap().version;
+        let filled = db.save(note, version, "草稿", "甲\r\n\r\n乙")?;
+        let cleared = db.save(note, filled, "草稿", "")?;
+        let latest = db.save(note, cleared, "草稿", "甲\r\n\r\n乙")?;
+        let revisions = db.note_revisions(note)?;
+        assert_eq!(revisions.len(), 3);
+        assert!(!db.restore_note_revision(note, latest, revisions[1].id)?);
+        assert_eq!(db.note(note)?.unwrap().version, latest);
+        assert_eq!(db.note_revisions(note)?.len(), 3);
+        assert!(db.restore_note_revision(note, latest, revisions[0].id)?);
+        assert_eq!(db.note(note)?.unwrap().body, "");
+        let replaced = db.note_revisions(note)?.remove(0);
+        assert_eq!(db.note_revision(note, replaced.id)?.1, "甲\r\n\r\n乙");
         Ok(())
     }
 }

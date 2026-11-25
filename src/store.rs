@@ -24,7 +24,7 @@ pub(crate) mod journal;
 #[path = "duplicate_note.rs"]
 mod duplicate_note;
 #[path = "note_history.rs"]
-mod note_history;
+pub(crate) mod note_history;
 #[path = "note_highlights.rs"]
 pub(crate) mod note_highlights;
 #[path = "board_shapes.rs"]

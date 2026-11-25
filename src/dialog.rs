@@ -16,7 +16,7 @@ const STATIC_CLASS: u16 = 0x82;
 enum Content<'a> {
     Prompt { hint: &'a str, max_chars: usize, multiline: bool },
     ReadOnly,
-    JumpPreview,
+    Decision { accept: &'a str, cancel: &'a str },
 }
 
 struct Dialog {
@@ -75,7 +75,14 @@ pub unsafe fn show_text(owner: HWND, caption: &str, body: &str) -> Result<()> {
 
 /// Show read-only text. Closing the dialog or accepting its default stays on the current note.
 pub unsafe fn preview_with_jump(owner: HWND, caption: &str, body: &str) -> Result<bool> {
-    unsafe { run(owner, caption, body, Content::JumpPreview).map(|(jump, _)| jump) }
+    unsafe { preview_decision(owner, caption, body, "前往區塊", "留在原處") }
+}
+
+/// The default button, Escape and the close box all cancel this read-only decision.
+pub unsafe fn preview_decision(
+    owner: HWND, caption: &str, body: &str, accept: &str, cancel: &str,
+) -> Result<bool> {
+    unsafe { run(owner, caption, body, Content::Decision { accept, cancel }).map(|(accepted, _)| accepted) }
 }
 
 fn terminated(text: &str) -> Result<Vec<u16>> {
@@ -90,10 +97,13 @@ fn logical_lines(text: &str) -> String {
 }
 
 unsafe fn run(owner: HWND, caption: &str, initial: &str, content: Content<'_>) -> Result<(bool, Option<String>)> {
-    let preview = matches!(&content, Content::JumpPreview);
+    let decision = match &content {
+        Content::Decision { accept, cancel } => Some((*accept, *cancel)),
+        _ => None,
+    };
     let (hint, max_chars, multiline) = match content {
         Content::Prompt { hint, max_chars, multiline } => (hint, Some(max_chars), multiline),
-        Content::ReadOnly | Content::JumpPreview => ("", None, true),
+        Content::ReadOnly | Content::Decision { .. } => ("", None, true),
     };
     let initial_display = if multiline {
         terminated(&logical_lines(initial).replace('\n', "\r\n"))?
@@ -108,7 +118,7 @@ unsafe fn run(owner: HWND, caption: &str, initial: &str, content: Content<'_>) -
         text: None,
         error: None,
     };
-    let template = template(caption, max_chars.is_some(), multiline, preview)?;
+    let template = template(caption, max_chars.is_some(), multiline, decision)?;
     unsafe {
         if !owner.is_null() && IsWindow(owner) == 0 {
             return Err("對話框的主視窗已關閉。".into());
@@ -240,10 +250,10 @@ unsafe fn read_edit(field: HWND) -> Result<String> {
     }
 }
 
-fn template(caption: &str, editable: bool, multiline: bool, preview: bool) -> Result<Vec<u32>> {
+fn template(caption: &str, editable: bool, multiline: bool, decision: Option<(&str, &str)>) -> Result<Vec<u32>> {
     let mut words = Vec::<u16>::new();
     let height = if multiline { 175 } else { 95 };
-    let count = if editable { 4 } else if preview { 3 } else { 2 };
+    let count = if editable { 4 } else if decision.is_some() { 3 } else { 2 };
     let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | (DS_SETFONT | DS_CENTER | DS_MODALFRAME) as u32;
     words.extend([(style & 0xffff) as u16, (style >> 16) as u16, 0, 0]);
     words.extend([count, 0, 0, 275, height, 0, 0]);
@@ -270,10 +280,10 @@ fn template(caption: &str, editable: bool, multiline: bool, preview: bool) -> Re
         control(&mut words, [8, 8, 259, 136], EDIT, EDIT_CLASS,
             WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
             WS_EX_CLIENTEDGE, "");
-        if preview {
-            control(&mut words, [133, 151, 64, 16], IDOK, BUTTON_CLASS, WS_TABSTOP, 0, "前往區塊");
+        if let Some((accept, cancel)) = decision {
+            control(&mut words, [133, 151, 64, 16], IDOK, BUTTON_CLASS, WS_TABSTOP, 0, accept);
             control(&mut words, [203, 151, 64, 16], IDCANCEL, BUTTON_CLASS,
-                WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, "留在原處");
+                WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, cancel);
         } else {
             control(&mut words, [212, 151, 55, 16], IDOK, BUTTON_CLASS,
                 WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, "關閉");

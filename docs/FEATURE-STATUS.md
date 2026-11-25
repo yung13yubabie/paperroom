@@ -40,7 +40,7 @@
 | 垃圾桶 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 還原筆記 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 整頁複製 | 部分 | 可複製單篇或使用中的子頁，保留正文、屬性和附件。關聯、白板、PDF 標註及版本歷史仍留在原筆記。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [duplicate_note.rs](../src/duplicate_note.rs) |
-| 頁面歷史版本還原 | 部分 | 每篇可預覽並還原已保存的本機標題與正文。屬性、附件及頁面配置的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [note_history.rs](../src/note_history.rs) |
+| 頁面歷史版本還原 | 部分 | 每篇可比較目前草稿或保存內容與選取的舊版，逐行預覽標題及正文差異，再還原已保存的版本。屬性、附件及頁面配置的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
 | 區塊編輯 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 斜線選單 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 文字樣式 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |

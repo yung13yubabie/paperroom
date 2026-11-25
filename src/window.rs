@@ -1462,6 +1462,14 @@ impl App {
                 }
                 return;
             }
+            if action == 22 {
+                // Inspect the editor before any save. Modal messages cannot borrow App
+                // while this command owns it, so its pending save resumes on return.
+                if let Err(error) = self.note_history_ui(id) {
+                    self.show_error(error);
+                }
+                return;
+            }
             if action == 0 { return; }
             self.mutate(|app| {
                 match action {
@@ -1489,7 +1497,6 @@ impl App {
                     9 => app.open_pdf_excerpt_source(id)?,
                     20 => app.find_replace_note_ui()?,
                     21 => app.note_word_count_ui()?,
-                    22 => app.note_history_ui(id)?,
                     23 => app.restore_pdf_excerpt_ui(id)?,
                     24 => app.duplicate_note_ui(id)?,
                     _ => {}

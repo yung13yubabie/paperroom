@@ -213,18 +213,21 @@ public static class PaperroomHighlightGui {
         if (GetCursorPos(out Point current) && current.X == expected.X && current.Y == expected.Y)
             SetCursorPos(original.X, original.Y);
     }
-    public static Point ButtonPoint(IntPtr owner, uint pid, IntPtr button) {
+    public static Point ControlPoint(IntPtr owner, uint pid, IntPtr button, string expectedClass) {
         if (GetParent(button) != owner ||
             GetWindowThreadProcessId(button, out uint buttonPid) == 0 || buttonPid != pid ||
-            !IsWindowVisible(button) || Kind(button) != "Button")
-            throw new InvalidOperationException("Expected an owned native toolbar button.");
+            !IsWindowVisible(button) || !String.Equals(Kind(button), expectedClass, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Expected an owned native " + expectedClass + " control.");
         var rect = VisibleRect(button);
         Point point = Center(rect);
         if (!Contains(rect, point) || WindowFromPoint(point) != button)
             throw new InvalidOperationException("The toolbar button is not exposed at its center.");
         return point;
     }
-    public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
+    public static Point ButtonPoint(IntPtr owner, uint pid, IntPtr button) {
+        return ControlPoint(owner, pid, button, "Button");
+    }
+    public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
@@ -232,7 +235,7 @@ public static class PaperroomHighlightGui {
         if (!GetGUIThreadInfo(thread, ref gui) || (gui.Flags & 0x14) == 0 || gui.MenuOwner != owner)
             throw new InvalidOperationException("The isolated app is not the current native menu owner.");
         IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero); // MN_GETHMENU for inspected #32768.
-        int position = MenuPosition(menu, itemId, caption);
+        int position = MenuPosition(menu, itemId, caption, prefix);
         Rect menuRect = VisibleRect(popup);
         // NULL selects the popup's screen-space item geometry.
         bool hasItem = GetMenuItemRect(IntPtr.Zero, menu, (uint)position, out Rect row);
@@ -287,11 +290,11 @@ public static class PaperroomHighlightGui {
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(key, 0, 0), Key(key, 0, 2) });
     }
-    public static void TypeOutlinePrefix(IntPtr owner, uint pid, IntPtr edit, string prefix) {
+    public static void TypeEditorText(IntPtr owner, uint pid, IntPtr edit, string prefix) {
         if (!ForegroundIsOwned(owner, pid) || DialogFocus(owner) != edit ||
             GetWindowThreadProcessId(edit, out uint editPid) == 0 || editPid != pid ||
-            prefix.Length == 0 || prefix.Length > 96 || prefix.Contains("\r"))
-            throw new InvalidOperationException("Expected the owned outline editor and a bounded LF-only prefix.");
+            prefix.Length == 0 || prefix.Length > 256 || prefix.Contains("\r"))
+            throw new InvalidOperationException("Expected the owned editor and bounded LF-only input.");
         foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         var keys = new List<Input>();
@@ -314,14 +317,16 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
-    private static int MenuPosition(IntPtr menu, uint itemId, string caption) {
+    private static int MenuPosition(IntPtr menu, uint itemId, string caption, bool prefix) {
         int count = GetMenuItemCount(menu);
         if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
         for (int index = 0; index < count; index++) {
             if (GetMenuItemID(menu, index) != itemId) continue;
             var title = new StringBuilder(256);
             GetMenuStringW(menu, (uint)index, title, title.Capacity, 0x400);
-            if (title.ToString() != caption) throw new InvalidOperationException("Unexpected menu label: " + title);
+            string actual = title.ToString();
+            if (prefix ? !actual.StartsWith(caption, StringComparison.Ordinal) : actual != caption)
+                throw new InvalidOperationException("Unexpected menu label: " + title);
             if ((GetMenuState(menu, (uint)index, 0x400) & 3) != 0)
                 throw new InvalidOperationException("The required native menu item is disabled.");
             return index;
@@ -442,7 +447,8 @@ function Command([IntPtr]$Owner, [int]$Id) {
         throw "Could not invoke control $Id."
     }
 }
-function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint16]$Shortcut = 0) {
+function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint16]$Shortcut = 0,
+                     [switch]$MenuOpen, [switch]$CaptionPrefix) {
     if (![PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id)) {
         [void][PaperroomHighlightGui]::SetForegroundWindow($window)
         $null = Wait-For 'isolated app foreground' { [PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id) }
@@ -452,7 +458,7 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
     try {
         if ($Shortcut) {
             [PaperroomHighlightGui]::TapKey($window, $process.Id, $Shortcut)
-        } else {
+        } elseif (!$MenuOpen) {
             $button = Control $window $OwnerControl
             $point = [PaperroomHighlightGui]::ButtonPoint($window, $process.Id, $button)
             [PaperroomHighlightGui]::MouseAction($window, $process.Id, $button, $point, 0)
@@ -461,7 +467,7 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
             [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0)
         }
         for ($attempt = 0; $attempt -lt 18; $attempt++) {
-            $selection = [PaperroomHighlightGui]::PlanMenu($window, $process.Id, $menu, $Item, $Caption)
+            $selection = [PaperroomHighlightGui]::PlanMenu($window, $process.Id, $menu, $Item, $Caption, $CaptionPrefix.IsPresent)
             $point = $selection.Point
             [PaperroomHighlightGui]::MouseAction($window, $process.Id, $menu, $point, $selection.Scroll)
             if ($selection.Scroll -eq 0) {
@@ -475,6 +481,39 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
     } finally {
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
+}
+function Replace-EditorText([IntPtr]$Field, [string]$Text) {
+    $point = [PaperroomHighlightGui]::ControlPoint($window, $process.Id, $Field, 'Edit')
+    [PaperroomHighlightGui]::MouseAction($window, $process.Id, $Field, $point, 0)
+    [void][PaperroomHighlightGui]::Send($Field, 0x00B1, [IntPtr]::Zero, [IntPtr](-1))
+    [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x08)
+    if ($Text.Length -gt 0) { [PaperroomHighlightGui]::TypeEditorText($window, $process.Id, $Field, $Text) }
+    $expected = $Text.Replace("`n", "`r`n")
+    $null = Wait-For 'physically entered replacement text' { [PaperroomHighlightGui]::Read($Field) -ceq $expected }
+}
+function Open-Revision([int]$Index) {
+    Native-Menu 113 22 '檢視與還原版本…'
+    Native-Menu 113 $Index '版本 ' -MenuOpen -CaptionPrefix
+    Wait-For 'native history difference preview' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '筆記版本差異', 1) }
+}
+function Finish-Revision([IntPtr]$Dialog, [int]$Button) {
+    $control = Control $Dialog $Button
+    $point = [PaperroomHighlightGui]::ButtonPoint($Dialog, $process.Id, $control)
+    [PaperroomHighlightGui]::MouseAction($window, $process.Id, $control, $point, 0)
+    $null = Wait-For 'native revision dialog closed' { ![PaperroomHighlightGui]::IsWindowVisible($Dialog) }
+}
+function Read-HistoryStamp([string]$Database, [string]$Title) {
+    $result = @'
+from pathlib import Path
+from contextlib import closing
+import sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+    row = db.execute('SELECT id, version FROM notes WHERE title=? AND trash_root IS NULL', (sys.argv[2],)).fetchone()
+    assert row is not None
+    print(f'{row[1]}:{db.execute("SELECT count(*) FROM note_revisions WHERE note_id=?", (row[0],)).fetchone()[0]}')
+'@ | python - $Database $Title
+    if ($LASTEXITCODE -ne 0 -or $result -notmatch '^\d+:\d+$') { throw 'Could not read the draft history stamp.' }
+    return $result
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status) {
     Native-Menu 109 $Item $Caption
@@ -778,7 +817,7 @@ try {
     $prefix = "# 新段落 📽`n`n"
     $updated = $existing.Insert($insertAt, $prefix.Replace("`n", "`r`n"))
     [void][PaperroomHighlightGui]::Send($field, 0x00B1, [IntPtr]$insertAt, [IntPtr]$insertAt)
-    [PaperroomHighlightGui]::TypeOutlinePrefix($window, $process.Id, $field, $prefix)
+    [PaperroomHighlightGui]::TypeEditorText($window, $process.Id, $field, $prefix)
     $null = Wait-For 'real typing changed the source editor' { [PaperroomHighlightGui]::Read($field) -ceq $updated }
     Assert-OutlineSelection 4 'H2　同名 🎬　（第 16 行）' '## 同名 🎬' '第二處'
     Command $window 110
@@ -793,10 +832,69 @@ try {
     if ([PaperroomHighlightGui]::Read((Control $window 104)) -cne $updated) {
         throw 'Saved manuscript differs from the draft after reopening.'
     }
+    Write-Host 'PASS: F8 outline selected the second of two same-name Unicode headings in the saved source, live draft, and resumed note. Offline HTML links separately identified both sections.'
+    $historyTitle = Control $window 103
+    $tooLong = '稿' * 181
+    $stamp = Read-HistoryStamp $liveDb $title
+    Replace-EditorText $historyTitle $tooLong
+    $null = Wait-For 'invalid unsaved draft stayed in the editor' {
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗')
+    }
+    $preview = Open-Revision 1
+    $report = [PaperroomHighlightGui]::Read((Control $preview 101))
+    if (!$report.Contains('目前未存草稿') -or !$report.Contains('先儲存草稿') -or
+        !$report.Contains('− 目前標題') -or
+        [PaperroomHighlightGui]::Caption((Control $preview 1)) -cne '關閉') {
+        throw 'Expected a read-only comparison with the unsaved title.'
+    }
+    Finish-Revision $preview 1
+    if ([PaperroomHighlightGui]::Read($historyTitle) -cne $tooLong -or (Read-HistoryStamp $liveDb $title) -cne $stamp) {
+        throw 'Previewing the unsaved draft changed either the draft or the saved history.'
+    }
+    Replace-EditorText $historyTitle $title
+    $null = Wait-For 'valid title saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦' }
+    $field = Control $window 104
+    foreach ($value in '', '保留這份正文📝', $updated.Replace("`r`n", "`n")) {
+        Replace-EditorText $field $value
+        $null = Wait-For 'history fixture saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦' }
+    }
+    $stamp = Read-HistoryStamp $liveDb $title
+    $preview = Open-Revision 3
+    $report = [PaperroomHighlightGui]::Read((Control $preview 101))
+    if (!$report.Contains('本版與目前保存內容完全相同') -or
+        [PaperroomHighlightGui]::Caption((Control $preview 1)) -cne '關閉') {
+        throw 'An identical historical version must be a read-only preview.'
+    }
+    Finish-Revision $preview 1
+    if ((Read-HistoryStamp $liveDb $title) -cne $stamp) { throw 'Viewing an equal version changed history.' }
+    $preview = Open-Revision 2
+    $report = [PaperroomHighlightGui]::Read((Control $preview 101))
+    if (!$report.Contains('選取的舊版沒有正文') -or !$report.Contains('−     9  # 新段落 📽') -or
+        [PaperroomHighlightGui]::Caption((Control $preview 1)) -cne '還原此版本') {
+        throw 'Expected a restorable blank version and the exact removed line.'
+    }
+    Finish-Revision $preview 2
+    if ((Read-HistoryStamp $liveDb $title) -cne $stamp) { throw 'Canceling restore changed history.' }
+    $preview = Open-Revision 2
+    Finish-Revision $preview 1
+    $null = Wait-For 'blank historical version restored' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已還原選取的筆記版本。' }
     Close-Notebook $process
     $process.Dispose()
     $process = $null
-    Write-Host 'PASS: F8 outline selected the second of two same-name Unicode headings in the saved source, live draft, and resumed note. Offline HTML links separately identified both sections.'
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Select-Note $title
+    $field = Open-Editor
+    if ([PaperroomHighlightGui]::Read($field) -cne '') { throw 'Restored empty body did not survive reopening.' }
+    $preview = Open-Revision 1
+    $report = [PaperroomHighlightGui]::Read((Control $preview 101))
+    if (!$report.Contains('＋     9  # 新段落 📽')) { throw 'The replaced version is missing from history.' }
+    Finish-Revision $preview 1
+    if ([PaperroomHighlightGui]::Read($field) -cne $updated) { throw 'Recovering the replaced version did not return the full original body.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native history preview protected the unsaved title, made repeated content a no-op, canceled and restored an empty version, reopened, and recovered the replaced version.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

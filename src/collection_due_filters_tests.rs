@@ -39,6 +39,7 @@ fn saved_due_filters_upgrade_recompute_and_survive_full_backup() -> Result<()> {
         let week_rules = rules(field, typed, FilterOperator::ThisWeek);
         db.set_collection_view_rules(collection, &week, week_rules.clone())?;
         assert_eq!(week_rules.encode(), r#"[false,[["截止日","date",17,""]],[]]"#);
+        db.connection.execute("DROP TABLE collection_display_columns", [])?;
         db.connection.pragma_update(None, "user_version", 32)?;
         drop(db);
 
@@ -51,7 +52,7 @@ fn saved_due_filters_upgrade_recompute_and_survive_full_backup() -> Result<()> {
             result.sort_unstable();
             Ok(result)
         };
-        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, 33);
+        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, crate::store::SCHEMA_VERSION);
         let legacy = saved(&db, "本週");
         assert_eq!(legacy.rules(), week_rules);
         assert_eq!(results(&db, &legacy, "2028-12-31")?, [ids[1], ids[2]]);

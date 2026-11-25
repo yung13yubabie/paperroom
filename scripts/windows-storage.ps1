@@ -183,7 +183,7 @@ def inspect(database):
         assert con.execute("pragma integrity_check").fetchall() == [("ok",)]
         assert con.execute("pragma foreign_key_check").fetchall() == []
         version = con.execute("pragma user_version").fetchone()[0]
-        if version == 33:
+        if version == 34:
             assert con.execute("SELECT count(*) FROM collection_field_rules").fetchone() == (0,)
             assert con.execute("SELECT count(*) FROM notion_page_paths").fetchone() == (0,)
         notes = con.execute("select id,parent,title,body,pinned,trash_root,version from notes order by id").fetchall()
@@ -259,14 +259,14 @@ function Test-PublishedWorkspaceUpgrade($Root, $Baseline, $Candidate) {
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         Set-UpgradeTitle $process $newTitle
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 33 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 34 $newTitle $oldDb
         $process = Start-Notebook (Join-Path $upgrade 'bin') (Join-Path $upgrade 'local') (Join-Path $upgrade 'temp') $false
         if ((Read-Control $process.MainWindowHandle 103) -cne $newTitle) { throw 'Candidate did not retain the upgraded note on reopen.' }
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 33 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 34 $newTitle $oldDb
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         if ((Get-FileHash -LiteralPath $oldDb).Hash -cne $originalHash) { throw 'Published original database bytes changed.' }
-        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 33 → native UI save/reopen, integrity, and original byte preservation passed.'
+        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 34 → native UI save/reopen, integrity, and original byte preservation passed.'
     } finally {
         if ($process -and !$process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }

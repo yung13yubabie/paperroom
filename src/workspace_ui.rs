@@ -14,6 +14,8 @@ mod pdf_search_ui;
 mod note_graph_ui;
 #[path = "collection_view_ui.rs"]
 mod collection_view_ui;
+#[path = "collection_display_ui.rs"]
+mod collection_display_ui;
 #[path = "collection_field_ui.rs"]
 mod collection_field_ui;
 #[path = "board_group_ui.rs"]
@@ -35,6 +37,7 @@ pub(super) struct Kanban {
     row: usize,
     saved_view: Option<crate::store::collection_views::CollectionView>,
     checkbox: Option<(String, std::collections::HashMap<i64, String>)>,
+    display_columns: Option<Vec<collection_display_ui::DisplayProperty>>,
     week: Option<(crate::store::collection_views::CalendarDay,
         std::collections::BTreeMap<crate::store::collection_views::CalendarDay, Vec<Row>>)>,
     calendar: Option<(crate::store::collection_views::Month, std::collections::BTreeMap<usize, Vec<Row>>)>,
@@ -567,6 +570,7 @@ impl App {
                 (14, previous), (15, next), (16, open_date), (17, edit_dates),
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
                 (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
+                (24, "表格與清單欄位…"),
             ]);
             match action {
                 1 => {
@@ -577,6 +581,7 @@ impl App {
                 }
                 22 => return self.add_collection_row_ui(id, title, None),
                 23 => return self.collection_rule_menu(id),
+                24 => return self.collection_display_menu(id, title),
                 2 | 3 | 6 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = choose(hwnd, anchor, &rows, |(row, status)| {
@@ -921,6 +926,10 @@ impl App {
                 }
                 if let Some((month, days)) = &view.calendar {
                     self.paint_collection_calendar(dc,area,*month,days);
+                    return;
+                }
+                if let Some(columns) = &view.display_columns {
+                    self.paint_collection_display_columns(dc, area, view, columns);
                     return;
                 }
                 if view.is_list() {

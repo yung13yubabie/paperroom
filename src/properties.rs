@@ -116,8 +116,8 @@ impl Notebook {
         Ok(s.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Snapshot the raw values for one checkbox column without normalizing legacy text.
-    pub(crate) fn collection_checkbox_values(
+    /// Snapshot the raw values for one property column without normalizing legacy text.
+    pub(crate) fn collection_property_values(
         &self, collection: i64, key: &str,
     ) -> Result<std::collections::HashMap<i64, String>> {
         let key = key_checked(key)?;

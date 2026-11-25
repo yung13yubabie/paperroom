@@ -1,4 +1,4 @@
-//! Exercise #9, #10 and #11 on one workspace upgraded from the v30 schema.
+//! Exercise #9 through #12 on one workspace upgraded from the v30 schema.
 use super::{
     Notebook, Result, canvas_bundle::LocalCanvasBundle, collection_field_rules::CollectionFieldRule,
     collections::CollectionEntry, typed_properties::PropertyType,
@@ -11,6 +11,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 const PROJECT: &str = "專案 11111111111111111111111111111111";
 const ASSET: &str = "附件/畫面.png";
+const NESTED_CANVAS: &str = "Boards/VaultRestoreScene.canvas";
 
 fn assert_links(db: &Notebook, root: i64) -> Result<()> {
     let id_at = |member: &str| -> Result<i64> {
@@ -63,6 +64,16 @@ fn materialize_fixture(dir: &Path, fixture: &Value) -> Result<()> {
     fs::create_dir(dir.join("附件"))?;
     image::RgbImage::from_pixel(16, 16, image::Rgb([37, 146, 179])).save(dir.join(ASSET))?;
     fs::write(dir.join("共同畫布.canvas"), fixture["canvas"].to_string())?;
+    let vault = dir.join("Vault");
+    for (member, colors) in fixture["vault_asset_colors"].as_object().unwrap() {
+        for (scope, color) in [(&vault, "root"), (&vault.join("Boards"), "decoy")] {
+            let target = scope.join(member);
+            fs::create_dir_all(target.parent().unwrap())?;
+            let rgb = std::array::from_fn(|index| colors[color][index].as_u64().unwrap() as u8);
+            image::RgbImage::from_pixel(16, 16, image::Rgb(rgb)).save(target)?;
+        }
+    }
+    fs::write(vault.join(NESTED_CANVAS), fixture["vault_canvas"].to_string())?;
     Ok(())
 }
 
@@ -131,11 +142,17 @@ fn csv_and_exact_links_coexist_with_canvas_and_legacy_rules_through_isolated_res
         db.export_canvas_bundle(canvas, &canvas_zip)?;
         let copied_canvas = db.import_canvas_bundle(&canvas_zip)?.id;
         assert_ne!(canvas, copied_canvas);
+        let vault = dir.join("Vault");
+        let nested = vault.join(NESTED_CANVAS);
+        let vault_canvas = LocalCanvasBundle::read_vault(&nested, &vault)?.save(&db)?.0;
         db.backup(&backup)?;
         drop(db);
         let before = fs::read(&workspace)?;
         let backup_bytes = fs::read(&backup)?;
         fs::copy(&backup, &restore)?;
+        let detached_vault = dir.join("DetachedVault");
+        fs::rename(&vault, &detached_vault)?;
+        assert!(!nested.exists());
         let restored = Notebook::open(&restore, false)?;
         assert_links(&restored, root)?;
         assert!(restored.properties(row)?.contains(&("備註".into(), "修改後欄值".into())));
@@ -151,6 +168,14 @@ fn csv_and_exact_links_coexist_with_canvas_and_legacy_rules_through_isolated_res
             let file = dir.join(format!("picture-{id}.png"));
             restored.save_canvas_bundle_asset(id, ASSET, &file)?;
             assert_eq!(fs::read(file)?, png);
+        }
+        assert_eq!(restored.read_canvas(vault_canvas)?.as_str(), fs::read_to_string(detached_vault.join(NESTED_CANVAS))?);
+        for member in fixture["vault_asset_colors"].as_object().unwrap().keys() {
+            let file = dir.join(Path::new(member).file_name().unwrap());
+            restored.save_canvas_bundle_asset(vault_canvas, member, &file)?;
+            let kept = fs::read(file)?;
+            assert_eq!(kept, fs::read(detached_vault.join(member))?);
+            assert_ne!(kept, fs::read(detached_vault.join("Boards").join(member))?);
         }
         let new_row = restored.add_collection_entry(existing, CollectionEntry::New("隔離還原追加"), "待處理", None)?;
         assert_eq!(restored.properties(new_row)?, [("工時".into(), "8".into())]);

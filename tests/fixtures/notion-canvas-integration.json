@@ -51,5 +51,56 @@
         "label": "說明"
       }
     ]
+  },
+  "vault_canvas": {
+    "nodes": [
+      {
+        "id": "group",
+        "type": "group",
+        "x": -200,
+        "y": -120,
+        "width": 350,
+        "height": 290,
+        "label": "Vault 群組",
+        "background": "Media/RestoreBackground.png",
+        "backgroundStyle": "cover"
+      },
+      {
+        "id": "frame",
+        "type": "file",
+        "x": -100,
+        "y": -45,
+        "width": 170,
+        "height": 145,
+        "file": "Media/RestoreFrame.png"
+      }
+    ],
+    "edges": []
+  },
+  "vault_asset_colors": {
+    "Media/RestoreFrame.png": {
+      "root": [
+        43,
+        139,
+        217
+      ],
+      "decoy": [
+        218,
+        64,
+        134
+      ]
+    },
+    "Media/RestoreBackground.png": {
+      "root": [
+        44,
+        166,
+        107
+      ],
+      "decoy": [
+        215,
+        123,
+        27
+      ]
+    }
   }
 }

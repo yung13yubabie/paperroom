@@ -36,16 +36,30 @@ function Open-IntegratedCanvas {
     Native-Menu 109 1 '共同畫布' -MenuOpen
     $null = Wait-For 'real local PNG on the shared-workspace Canvas' { Read-CanvasInk 37 146 179 }
 }
-function Assert-IntegratedWorkspace([string]$Database) {
-    @'
+function Show-IntegratedVaultPictures {
+    foreach ($colors in $jointVaultColors.Values) {
+        $rgb = $colors.root
+        $null = Wait-For 'native Vault-root pixels in the correct Canvas' { Read-CanvasInk $rgb[0] $rgb[1] $rgb[2] }
+    }
+}
+function Assert-IntegratedWorkspace([string]$Database, [string]$VaultEvidenceFolder) {
+    $snapshot = @'
 from contextlib import closing
+from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile
-import sqlite3, sys
+import json, sqlite3, sys
 
-database, notion, canvas, portable = map(Path, sys.argv[1:])
+database, notion, canvas, portable, vault = map(Path, sys.argv[1:])
 source = canvas.read_bytes()
 png = (canvas.parent / "附件" / "畫面.png").read_bytes()
+vault_scene = vault / "Boards" / "VaultRestoreScene.canvas"
+vault_raw = vault_scene.read_bytes()
+vault_doc = json.loads(vault_raw)
+vault_assets = {
+    "group_background": next(n["background"] for n in vault_doc["nodes"] if n["type"] == "group"),
+    "file_card": next(n["file"] for n in vault_doc["nodes"] if n["type"] == "file"),
+}
 with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db, \
      ZipFile(notion) as raw, ZipFile(portable) as moved:
     assert db.execute("PRAGMA user_version").fetchone() == (31,)
@@ -54,11 +68,26 @@ with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db, \
     assert set(moved.namelist()) == {canvas.name, "附件/畫面.png"}
     assert moved.read(canvas.name) == source and moved.read("附件/畫面.png") == png
     assert db.execute("SELECT title,source FROM saved_canvases ORDER BY id").fetchall() == [
-        ("共同畫布", source.decode()), ("共同畫布", source.decode())
+        ("共同畫布", source.decode()), ("共同畫布", source.decode()),
+        ("VaultRestoreScene", vault_raw.decode()),
     ]
-    assert db.execute("SELECT path,bytes FROM canvas_bundle_assets ORDER BY canvas_id").fetchall() == [
+    assert db.execute("""SELECT path,bytes FROM canvas_bundle_assets
+        JOIN saved_canvases ON id=canvas_id WHERE title='共同畫布' ORDER BY canvas_id""").fetchall() == [
         ("附件/畫面.png", png), ("附件/畫面.png", png)
     ]
+    bundled = dict(db.execute("""SELECT path,bytes FROM canvas_bundle_assets
+        JOIN saved_canvases ON id=canvas_id WHERE title='VaultRestoreScene'"""))
+    assert set(bundled) == set(vault_assets.values())
+    assert db.execute("""SELECT canvas_path FROM canvas_bundles
+        JOIN saved_canvases ON id=canvas_id WHERE title='VaultRestoreScene'""").fetchone() == ("VaultRestoreScene.canvas",)
+    hashes = {}
+    for role, path in vault_assets.items():
+        root = (vault / path).read_bytes()
+        decoy = (vault / "Boards" / path).read_bytes()
+        assert bundled[path] == root and bundled[path] != decoy, (role, path)
+        hashes[role] = {"member": path, "workspace_sha256": sha256(bundled[path]).hexdigest(),
+                        "vault_root_sha256": sha256(root).hexdigest(),
+                        "same_folder_decoy_sha256": sha256(decoy).hexdigest()}
     paths = dict(db.execute("SELECT relative_path, body FROM notion_page_paths JOIN notes ON id=note_id"))
     assert len(paths) == 4 and all(raw.read(path).decode().split("\n\n", 1)[1] == body for path, body in paths.items())
     for name, data in db.execute("SELECT name,content FROM attachments WHERE name LIKE '%.csv'"):
@@ -70,12 +99,13 @@ with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db, \
     assert db.execute("SELECT title FROM notes JOIN collection_notes ON id=note_id ORDER BY title").fetchall() == [
         ("追蹤列乙",), ("追蹤列甲",)
     ]
-    assert dict(db.execute("SELECT key,value FROM note_properties JOIN notes ON id=note_id WHERE title='追蹤列甲'")) == {
-        "名稱":"追蹤列甲", "編號":"00042", "備註":"修改後欄值"
-    }
+    row = dict(db.execute("SELECT key,value FROM note_properties JOIN notes ON id=note_id WHERE title='追蹤列甲'"))
+    assert row == {"名稱":"追蹤列甲", "編號":"00042", "備註":"修改後欄值"}
     assert db.execute("SELECT count(*) FROM notes WHERE title IN ('不可寫入列','禁止建立')").fetchone() == (0,)
-'@ | python - $Database $jointNotion $jointCanvas $jointPortable
+    print(json.dumps({"root_assets":hashes,"edited_csv_row":row,"canvas_sha256":sha256(vault_raw).hexdigest()}, sort_keys=True))
+'@ | python - $Database $jointNotion $jointCanvas $jointPortable $VaultEvidenceFolder
     if ($LASTEXITCODE -ne 0) { throw 'The actual joint workspace and ZIP payloads did not match.' }
+    return $snapshot
 }
 
 $jointHome = Join-Path $root 'NotionCanvasWorkspace'
@@ -88,6 +118,10 @@ $jointDb = Join-Path $jointHome 'paperroom-data/notes.sqlite3'
 $jointCloneDb = Join-Path $jointClone 'paperroom-data/notes.sqlite3'
 $jointBackup = Join-Path $root 'NotionCanvasBackup.sqlite3'
 $jointFixture = Join-Path $PSScriptRoot '../tests/fixtures/notion-canvas-integration.json'
+$jointVault = Join-Path $jointInputFolder 'Vault'
+$jointVaultScene = Join-Path $jointVault 'Boards/VaultRestoreScene.canvas'
+$jointDetachedVault = Join-Path $jointInputFolder 'DetachedVault'
+$jointVaultColors = (Get-Content -LiteralPath $jointFixture -Raw | ConvertFrom-Json -AsHashtable).vault_asset_colors
 foreach ($folder in $jointHome,$jointClone) {
     [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
     Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
@@ -106,9 +140,18 @@ with ZipFile(root / "NotionJoint.zip", "x") as archive:
 (root / "共同畫布.canvas").write_text(json.dumps(source["canvas"], ensure_ascii=False), encoding="utf-8")
 def chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
-png += chunk(b"IDAT", zlib.compress((b"\0" + bytes([37,146,179])*16)*16)) + chunk(b"IEND", b"")
-(root / "附件" / "畫面.png").write_bytes(png)
+def write_png(path, rgb):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress((b"\0" + bytes(rgb)*16)*16)) + chunk(b"IEND", b"")
+    path.write_bytes(png)
+write_png(root / "附件" / "畫面.png", [37,146,179])
+vault = root / "Vault"
+for path, colors in source["vault_asset_colors"].items():
+    write_png(vault / path, colors["root"])
+    write_png(vault / "Boards" / path, colors["decoy"])
+(vault / "Boards/VaultRestoreScene.canvas").write_text(
+    json.dumps(source["vault_canvas"], ensure_ascii=False), encoding="utf-8")
 '@ | python - $jointFixture $jointInputFolder
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the combined real Notion and Canvas fixture.' }
 $jointSourceHashes = Get-ChildItem -LiteralPath $jointInputFolder -File -Recurse | Get-FileHash
@@ -181,7 +224,19 @@ Native-MenuFromKeyboard 109 31 '匯入 JSON Canvas ZIP…'
 $zipReport = Native-File 31 '匯入 JSON Canvas ZIP…' $jointPortable '' -AlreadyOpened -NextDialog 'Canvas ZIP 匯入報告'
 Finish-Revision $zipReport 1
 $null = Wait-For 'reimported Canvas ZIP renders the same actual PNG' { Read-CanvasInk 37 146 179 }
-Assert-IntegratedWorkspace $jointDb
+Native-MenuFromKeyboard 109 39 '從 Obsidian Vault 匯入 Canvas…'
+Pick-NativeVaultFolder $jointVault
+$vaultPreview = Native-File 39 '從 Obsidian Vault 匯入 Canvas…' $jointVaultScene '' -AlreadyOpened -NextDialog '預覽 Obsidian Vault Canvas'
+$previewText = [PaperroomHighlightGui]::Read((Control $vaultPreview 101))
+foreach ($part in 'Boards/VaultRestoreScene.canvas','將保存：Media/RestoreFrame.png','將保存：Media/RestoreBackground.png') {
+    if (!$previewText.Contains($part)) { throw "The explicit Vault preview lost $part." }
+}
+Finish-Revision $vaultPreview 1
+$null = Wait-For 'explicit Vault-root import saved' {
+    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已從 Obsidian Vault 匯入 Canvas 與附件。'
+}
+Show-IntegratedVaultPictures
+$liveAssetProof = Assert-IntegratedWorkspace $jointDb $jointVault
 Native-File 4 '備份工作區…' $jointBackup '工作區備份已完成'
 Close-Notebook $process
 $process.Dispose()
@@ -190,20 +245,48 @@ $process = $null
 $jointLiveHash = (Get-FileHash -LiteralPath $jointDb).Hash
 $jointBackupHash = (Get-FileHash -LiteralPath $jointBackup).Hash
 Copy-Item -LiteralPath $jointBackup -Destination $jointCloneDb
-if ((Get-FileHash -LiteralPath $jointCloneDb).Hash -cne $jointBackupHash) { throw 'The isolated restore clone is not the actual UI backup.' }
+$jointCloneHash = (Get-FileHash -LiteralPath $jointCloneDb).Hash
+if ($jointCloneHash -cne $jointBackupHash) { throw 'The isolated restore clone is not the actual UI backup.' }
+# Temporarily detach only the generated test Vault. The EXE opens the clone
+# without access to the original Vault paths.
+Move-Item -LiteralPath $jointVault -Destination $jointDetachedVault
+if (Test-Path -LiteralPath $jointVaultScene) { throw 'The original Vault path is still available.' }
 $process = Start-Notebook $jointClone
 $window = $process.MainWindowHandle
 Show-IntegratedLink 2 '甲'
 Show-IntegratedLink 3 '乙'
 Show-IntegratedEditedRow
 Open-IntegratedCanvas
-Assert-IntegratedWorkspace $jointCloneDb
+Native-Menu 109 12 '開啟已匯入的 Canvas…'
+Native-Menu 109 3 'VaultRestoreScene' -MenuOpen
+Show-IntegratedVaultPictures
+$restoredAssetProof = Assert-IntegratedWorkspace $jointCloneDb $jointDetachedVault
+if ($restoredAssetProof -cne $liveAssetProof -or (Test-Path -LiteralPath $jointVaultScene)) {
+    throw 'Vault-root assets or the edited row differ after restoring with the original Vault detached.'
+}
 Close-Notebook $process
 $process.Dispose()
 $process = $null
+Move-Item -LiteralPath $jointDetachedVault -Destination $jointVault
 foreach ($source in $jointSourceHashes) {
     if ((Get-FileHash -LiteralPath $source.Path).Hash -cne $source.Hash) { throw 'A source fixture was edited.' }
 }
 if ((Get-FileHash -LiteralPath $jointDb).Hash -cne $jointLiveHash -or
     (Get-FileHash -LiteralPath $jointBackup).Hash -cne $jointBackupHash) { throw 'The isolated restore changed its original or backup.' }
-Write-Host "PASS: one Notion ZIP across CSV conversion and edit, exact same-name page links, atomic typed-column refusal, Canvas PNG ZIP round trip and native backup restored in isolation. EXE SHA-256 $ExeSha256."
+if ($env:PAPERROOM_VAULT_RESTORE_RECEIPT) {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    @{
+        source_commit = $env:GITHUB_SHA
+        run_id = $env:GITHUB_RUN_ID
+        package_sha256 = $env:PACKAGE_HASH
+        exe_sha256 = $ExeSha256
+        os_caption = $os.Caption
+        os_build = $os.BuildNumber
+        backup_sha256 = $jointBackupHash.ToLowerInvariant()
+        restored_copy_before_open_sha256 = $jointCloneHash.ToLowerInvariant()
+        original_workspace_sha256 = $jointLiveHash.ToLowerInvariant()
+        original_vault_unavailable_during_restore = $true
+        restored_workspace = ($restoredAssetProof | ConvertFrom-Json -AsHashtable)
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $env:PAPERROOM_VAULT_RESTORE_RECEIPT -Encoding utf8
+}
+Write-Host "PASS: one Notion ZIP across CSV conversion and edit, exact same-name page links, atomic typed-column refusal, Canvas PNG ZIP round trip and native backup restored in isolation. The detached Vault's root file card and group background survived with the CSV edit. EXE SHA-256 $ExeSha256."

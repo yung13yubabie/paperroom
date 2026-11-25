@@ -40,8 +40,10 @@ internal static class PaperroomLinkCapture
 
         try
         {
-            // Put the verbosity switch at the real linker boundary, after a possible response file.
-            var nativeArguments = String.Join(" ", Array.ConvertAll(args, Quote)) + " /VERBOSE:LIB";
+            // On the pinned MSVC linker /VERBOSE:LIB omits Loaded rows even
+            // when the same MAP proves archive use. Capture full diagnostics
+            // privately, after a possible response file.
+            var nativeArguments = String.Join(" ", Array.ConvertAll(args, Quote)) + " /VERBOSE";
             var start = new ProcessStartInfo(linker, nativeArguments)
             {
                 UseShellExecute = false,

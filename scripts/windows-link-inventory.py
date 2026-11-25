@@ -409,7 +409,7 @@ def build_report(exe, expected, commit, map_data, verbose, stderr, roots, toolch
             "rows": verbose_rows,
         },
         "recognized_containers": containers,
-        "scope": "Allowlisted technical families only. MAP symbol observations and VERBOSE:LIB Loaded "
+        "scope": "Allowlisted technical families only. MAP symbol observations and verbose linker Loaded "
                  "rows represent different evidence. Matching names do not prove archive identity. "
                  "The caller must supply logs from the same final link invocation. Unknown rows, "
                  "LTO, symbol stripping, identical COMDAT folding and unused-code elimination limit "

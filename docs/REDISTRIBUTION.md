@@ -49,3 +49,5 @@ v0.1.1 Windows ZIP 的 `licenses/DEPENDENCIES.txt` 列出 Windows 依賴，並�
 ## Microsoft CRT 對照
 
 草稿另外附上三個 Microsoft CRT 封存檔的同次連結證據。它以已觀察到的 MAP 成員起算，只從原生連結器搜尋過且符合當次版本的封存檔找成員。報告列出找到的封存檔雜湊、名稱匹配及尚未歸屬的位置。合成 C 探針另有報告，供比較連結選項引起的實際輸出差異。[CRT 與 SDK 通知](third-party/msvc-sdk/NOTICE.md)
+
+在原候選所用的 link.exe 14.44.35230.0 直接連結合成 C 程式時，兩組 `/VERBOSE:LIB` 均沒有 `Loaded` 列，但同次 MAP 均有自建封存檔及 CRT 物件。預設 CRT 的相同探針在完整 `/VERBOSE` 下輸出 324 筆 `Loaded`，其中一筆屬自建封存檔。後續草稿的實際最終連結使用完整模式，原始詳情仍在建置機上清除。

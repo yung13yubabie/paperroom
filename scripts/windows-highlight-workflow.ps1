@@ -60,7 +60,7 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect region);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
-    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint relation);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -3058,6 +3058,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     . (Join-Path $PSScriptRoot 'windows-canvas-vault-root.ps1')
     . (Join-Path $PSScriptRoot 'windows-note-history-state.ps1')
     . (Join-Path $PSScriptRoot 'windows-collection-due-filters.ps1')
+    . (Join-Path $PSScriptRoot 'windows-collection-display-columns.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

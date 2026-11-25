@@ -5,6 +5,7 @@ use crate::store::collection_views::{
     Presentation, PropertyFilter, RelationMember, ScheduleAdjustment, ScheduledRow, SortRule, SortSource, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body,
 };
 use crate::store::typed_properties::PropertyType;
+use super::collection_display_ui::DisplayProperty;
 
 #[derive(Clone, Copy)]
 struct FilterRoom {
@@ -162,21 +163,31 @@ impl App {
             _ => (0,0),
         };
         let column = column.min(lanes.len().saturating_sub(1));
-        let checkbox = if let Some(filter) = saved_view.as_ref()
+        let display_columns = if saved_view.as_ref().is_some_and(|view| view.layout == CollectionLayout::Table)
+            && timeline.is_none() && week.is_none() && calendar.is_none()
+        {
+            self.notebook.collection_display_columns(id)?.map(|keys| {
+                keys.into_iter().map(|key| {
+                    let values = self.notebook.collection_property_values(id, &key)?;
+                    Ok(DisplayProperty { key, values })
+                }).collect::<Result<Vec<_>>>()
+            }).transpose()?
+        } else { None };
+        let checkbox = if display_columns.is_none() && let Some(filter) = saved_view.as_ref()
             .filter(|view| view.layout == CollectionLayout::Table && view.presentation.group_key.is_none()
                 && !view.presentation.list_mode && view.presentation.calendar_key.is_none())
             .map(CollectionView::rules)
             .and_then(|rules| rules.first_checkbox().cloned())
         {
             if self.notebook.property_type(&filter.key)? == Some(PropertyType::Checkbox) {
-                Some((filter.key.clone(), self.notebook.collection_checkbox_values(id,&filter.key)?))
+                Some((filter.key.clone(), self.notebook.collection_property_values(id,&filter.key)?))
             } else {
                 None
             }
         } else {
             None
         };
-        let mut view = Kanban { id,title,saved_view,column,row,checkbox,calendar,week,timeline,timeline_drag:None,lanes };
+        let mut view = Kanban { id,title,saved_view,column,row,checkbox,display_columns,calendar,week,timeline,timeline_drag:None,lanes };
         view.row = row.min(view.max_scroll_row());
         unsafe { self.activate_workspace(WorkspaceView::Kanban(view)); }
         Ok(())
@@ -872,7 +883,7 @@ impl App {
         else { return Ok(()) };
         let key = &definitions[which];
         let rows = self.visible_collection_rows(id)?;
-        let values = self.notebook.collection_checkbox_values(id,key)?;
+        let values = self.notebook.collection_property_values(id,key)?;
         let Some(which) = (unsafe { choose(self.hwnd,self.widgets.links,&rows,|(row,status)| {
             let state = checkbox_label(values.get(&row.id).map(String::as_str));
             format!("{state}　{status}　{}  ({})",row.title,row.id)
@@ -1309,6 +1320,7 @@ impl App {
             }
             if view.is_list() {
                 let (left,right,top,step) = self.collection_table_rect(area);
+                let top = if view.display_columns.is_some() { top + step } else { top };
                 if x>=left && x<right && y>=top && y<top+((area.bottom-top)/step)*step {
                     let offset = ((y-top)/step) as usize;
                     if let Some(note) = view.lanes.iter().flat_map(|(_,rows)|rows).nth(view.row+offset) {
@@ -1648,7 +1660,7 @@ impl App {
         Ok(())
     }
 
-    fn collection_table_rect(&self, area: RECT) -> (i32,i32,i32,i32) {
+    pub(super) fn collection_table_rect(&self, area: RECT) -> (i32,i32,i32,i32) {
         (area.left+self.scaled(8),area.right-self.scaled(8),
          area.top+self.scaled(6),self.scaled(34).max(1))
     }
@@ -1735,7 +1747,7 @@ fn parse_day(raw: &str) -> Result<Option<CalendarDay>> {
     else { Ok(Some(CalendarDay::parse(raw).ok_or("請輸入有效的 YYYY-MM-DD 日期。")?)) }
 }
 
-fn checkbox_label(value: Option<&str>) -> &'static str {
+pub(super) fn checkbox_label(value: Option<&str>) -> &'static str {
     match value.map(|raw| PropertyType::Checkbox.normalized(raw)) {
         None => "未設定",
         Some(Some(value)) if value == "true" => "已勾選",

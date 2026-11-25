@@ -87,7 +87,7 @@
 | 日曆視圖 | 部分 | 月曆與週曆可選開始及結束日期欄，跨日起訖包含首尾兩日。可在月曆入口編輯日期並反映至集合其他視圖。拖曳排程、時間與時區待做。 | [官方](https://www.notion.com/help/calendars) · [collection_views.rs](../src/collection_views.rs) |
 | 時間軸 | 部分 | 可儲存水平月時間軸，依共用起訖日裁切跨月區間。點日期條開啟筆記，可拖條身平移或拉可見端點調整。相依排程與縮放待做。 | [官方](https://www.notion.com/help/timelines) · [collection_views.rs](../src/collection_views.rs) |
 | 地圖視圖 | 未實作 | 未提供這些對應的資料庫視圖或表單收件。 | [官方](https://www.notion.com/help/maps) · [window.rs](../src/window.rs) |
-| 清單視圖 | 部分 | 可儲存、改名或複製具名清單，保留各自的篩選及排序設定並共用資料列。可設定的欄位顯示與排列待做。 | [官方](https://www.notion.com/help/lists) · [collection_views.rs](../src/collection_views.rs) |
+| 清單視圖 | 部分 | 可儲存、改名或複製具名清單，保留各自的篩選及排序設定。每個集合可為表格及清單選擇並排列最多四個現有屬性。屬性值與型別仍由工作區共用。 | [官方](https://www.notion.com/help/lists) · [操作](UI-ACCEPTANCE.md#集合表格與清單的欄位顯示) |
 | 表單 | 未實作 | 未提供這些對應的資料庫視圖或表單收件。 | [官方](https://www.notion.com/help/forms) · [window.rs](../src/window.rs) |
 | CSV 匯入 | 部分 | 支援有限本機格式；CSV 網址保留文字，未轉為遠端物件。 | [官方](https://www.notion.com/help/import-data-into-notion) · [archive.rs](../src/archive.rs) |
 | Markdown 匯入 | 部分 | 支援有限本機格式；CSV 網址保留文字，未轉為遠端物件。 | [官方](https://www.notion.com/help/import-data-into-notion) · [archive.rs](../src/archive.rs) |

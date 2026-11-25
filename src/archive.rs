@@ -25,7 +25,6 @@ pub struct ImportedPage {
 
 #[derive(Default)]
 pub struct Import {
-    pub(crate) notion_members: Vec<(Option<String>, String)>,
     pub pages: Vec<ImportedPage>,
     pub source_paths: BTreeMap<Vec<String>, String>,
     pub skipped: usize,
@@ -240,7 +239,7 @@ fn collect(
             out.skipped += 1;
             continue;
         }
-        let original_notion_path = csv.is_some() && raw_path == path;
+        let original_notion_path = raw_path == path;
         let limit = (MAX_TOTAL_TEXT_BYTES - out.total_bytes).min(MAX_NOTE_BYTES as u64);
         if entry.size() > limit {
             return Err("Markdown 匯入上限為單篇 4 MB、合計 80 MB。".into());
@@ -290,8 +289,8 @@ fn collect(
                 wanted.entry(path).or_default().insert(note);
             }
         }
-        if original_notion_path {
-            out.notion_members.push((part.map(str::to_owned), path.clone()));
+        if original_notion_path && let Some(sources) = csv.as_deref_mut() {
+            sources.record_page_origin(&page.parts, part, &path);
         }
         out.source_paths.insert(page.parts.clone(), path);
         out.pages.push(page);

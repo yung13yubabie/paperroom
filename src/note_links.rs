@@ -43,6 +43,7 @@ pub struct VaultNoteLink {
     pub label: String,
     pub anchor: Option<String>,
     pub anchor_syntax: AnchorSyntax,
+    pub notion_path: Option<String>,
 }
 
 fn mapped_link_target(
@@ -51,6 +52,7 @@ fn mapped_link_target(
     match syntax {
         AnchorSyntax::Wiki => index.wiki.resolve(source, destination),
         AnchorSyntax::Markdown => index.markdown_target(parts, path),
+        AnchorSyntax::NotionMarkdown => None,
     }
 }
 
@@ -92,6 +94,7 @@ impl Notebook {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
         }
         let index = NoteLinkPaths::new(&files);
+        let notion_source = super::notion_page_links::Source::load(&tx, note.row.id)?;
         let parts = source_path.as_deref().unwrap_or("").split('/').map(str::to_owned).collect::<Vec<_>>();
         let mut active = tx.prepare("SELECT id FROM notes WHERE id=?1 AND trash_root IS NULL")?;
         let mut found = Vec::new();
@@ -100,10 +103,24 @@ impl Notebook {
             let fragment = destination.find('#');
             let anchor = fragment.map(|index| destination[index..].to_owned());
             let path = fragment.map_or(destination.as_str(), |index| &destination[..index]);
+            let mut syntax = reference.syntax;
+            let mut notion_path = None;
+            let notion = notion_source.as_ref().filter(|_| syntax == AnchorSyntax::Markdown);
             let id = if path.is_empty() && anchor.is_some() {
+                if notion.is_some() {
+                    syntax = AnchorSyntax::NotionMarkdown;
+                }
                 Some(note.row.id)
             } else if path.starts_with(NATIVE_NOTE_PREFIX) {
                 native_note_target(&tx, path)?
+            } else if let Some(notion) = notion {
+                if let Some((id, resolved)) = notion.resolve(&tx, path)? {
+                    syntax = AnchorSyntax::NotionMarkdown;
+                    notion_path = Some(resolved);
+                    Some(id)
+                } else {
+                    None
+                }
             } else if let Some(source_path) = &source_path {
                 mapped_link_target(&index, source_path, &parts, reference.syntax, &destination, path)
             } else {
@@ -112,7 +129,7 @@ impl Notebook {
             if let Some(note_id) = id && active.exists([note_id])? {
                 let label = if reference.label.trim().is_empty() { destination }
                             else { reference.label };
-                found.push(VaultNoteLink { note_id, label, anchor, anchor_syntax: reference.syntax });
+                found.push(VaultNoteLink { note_id, label, anchor, anchor_syntax: syntax, notion_path });
             }
         }
         drop(active);

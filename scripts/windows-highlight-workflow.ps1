@@ -40,7 +40,18 @@ public static class PaperroomHighlightGui {
         public UIntPtr Extra;
     }
     [StructLayout(LayoutKind.Sequential)]
-    private struct Input { public uint Kind; public MouseInput Mouse; }
+    private struct KeyInput {
+        public ushort VirtualKey, Scan;
+        public uint Flags, Time;
+        public UIntPtr Extra;
+    }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputData {
+        [FieldOffset(0)] public MouseInput Mouse;
+        [FieldOffset(0)] public KeyInput Key;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input { public uint Kind; public InputData Data; }
     private delegate bool EnumWindow(IntPtr hwnd, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, EnumWindow callback, IntPtr state);
@@ -66,6 +77,7 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll", ExactSpelling=true)]
     private static extern bool GetMonitorInfoW(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsChild(IntPtr parent, IntPtr candidate);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll", ExactSpelling=true, CharSet=CharSet.Unicode)] private static extern int GetClassNameW(IntPtr hwnd, StringBuilder text, int limit);
@@ -257,15 +269,25 @@ public static class PaperroomHighlightGui {
             actualPoint.X != point.X || actualPoint.Y != point.Y)
             throw new InvalidOperationException("The pointer target changed before physical input.");
         var input = scroll == 0
-            ? new[] { new Input { Mouse = new MouseInput { Flags = 0x0002 } },
-                      new Input { Mouse = new MouseInput { Flags = 0x0004 } } }
-            : new[] { new Input { Mouse = new MouseInput { Flags = 0x0800, Data = unchecked((uint)(scroll * 120)) } } };
+            ? new[] { Mouse(0x0002), Mouse(0x0004) }
+            : new[] { Mouse(0x0800, unchecked((uint)(scroll * 120))) };
+        SendPhysical(input);
+    }
+    private static Input Mouse(uint flags, uint delta = 0) {
+        return new Input { Data = new InputData { Mouse = new MouseInput { Flags = flags, Data = delta } } };
+    }
+    private static Input Key(ushort key, ushort scan, uint flags) {
+        return new Input { Kind = 1, Data = new InputData { Key = new KeyInput {
+            VirtualKey = key, Scan = scan, Flags = flags
+        } } };
+    }
+    private static void SendPhysical(Input[] input) {
         int size = Marshal.SizeOf<Input>();
         if (size != (IntPtr.Size == 8 ? 40 : 28)) throw new InvalidOperationException("Unexpected Windows INPUT size.");
         uint actual = SendInput((uint)input.Length, input, size);
         if (actual != input.Length)
             throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
-                " mouse changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
+                " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
     private static int MenuPosition(IntPtr menu, uint itemId, string caption) {
         int count = GetMenuItemCount(menu);
@@ -285,6 +307,37 @@ public static class PaperroomHighlightGui {
         uint thread = GetWindowThreadProcessId(dialog, out uint ignoredPid);
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
         return thread != 0 && GetGUIThreadInfo(thread, ref gui) ? gui.Focus : IntPtr.Zero;
+    }
+    public static bool FilenameHasFocus(IntPtr owner, uint pid, IntPtr dialog, IntPtr edit) {
+        return ForegroundIsOwned(owner, pid) && GetForegroundWindow() == dialog &&
+            IsChild(dialog, edit) && IsWindowVisible(edit) &&
+            GetWindowThreadProcessId(edit, out uint editPid) != 0 && editPid == pid &&
+            DialogFocus(dialog) == edit;
+    }
+    public static Point FilenamePoint(IntPtr dialog, uint pid, IntPtr edit) {
+        if (!IsChild(dialog, edit) || !IsWindowVisible(edit) ||
+            GetWindowThreadProcessId(edit, out uint editPid) == 0 || editPid != pid)
+            throw new InvalidOperationException("Expected an owned, visible file name edit.");
+        Rect rect = VisibleRect(edit);
+        Point point = Center(rect);
+        if (!Contains(rect, point) || WindowFromPoint(point) != edit)
+            throw new InvalidOperationException("The file name edit is not exposed at its center.");
+        return point;
+    }
+    public static void TypeFilename(IntPtr owner, uint pid, IntPtr dialog, IntPtr edit, string value) {
+        if (value.Length == 0 || value.Length > 512)
+            throw new InvalidOperationException("Unexpected test filename length.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        var keys = new List<Input> { Key(0x11, 0, 0), Key(0x41, 0, 0), Key(0x41, 0, 2), Key(0x11, 0, 2) };
+        foreach (char unit in value) {
+            if (Char.IsControl(unit)) throw new InvalidOperationException("Unexpected control character in test filename.");
+            keys.Add(Key(0, unit, 4)); // KEYEVENTF_UNICODE.
+            keys.Add(Key(0, unit, 4 | 2)); // KEYEVENTF_KEYUP.
+        }
+        if (!FilenameHasFocus(owner, pid, dialog, edit))
+            throw new InvalidOperationException("The exact native file name field lost focus.");
+        SendPhysical(keys.ToArray());
     }
     private static bool FilenameControlPath(IntPtr child, IntPtr dialog) {
         for (IntPtr current = child; current != IntPtr.Zero && current != dialog; current = GetParent(current)) {
@@ -412,10 +465,43 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         throw
     }
     Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
-    [PaperroomHighlightGui]::Write($edit, $Path)
-    if ([PaperroomHighlightGui]::Read($edit) -cne $Path) { throw 'File dialog edited an unexpected path.' }
-    Command $dialog 1
-    $null = Wait-For "$Caption completed" { [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith($Status, [StringComparison]::Ordinal) }
+    $original = [PaperroomHighlightGui]::Cursor()
+    $point = $original
+    $saving = $Item -ne 1
+    # Quoting an explicit save filename prevents a file filter from adding an extension.
+    $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
+    try {
+        $point = [PaperroomHighlightGui]::FilenamePoint($dialog, $process.Id, $edit)
+        [PaperroomHighlightGui]::MouseAction($window, $process.Id, $edit, $point, 0)
+        $null = Wait-For "native file name focus for $Caption" {
+            [PaperroomHighlightGui]::FilenameHasFocus($window, $process.Id, $dialog, $edit)
+        }
+        [PaperroomHighlightGui]::TypeFilename($window, $process.Id, $dialog, $edit, $typed)
+        $null = Wait-For "exact physical path entry for $Caption" {
+            [PaperroomHighlightGui]::Read($edit) -ceq $typed
+        }
+        $submit = Control $dialog 1
+        $point = [PaperroomHighlightGui]::ButtonPoint($dialog, $process.Id, $submit)
+        [PaperroomHighlightGui]::MouseAction($window, $process.Id, $submit, $point, 0)
+        $null = Wait-For "$Caption completed" {
+            ![PaperroomHighlightGui]::IsWindowVisible($dialog) -and
+                [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith($Status, [StringComparison]::Ordinal)
+        }
+        if ($saving -and !(Test-Path -LiteralPath $Path -PathType Leaf)) {
+            throw 'The application reported success without the exact requested output file.'
+        }
+    } catch {
+        Write-Host "Synthetic files after command $Item (relative to the isolated root):"
+        Get-ChildItem -LiteralPath $root -File -Recurse -Force | Select-Object -First 36 | ForEach-Object {
+            Write-Host ('  ' + [IO.Path]::GetRelativePath($root, $_.FullName))
+        }
+        if ([PaperroomHighlightGui]::IsWindowVisible($dialog)) {
+            Write-Host ([PaperroomHighlightGui]::DescribeFilenameControls($dialog, $process.Id))
+        }
+        throw
+    } finally {
+        [PaperroomHighlightGui]::RestoreCursor($original, $point)
+    }
 }
 function Start-Notebook([string]$Folder) {
     $binary = Join-Path $Folder 'Paperroom.exe'

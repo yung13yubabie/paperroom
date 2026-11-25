@@ -1179,7 +1179,11 @@ try {
     $stamp = Read-HistoryStamp $liveDb $title
     Replace-EditorText $historyTitle $tooLong
     $null = Wait-For 'invalid unsaved draft stayed in the editor' {
-        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗')
+        try { [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗') }
+        catch {
+            if (!$_.Exception.Message.Contains('Native text missing or truncated.')) { throw }
+            return $false
+        }
     }
     $preview = Open-Revision 1
     $report = [PaperroomHighlightGui]::Read((Control $preview 101))
@@ -1578,7 +1582,8 @@ print('Reopened SQLite preserves the two original imports and the independent re
     if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'預覽後 Vault 來源已有變更')) {
         throw 'The changed-file error did not explain how to re-open the preview.'
     }
-    Finish-Revision $errorDialog 1
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'changed-file alert closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
     if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'A stale preview changed the workspace.' }
     [IO.File]::WriteAllText($reviewAsset,'asset one',$enc)
     Native-VaultFolder $reviewFolder '附件綁定 1 筆，未解析 1 筆'

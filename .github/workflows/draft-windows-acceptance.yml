@@ -1,0 +1,130 @@
+name: Verify pinned draft Windows candidate
+on:
+  push:
+    branches: ['dev/offline-workspace-handoff']
+    paths:
+      - '.github/workflows/draft-windows-acceptance.yml'
+      - 'docs/WINDOWS-DRAFT-QA.md'
+      - 'scripts/windows-about-notices.ps1'
+      - 'scripts/windows-highlight-workflow.ps1'
+      - 'scripts/verify-windows-notice-bundle.py'
+      - 'scripts/test_windows_notice_bundle.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  acceptance:
+    if: github.repository == 'yung13yubabie/paperroom'
+    runs-on: windows-2022
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PINNED_SOURCE: acdffdffaa10f9919d39494a14de6d83517484fc
+      PINNED_EXE_SHA: 1ded46b1811b0a9ffe56dc343addb64ffe7e46681e523fd442777edc5bb87b53
+      PINNED_PROVENANCE_SHA: cb55d60cd4a863f63fac455fe359297099b4530da08e0d4bdfec2df94c253073
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the draft QA to unchanged candidate source
+        run: |
+          $allowed = @(
+            '.github/workflows/draft-windows-acceptance.yml',
+            '.github/workflows/windows.yml',
+            '.github/workflows/unsigned-windows.yml',
+            'docs/WINDOWS-DRAFT-QA.md',
+            'scripts/windows-about-notices.ps1',
+            'scripts/windows-highlight-workflow.ps1',
+            'scripts/verify-windows-notice-bundle.py',
+            'scripts/test_windows_notice_bundle.py'
+          )
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong QA checkout.' }
+          git merge-base --is-ancestor $env:PINNED_SOURCE $head
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
+          $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
+          if ($LASTEXITCODE -ne 0 -or $paths.Count -eq 0 -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
+            throw 'The draft differs from the pinned source outside the QA files.'
+          }
+          Write-Host "QA commit $head uses the unchanged application sources of $env:PINNED_SOURCE."
+
+      - name: Fetch and verify the exact EXE and separate build receipt
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-acceptance-' + [guid]::NewGuid())
+          [void](New-Item -ItemType Directory -Path $root)
+          "PAPERROOM_ACCEPTANCE_ROOT=$root" >> $env:GITHUB_ENV
+
+          function Get-PinnedMember($id, $zipHash, $member, $hash, $maximum) {
+            $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$id"
+            $metaText = gh api $route
+            if ($LASTEXITCODE -ne 0) { throw 'Could not read pinned Actions artifact metadata.' }
+            $meta = $metaText | ConvertFrom-Json
+            if ($meta.expired -or $meta.workflow_run.id -ne 45534456549 -or
+                $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$zipHash") {
+              throw 'Pinned artifact metadata differs from the reviewed run.'
+            }
+            $archive = Join-Path $root "$id.zip"
+            gh api "$route/zip" > $archive
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $zipHash) {
+              throw 'Pinned artifact archive download or hash check failed.'
+            }
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            $out = Join-Path $root $member
+            try {
+              if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].FullName -cne $member -or
+                  $zip.Entries[0].Length -le 0 -or $zip.Entries[0].Length -gt $maximum) {
+                throw 'Pinned archive does not contain the one expected, bounded member.'
+              }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.Entries[0], $out)
+            } finally {
+              $zip.Dispose()
+            }
+            if ((Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash -ine $hash) {
+              throw 'Pinned artifact member hash does not match.'
+            }
+            return $out
+          }
+
+          $exe = Get-PinnedMember 14987031260 '9b2d07c1af992dce2b0c7468bb08e389917ab04c5bdf4a34a580f430314d9b39' 'Paperroom.exe' $env:PINNED_EXE_SHA 16777216
+          $receipt = Get-PinnedMember 14986711454 'dbd49412914e522140663c7e998d87fbe9df5899e1ff1e1528a7b9e366117eb5' 'paperroom-msvc-provenance.json' $env:PINNED_PROVENANCE_SHA 1048576
+          python -B ./scripts/windows-candidate.py audit $exe
+          if ($LASTEXITCODE -ne 0 -or (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'The expected unsigned Paperroom 0.1.2 PE did not pass the audit.'
+          }
+          "PAPERROOM_EXE=$exe" >> $env:GITHUB_ENV
+          "PAPERROOM_RECEIPT=$receipt" >> $env:GITHUB_ENV
+
+      - name: Verify embedded notices and the staged bundle
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        run: |
+          python -B ./scripts/test_windows_notice_bundle.py
+          if ($LASTEXITCODE -ne 0) { throw 'Notice-bundle verifier tests failed.' }
+          $staged = Join-Path $env:PAPERROOM_ACCEPTANCE_ROOT 'paperroom-notice-QA.zip'
+          python -B ./scripts/verify-windows-notice-bundle.py --exe $env:PAPERROOM_EXE --exe-sha256 $env:PINNED_EXE_SHA --provenance $env:PAPERROOM_RECEIPT --provenance-sha256 $env:PINNED_PROVENANCE_SHA --commit $env:PINNED_SOURCE --stage-qa-zip $staged
+          if ($LASTEXITCODE -ne 0) { throw 'The notice evidence does not match this candidate.' }
+
+      - name: Open About and read the four notices through the native GUI
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        run: ./scripts/windows-about-notices.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:PINNED_EXE_SHA
+
+      - name: Exercise highlight, reopen, backup restoration and HTML export through the native GUI
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        run: ./scripts/windows-highlight-workflow.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:PINNED_EXE_SHA
+
+      - name: Remove the isolated QA files
+        if: ${{ always() }}
+        run: |
+          if ($env:PAPERROOM_ACCEPTANCE_ROOT -and (Test-Path -LiteralPath $env:PAPERROOM_ACCEPTANCE_ROOT)) {
+            Remove-Item -LiteralPath $env:PAPERROOM_ACCEPTANCE_ROOT -Recurse -Force
+          }

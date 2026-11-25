@@ -1,6 +1,13 @@
 name: Windows storage checks
 on:
   push:
+    paths-ignore:
+      - '.github/workflows/draft-windows-acceptance.yml'
+      - 'docs/WINDOWS-DRAFT-QA.md'
+      - 'scripts/windows-about-notices.ps1'
+      - 'scripts/windows-highlight-workflow.ps1'
+      - 'scripts/verify-windows-notice-bundle.py'
+      - 'scripts/test_windows_notice_bundle.py'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -13,7 +20,13 @@ permissions:
   contents: read
 jobs:
   storage:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
+    # The acceptance-only change verifies the pinned candidate without rebuilding it.
+    if: >-
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')) &&
+      !(github.event_name == 'push' && github.repository == 'yung13yubabie/paperroom' &&
+      github.ref == 'refs/heads/dev/offline-workspace-handoff' &&
+      github.event.before == 'acdffdffaa10f9919d39494a14de6d83517484fc' &&
+      github.event.head_commit.message == 'Verify pinned Windows candidate GUI and notice bundle')
     runs-on: windows-2022
     timeout-minutes: 25
     steps:

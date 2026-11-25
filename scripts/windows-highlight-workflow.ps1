@@ -287,6 +287,25 @@ public static class PaperroomHighlightGui {
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(key, 0, 0), Key(key, 0, 2) });
     }
+    public static void TypeOutlinePrefix(IntPtr owner, uint pid, IntPtr edit, string prefix) {
+        if (!ForegroundIsOwned(owner, pid) || DialogFocus(owner) != edit ||
+            GetWindowThreadProcessId(edit, out uint editPid) == 0 || editPid != pid ||
+            prefix.Length == 0 || prefix.Length > 96 || prefix.Contains("\r"))
+            throw new InvalidOperationException("Expected the owned outline editor and a bounded LF-only prefix.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        var keys = new List<Input>();
+        foreach (char unit in prefix) {
+            if (unit == '\n') {
+                keys.Add(Key(0x0D, 0, 0));
+                keys.Add(Key(0x0D, 0, 2));
+            } else {
+                keys.Add(Key(0, unit, 4));
+                keys.Add(Key(0, unit, 4 | 2));
+            }
+        }
+        SendPhysical(keys.ToArray());
+    }
     private static void SendPhysical(Input[] input) {
         int size = Marshal.SizeOf<Input>();
         if (size != (IntPtr.Size == 8 ? 40 : 28)) throw new InvalidOperationException("Unexpected Windows INPUT size.");
@@ -753,8 +772,14 @@ try {
     Select-Note $title
     Assert-OutlineSelection 3 'H2　同名 🎬　（第 14 行）' '## 同名 🎬' '第二處'
     $field = Control $window 104
-    $updated = [PaperroomHighlightGui]::Read($field).Replace('# 開場', "# 新段落 📽`r`n`r`n# 開場")
-    [PaperroomHighlightGui]::Write($field, $updated)
+    $existing = [PaperroomHighlightGui]::Read($field)
+    $insertAt = $existing.IndexOf('# 開場', [StringComparison]::Ordinal)
+    if ($insertAt -lt 0) { throw 'The prefix insertion point was missing.' }
+    $prefix = "# 新段落 📽`n`n"
+    $updated = $existing.Insert($insertAt, $prefix.Replace("`n", "`r`n"))
+    [void][PaperroomHighlightGui]::Send($field, 0x00B1, [IntPtr]$insertAt, [IntPtr]$insertAt)
+    [PaperroomHighlightGui]::TypeOutlinePrefix($window, $process.Id, $field, $prefix)
+    $null = Wait-For 'real typing changed the source editor' { [PaperroomHighlightGui]::Read($field) -ceq $updated }
     Assert-OutlineSelection 4 'H2　同名 🎬　（第 16 行）' '## 同名 🎬' '第二處'
     Command $window 110
     $null = Wait-For 'saved outline manuscript in reading mode' { [PaperroomHighlightGui]::IsWindowVisible((Control $window 121)) }

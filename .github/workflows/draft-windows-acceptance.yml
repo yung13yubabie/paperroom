@@ -146,3 +146,70 @@ jobs:
           if ($env:PAPERROOM_ACCEPTANCE_ROOT -and (Test-Path -LiteralPath $env:PAPERROOM_ACCEPTANCE_ROOT)) {
             Remove-Item -LiteralPath $env:PAPERROOM_ACCEPTANCE_ROOT -Recurse -Force
           }
+
+  outline-replay:
+    # Opt in when only the outline QA changes and the tested EXE must stay identical.
+    if: github.repository == 'yung13yubabie/paperroom' && contains(github.event.head_commit.message, '[outline-replay]')
+    runs-on: windows-2022
+    timeout-minutes: 12
+    env:
+      PINNED_SOURCE: 4cb096c6d5de05bd130ca4e2adf3243de2073cf0
+      PINNED_EXE_SHA: 9a450d7687daacc287f0fa8198eb85a75a118869040b927bd47186ed089a7d65
+      PINNED_ZIP_SHA: e1edc4227617b769036d5ec2023664d57c4514c2ee4001a812fc7f59ed465287
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check that the QA-only revision has not changed the candidate source
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong QA checkout.' }
+          git merge-base --is-ancestor $env:PINNED_SOURCE $head
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
+          $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
+          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
+          if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
+            throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
+          }
+      - name: Download the pinned EXE and exercise its real Windows GUI
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15007532340"
+          $metadata = gh api $route
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
+          $meta = $metadata | ConvertFrom-Json
+          if ($meta.expired -or $meta.workflow_run.id -ne 45582935956 -or
+              $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
+              $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
+            throw 'The pinned artifact metadata differs from the reviewed candidate.'
+          }
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-outline-replay-' + [guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $root)
+          try {
+            $archive = Join-Path $root 'download.zip'
+            gh api "$route/zip" > $archive
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $env:PINNED_ZIP_SHA) {
+              throw 'The download wrapper SHA-256 does not match.'
+            }
+            $exe = Join-Path $root 'Paperroom.exe'
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            try {
+              if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].FullName -cne 'Paperroom.exe' -or
+                  $zip.Entries[0].Length -le 0 -or $zip.Entries[0].Length -gt 16777216) {
+                throw 'The wrapper must contain the expected bounded EXE only.'
+              }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.Entries[0], $exe)
+            } finally {
+              $zip.Dispose()
+            }
+            Remove-Item Env:GH_TOKEN
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+          }

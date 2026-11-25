@@ -9,6 +9,7 @@ import re
 import sys
 
 TARGET = "x86_64-pc-windows-msvc"
+GNU_TARGET = "x86_64-pc-windows-gnu"
 METADATA_COMMAND = f"cargo metadata --locked --filter-platform {TARGET} --format-version 1"
 CRATES_IO = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -82,7 +83,7 @@ def unique_index(items):
     return result
 
 
-def dependency_graph(metadata, exe_hash):
+def dependency_graph(metadata, exe_hash, target=TARGET):
     if not HASH.fullmatch(exe_hash):
         raise ValueError("expected an exact 64-digit EXE SHA-256")
     if metadata.get("version") != 1:
@@ -133,8 +134,8 @@ def dependency_graph(metadata, exe_hash):
     return {
         "schema_version": 1,
         "exe_sha256": exe_hash.lower(),
-        "target": TARGET,
-        "metadata_command": METADATA_COMMAND,
+        "target": target,
+        "metadata_command": METADATA_COMMAND.replace(TARGET, target),
         "scope": "Reachable Cargo resolution; development-only edges omitted. Target and host roles "
                  "derive from dependency kinds in the provided platform-filtered metadata. "
                  "This is not the set of linked objects, notice compliance, or a legal conclusion.",
@@ -186,12 +187,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metadata", default="-", metavar="FILE|-")
     parser.add_argument("--exe-sha256", required=True)
+    parser.add_argument("--target", choices=(TARGET, GNU_TARGET), default=TARGET)
     parser.add_argument("--rustc-info", metavar="FILE")
     parser.add_argument("--rust-sysroot", metavar="DIRECTORY")
     args = parser.parse_args(argv)
     try:
         raw = bounded(sys.stdin.buffer, 32 * 1024 * 1024) if args.metadata == "-" else read_file(args.metadata, 32 * 1024 * 1024)
-        report = dependency_graph(json.loads(raw), args.exe_sha256)
+        report = dependency_graph(json.loads(raw), args.exe_sha256, args.target)
         if args.rustc_info is not None:
             report["rustc"] = rustc_record(read_file(args.rustc_info, 32768).decode("utf-8-sig"))
         if args.rust_sysroot is not None:

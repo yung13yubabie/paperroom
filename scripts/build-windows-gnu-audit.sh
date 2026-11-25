@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Cross-build the frozen application twice, retaining only sanitized evidence.
+set -Eeuo pipefail
+
+source_commit=73928b69f2773bed524afdec064211f1eb5d675a
+target=x86_64-pc-windows-gnu
+rust_toolchain="${PAPERROOM_RUST_TOOLCHAIN:-1.100.0}"
+repo="$(git rev-parse --show-toplevel)"
+output="$(realpath -- "$1")"
+test ! -e "$output"
+test "$(uname -s -m)" = 'Linux x86_64'
+test "$(git -C "$repo" rev-parse "$source_commit^{commit}")" = "$source_commit"
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
+mkdir "$work/debs" "$work/gnu" "$work/metadata"
+export LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0
+export SOURCE_DATE_EPOCH="$(git -C "$repo" log -1 --format=%ct "$source_commit")"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+export CARGO_BUILD_JOBS=2
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+rustc "+$rust_toolchain" -vV > "$work/metadata/rustc.txt"
+grep -qx 'release: 1.100.0' "$work/metadata/rustc.txt"
+grep -qx 'commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a' "$work/metadata/rustc.txt"
+sysroot="$(rustc "+$rust_toolchain" --print sysroot)"
+test -d "$sysroot/lib/rustlib/$target/lib"
+
+# Debian trixie amd64 Packages index at 20261117T190000Z, release-hash-pinned files.
+cat > "$work/metadata/debian-packages.txt" <<'PINS'
+b53f4a091b16a0d0952b8e3bd6027931641386258f96b37db1f0c62c787221d3 pool/main/b/binutils-mingw-w64/binutils-mingw-w64-x86-64_2.44-3+12+b1_amd64.deb
+8d2c64b886ab4a435a78ddc4cd3b510f149b65fbd6be8472e8f460627562718a pool/main/g/gcc-mingw-w64/gcc-mingw-w64-base_14.2.0-19+27+b1_amd64.deb
+c898d96177574a8a7238564a1e799d8ddfed5a3d2ea005510305f9ad466a6f59 pool/main/g/gcc-mingw-w64/gcc-mingw-w64-x86-64-posix-runtime_14.2.0-19+27+b1_amd64.deb
+e32d24cfd1482394f16d9a84c1d0a9f5aa08ee826a79acc383c70cc8c23c4fe5 pool/main/g/gcc-mingw-w64/gcc-mingw-w64-x86-64-posix_14.2.0-19+27+b1_amd64.deb
+97dce5d0d8aff1cade4786ad4ef5078345477a598829afcac2e7f2fbc5399990 pool/main/m/mingw-w64/mingw-w64-common_12.0.0-5_all.deb
+0bf89cf7454cccb49cd2a46a6f7b33896f6ae3a1a2fe33e02c40be6155bbb385 pool/main/m/mingw-w64/mingw-w64-x86-64-dev_12.0.0-5_all.deb
+PINS
+while read -r digest relative; do
+    name="${relative##*/}"
+    path="$work/debs/$name"
+    if [[ -n "${PAPERROOM_DEB_CACHE:-}" ]]; then
+        cp -- "$PAPERROOM_DEB_CACHE/$name" "$path"
+    else
+        curl --fail --silent --show-error --location --max-time 75 --output "$path" \
+            "https://deb.debian.org/debian/$relative" ||
+        curl --fail --silent --show-error --location --retry 2 --max-time 75 --output "$path" \
+            "https://snapshot.debian.org/archive/debian/20261117T190000Z/$relative"
+    fi
+    printf '%s  %s\n' "$digest" "$path" | sha256sum --check --status
+    dpkg-deb --extract "$path" "$work/gnu"
+done < "$work/metadata/debian-packages.txt"
+
+cross="$work/gnu/usr/bin"
+ln -s x86_64-w64-mingw32-gcc-posix "$cross/x86_64-w64-mingw32-gcc"
+export PATH="$cross:$PATH"
+export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$cross/x86_64-w64-mingw32-gcc"
+export CC_x86_64_pc_windows_gnu="$CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER"
+export AR_x86_64_pc_windows_gnu="$cross/x86_64-w64-mingw32-ar"
+"$CC_x86_64_pc_windows_gnu" -dumpfullversion -dumpversion > "$work/metadata/gcc.txt"
+"$cross/x86_64-w64-mingw32-ld" --version > "$work/metadata/ld.txt"
+git -C "$repo" archive --format=tar --output="$work/source.tar" "$source_commit"
+for label in proof_a different_source_b; do
+    mkdir -p "$work/$label/src" "$work/$label/out"
+    tar -xf "$work/source.tar" -C "$work/$label/src"
+done
+if [[ "${PAPERROOM_ALREADY_FETCHED:-0}" != 1 ]]; then
+    cargo "+$rust_toolchain" fetch --locked --manifest-path "$work/proof_a/src/Cargo.toml"
+fi
+
+build() (
+    label="$1"
+    cd "$work/$label/src"
+    export CARGO_TARGET_DIR="$work/$label/out"
+    export RUSTFLAGS="--remap-path-prefix=$PWD=/paperroom --remap-path-prefix=$CARGO_TARGET_DIR=/target --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$sysroot=/toolchain -Clink-arg=-Wl,--no-insert-timestamp -Clink-arg=-static-libgcc"
+    export CFLAGS_x86_64_pc_windows_gnu="-ffile-prefix-map=$PWD=/paperroom -ffile-prefix-map=$CARGO_TARGET_DIR=/target -ffile-prefix-map=$CARGO_HOME=/cargo -g0"
+    cargo "+$rust_toolchain" rustc --offline --locked --release --target "$target" --bin paperroom \
+        -- -C "link-arg=-Wl,-Map,$work/$label/final.map"
+)
+build proof_a > "$work/proof_a/build.log" 2>&1 &
+first=$!
+build different_source_b > "$work/different_source_b/build.log" 2>&1 &
+second=$!
+status=0
+wait "$first" || status=1
+wait "$second" || status=1
+if [[ "$status" != 0 ]]; then
+    tail -n 45 "$work/proof_a/build.log" "$work/different_source_b/build.log"
+    exit 1
+fi
+
+artifact="out/$target/release/paperroom.exe"
+exe="$work/proof_a/$artifact"
+rebuild="$work/different_source_b/$artifact"
+cmp -- "$exe" "$rebuild"
+exe_sha="$(sha256sum "$exe" | cut -d ' ' -f 1)"
+printf 'Both independent builds: %s\n' "$exe_sha"
+cargo "+$rust_toolchain" metadata --offline --locked --filter-platform "$target" --format-version 1 \
+    --manifest-path "$work/proof_a/src/Cargo.toml" > "$work/metadata/cargo.json"
+python3 -B "$repo/scripts/windows-build-provenance.py" --target "$target" \
+    --metadata "$work/metadata/cargo.json" --exe-sha256 "$exe_sha" \
+    --rustc-info "$work/metadata/rustc.txt" --rust-sysroot "$sysroot" \
+    > "$work/metadata/cargo-provenance.json"
+prov_sha="$(sha256sum "$work/metadata/cargo-provenance.json" | cut -d ' ' -f 1)"
+python3 -B "$repo/scripts/windows-registry-notices.py" --target "$target" \
+    --exe "$exe" --exe-sha256 "$exe_sha" --provenance "$work/metadata/cargo-provenance.json" \
+    --provenance-sha256 "$prov_sha" --lock "$work/proof_a/src/Cargo.lock" \
+    --cargo-home "$CARGO_HOME" --output "$work/registry"
+
+python3 -B "$repo/scripts/package-windows-gnu-audit.py" build \
+    --work "$work" --sysroot "$sysroot" --commit "$source_commit" --output "$output"

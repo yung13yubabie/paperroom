@@ -1,0 +1,99 @@
+name: Paperroom GNU candidate audit
+on:
+  push:
+    branches: ['dev/integration/pr1-8-gnu-audit-20261125']
+
+permissions:
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: 73928b69f2773bed524afdec064211f1eb5d675a
+
+jobs:
+  build:
+    name: Build twice and verify the GNU notice ZIP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      exe_sha: ${{ steps.build.outputs.exe_sha }}
+      zip_sha: ${{ steps.build.outputs.zip_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned Rust GNU target
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-gnu
+      - name: Run the packaging regressions
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build two independent copies and verify the exact notice ZIP
+        id: build
+        run: |
+          package="$RUNNER_TEMP/Paperroom-v0.1.2-windows-x64-gnu-audit.zip"
+          bash scripts/build-windows-gnu-audit.sh "$package"
+          exe_sha="$(python3 -c 'import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); print(json.loads(z.read("evidence/gnu-candidate.json"))["exe_sha256"])' "$package")"
+          zip_sha="$(sha256sum "$package" | cut -d ' ' -f 1)"
+          echo "exe_sha=$exe_sha" >> "$GITHUB_OUTPUT"
+          echo "zip_sha=$zip_sha" >> "$GITHUB_OUTPUT"
+      - name: Upload the candidate ZIP only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-v0.1.2-windows-x64-gnu-audit
+          path: ${{ runner.temp }}/Paperroom-v0.1.2-windows-x64-gnu-audit.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    name: Run the frozen source Linux suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal && cargo +1.100.0 test --locked
+
+  native:
+    name: Exercise the downloaded GNU EXE on Windows Server
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      EXPECTED_EXE: ${{ needs.build.outputs.exe_sha }}
+      EXPECTED_ZIP: ${{ needs.build.outputs.zip_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-v0.1.2-windows-x64-gnu-audit
+          path: ${{ runner.temp }}/paperroom-gnu
+      - name: Verify, upgrade a fresh v0.1.1 workspace and run the native GUI suite
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'paperroom-gnu'
+          $zip = Join-Path $folder 'Paperroom-v0.1.2-windows-x64-gnu-audit.zip'
+          python -B scripts/package-windows-gnu-audit.py verify --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'GNU ZIP failed readback.' }
+          $extracted = Join-Path $folder 'verified'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+          $exe = Join-Path $extracted 'Paperroom.exe'
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'GNU EXE differs from the expected unsigned version or hash.'
+          }
+          $baseline = Join-Path $folder 'Paperroom-v0.1.1.exe'
+          Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $baseline -TimeoutSec 45
+          if ((Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash -ine '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82') {
+            throw 'The public v0.1.1 baseline differs.'
+          }
+          ./scripts/windows-storage.ps1 -Exe $exe -UpgradeBaseline $baseline
+          ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE

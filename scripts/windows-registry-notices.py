@@ -16,6 +16,8 @@ import tomllib
 
 
 TARGET = "x86_64-pc-windows-msvc"
+GNU_TARGET = "x86_64-pc-windows-gnu"
+BUILD_HOSTS = {TARGET: TARGET, GNU_TARGET: "x86_64-unknown-linux-gnu"}
 CRATES_IO = {"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"}
 CACHE = re.compile(r"(?:index\.crates\.io|github\.com)-[0-9a-f]{16}", re.ASCII)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", re.ASCII)
@@ -95,14 +97,14 @@ def package_identity(row):
     return name, version
 
 
-def select_receipt(raw, expected_sha, exe_sha):
+def select_receipt(raw, expected_sha, exe_sha, target=TARGET):
     if sha(raw) != expected_sha:
         raise ValueError("Cargo provenance SHA-256 differs")
     doc = json.loads(raw, object_pairs_hook=unique_object)
     if (type(doc["schema_version"]) is not int or doc["schema_version"] != 1
-            or digest(doc["exe_sha256"]) != exe_sha or doc["target"] != TARGET
-            or doc["rustc"]["host"] != TARGET or doc["edge_fields"] != EDGE_FIELDS):
-        raise ValueError("Cargo provenance does not match the supplied MSVC candidate")
+            or digest(doc["exe_sha256"]) != exe_sha or doc["target"] != target
+            or doc["rustc"]["host"] != BUILD_HOSTS[target] or doc["edge_fields"] != EDGE_FIELDS):
+        raise ValueError("Cargo provenance does not match the supplied Windows candidate")
     packages, edges, root = doc["packages"], doc["edges"], doc["root"]
     if (not isinstance(packages, list) or not 1 <= len(packages) <= 2048
             or not isinstance(edges, list) or len(edges) > 16384
@@ -273,11 +275,11 @@ def publish_stage(stage, output):
             raise
 
 
-def collect(exe, exe_sha, provenance, provenance_sha, lock, cargo_home, output):
+def collect(exe, exe_sha, provenance, provenance_sha, lock, cargo_home, output, target=TARGET):
     exe_sha, provenance_sha = digest(exe_sha), digest(provenance_sha)
     if sha(read_regular(exe, MAX_EXE)) != exe_sha:
         raise ValueError("Windows EXE SHA-256 differs")
-    selected = select_receipt(read_regular(provenance, MAX_INDEX), provenance_sha, exe_sha)
+    selected = select_receipt(read_regular(provenance, MAX_INDEX), provenance_sha, exe_sha, target)
     lock_raw = read_regular(lock, MAX_INDEX)
     checksums = lock_checksums(lock_raw)
     cache = cache_directories(cargo_home)
@@ -301,14 +303,14 @@ def collect(exe, exe_sha, provenance, provenance_sha, lock, cargo_home, output):
                 if count > MAX_NOTICE_COUNT or total_bytes > MAX_NOTICE_TOTAL:
                     raise ValueError("combined registry notices exceed their size limit")
                 path = f"licenses/crates-io/{identity[0]}/{identity[1]}/{relative}"
-                target = stage / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb") as stream:
+                notice_path = stage / path
+                notice_path.parent.mkdir(parents=True, exist_ok=True)
+                with notice_path.open("xb") as stream:
                     stream.write(artifact)
                 notices.append({"path": path, "sha256": sha(artifact), "bytes": len(artifact)})
             row.update(archive_sha256=checksum, status="collected" if notices else "no-matching-notice", notices=notices)
         report = {
-            "schema_version": 1, "target": TARGET, "exe_sha256": exe_sha,
+            "schema_version": 1, "target": target, "exe_sha256": exe_sha,
             "provenance_sha256": provenance_sha, "cargo_lock_sha256": sha(lock_raw),
             "scope": ("Verbatim allowlisted source notices from checksum-verified cached crates.io "
                       "packages reachable as target-normal, including dual-role packages once. "
@@ -332,10 +334,11 @@ def main(argv=None):
     parser.add_argument("--lock", type=Path, required=True)
     parser.add_argument("--cargo-home", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--target", choices=(TARGET, GNU_TARGET), default=TARGET)
     args = parser.parse_args(argv)
     try:
         report = collect(args.exe, args.exe_sha256, args.provenance, args.provenance_sha256,
-                         args.lock, args.cargo_home, args.output)
+                         args.lock, args.cargo_home, args.output, args.target)
     except (TypeError, KeyError, AttributeError, OSError, EOFError, tarfile.TarError, ValueError) as error:
         if type(error) is ValueError:  # These explicit validation messages omit local paths.
             parser.exit(2, f"Could not collect registry notices: {error}.\n")

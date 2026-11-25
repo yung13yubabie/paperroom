@@ -1,5 +1,5 @@
 use super::*;
-use crate::canvas_projection::{self as projection, Drag, Projection, Rect};
+use crate::canvas_projection::{self as projection, Geometry, Projection, Rect};
 use crate::store::canvas_edit::CanvasEdit;
 use crate::store::canvas_bundle::{CanvasAssetState, CanvasBundleImage};
 use serde_json::Value;
@@ -8,6 +8,36 @@ pub(super) struct Pan {
     projection: Projection,
     start: [i32; 2],
     current: [i32; 2],
+}
+
+pub(super) struct Drag {
+    projection: Projection,
+    start: [i32; 2],
+    current: [i32; 2],
+    action: DragAction,
+}
+
+enum DragAction {
+    Marquee,
+    Move,
+    Resize { id: String, original: Geometry },
+}
+
+fn selected_offset(view: &Canvas, drag: &Drag) -> [i64; 2] {
+    projection::move_offset(drag.projection.drag_offset(drag.start, drag.current),
+        projection::nodes(&view.doc).filter_map(|(node, geometry)| {
+            node["id"].as_str().filter(|id| view.selection.contains(*id)).map(|_| geometry)
+        }))
+}
+
+unsafe fn frame(dc: HDC, rect: RECT, accent: u32) {
+    unsafe {
+        let brush = CreateSolidBrush(accent);
+        if !brush.is_null() {
+            FrameRect(dc, &rect, brush);
+            DeleteObject(brush);
+        }
+    }
 }
 
 fn coordinates(rect: RECT) -> Rect {
@@ -198,14 +228,25 @@ impl App {
                     }
                 }
                 WM_LBUTTONDOWN if view.drag.is_none() && view.pan.is_none() => {
-                    if let Some(projection) = visible
-                        && let Some((id, geometry, resize)) = projection::hit_node(&view.doc, projection, point, grip)
-                    {
+                    if let Some(projection) = visible.filter(|_| projection::contains(area, point)) {
+                        SetFocus(self.hwnd);
                         SetCapture(self.hwnd);
                         if GetCapture() == self.hwnd {
-                            view.drag = Some(Drag {
-                                id: id.to_owned(), projection, original: geometry, start: point, current: point, resize,
-                            });
+                            let action = match projection::hit_node(&view.doc, projection, point, grip) {
+                                Some((id, original, true)) => {
+                                    DragAction::Resize { id: id.to_owned(), original }
+                                }
+                                Some((id, _, false)) => {
+                                    if !view.selection.contains(id) {
+                                        view.selection.clear();
+                                        view.selection.insert(id.to_owned());
+                                    }
+                                    DragAction::Move
+                                }
+                                None => DragAction::Marquee,
+                            };
+                            view.drag = Some(Drag { projection, start: point, current: point, action });
+                            InvalidateRect(self.hwnd, &client, 0);
                         }
                     }
                 }
@@ -227,9 +268,29 @@ impl App {
                             return Ok(());
                         }
                         drag.current = point;
-                        let geometry = drag.geometry();
-                        if geometry == drag.original { return Ok(()); }
-                        let edit = CanvasEdit::Geometry { id: &drag.id, geometry };
+                        let edit = match &drag.action {
+                            DragAction::Marquee => {
+                                let bounds = projection::enclose(drag.start, point);
+                                view.selection = projection::nodes(&view.doc).filter_map(|(node, geometry)| {
+                                    let rect = drag.projection.rectangle(geometry);
+                                    if projection::encloses(bounds, rect) && projection::encloses(area, rect) {
+                                        node["id"].as_str().map(str::to_owned)
+                                    } else { None }
+                                }).collect();
+                                label(self.widgets.status, &format!("已選取 {} 個畫布節點。", view.selection.len()));
+                                return Ok(());
+                            }
+                            DragAction::Move => {
+                                let offset = selected_offset(view, &drag);
+                                if offset == [0, 0] { return Ok(()); }
+                                CanvasEdit::Translate { ids: &view.selection, offset }
+                            }
+                            DragAction::Resize { id, original } => {
+                                let offset = drag.projection.drag_offset(drag.start, point);
+                                if offset == [0, 0] { return Ok(()); }
+                                CanvasEdit::Geometry { id, geometry: projection::resize(*original, offset) }
+                            }
+                        };
                         view.doc = self.notebook.edit_canvas(view.id, &view.doc, edit)?;
                         label(self.widgets.status, "已儲存畫布修改。");
                     }
@@ -253,16 +314,25 @@ impl App {
             let projection = view.pan.as_ref().filter(|pan| pan.projection.area == area && pan.projection.inset == inset)
                 .map_or(projection, |pan| Projection::camera(area, inset, self.dpi,
                     pan.projection.pan(pan.start, pan.current, self.dpi)));
-            let active = view.drag.as_ref()
-                .filter(|drag| drag.projection.area == area && drag.projection.inset == inset)
-                .map(|drag| (drag.id.as_str(), drag.geometry()));
+            let drag = view.drag.as_ref()
+                .filter(|drag| drag.projection.area == area && drag.projection.inset == inset);
+            let offset = drag.filter(|drag| matches!(drag.action, DragAction::Move))
+                .map_or([0, 0], |drag| selected_offset(view, drag));
             let grip_size = self.scaled(10);
             let mut places = HashMap::new();
             let mut cards = Vec::new();
             for (node, mut geometry) in projection::nodes(&view.doc) {
                 let id = node["id"].as_str().unwrap_or_default();
-                if let Some((active_id, active_geometry)) = active && id == active_id {
-                    geometry = active_geometry;
+                if let Some(drag) = drag
+                    && let DragAction::Resize { id: resized, original } = &drag.action
+                    && id == resized
+                {
+                    let delta = drag.projection.drag_offset(drag.start, drag.current);
+                    if delta != [0, 0] { geometry = projection::resize(*original, delta); }
+                }
+                if view.selection.contains(id) {
+                    geometry[0] += offset[0];
+                    geometry[1] += offset[1];
                 }
                 let rect = projection.rectangle(geometry);
                 let Some(visible) = projection.visible_rect(rect) else { continue; };
@@ -302,10 +372,12 @@ impl App {
                 let kind = node["type"].as_str().unwrap_or_default();
                 let accent = canvas_color(&node["color"], TEAL);
                 if kind != "group" { fill(dc, &rect, PAPER); }
-                let brush = CreateSolidBrush(accent);
-                if !brush.is_null() {
-                    FrameRect(dc, &rect, brush);
-                    DeleteObject(brush);
+                frame(dc, rect, accent);
+                if node["id"].as_str().is_some_and(|id| view.selection.contains(id)) {
+                    let border = self.scaled(2);
+                    let inset = RECT { left: rect.left + border, top: rect.top + border,
+                                       right: rect.right - border, bottom: rect.bottom - border };
+                    if inset.left < inset.right && inset.top < inset.bottom { frame(dc, inset, INK); }
                 }
                 if let Some(grip) = grip { fill(dc, &rectangle(grip), accent); }
                 let field = match kind { "text" => "text", "file" => "file", "link" => "url", _ => "label" };
@@ -346,6 +418,11 @@ impl App {
                         draw_text(dc, self.fonts[4], SOFT, badge, &mut body, DT_SINGLELINE | DT_END_ELLIPSIS);
                     }
                 }
+            }
+            if let Some(drag) = drag.filter(|drag| matches!(drag.action, DragAction::Marquee))
+                && let Some(bounds) = projection.visible_rect(projection::enclose(drag.start, drag.current))
+            {
+                frame(dc, rectangle(bounds), INK);
             }
         }
     }

@@ -277,6 +277,11 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("The middle button target changed.");
         SendPhysical(new[] { Mouse(down ? 0x20u : 0x40u) });
     }
+    public static void LeftButton(IntPtr owner, uint pid, bool down) {
+        if (!ForegroundIsOwned(owner, pid) || (down && WindowFromPoint(Cursor()) != owner))
+            throw new InvalidOperationException("The left button target changed.");
+        SendPhysical(new[] { Mouse(down ? 0x02u : 0x04u) });
+    }
     public static bool CanvasCaptured(IntPtr owner, uint pid) {
         uint thread = GetWindowThreadProcessId(owner, out uint actual);
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
@@ -344,6 +349,13 @@ public static class PaperroomHighlightGui {
         foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(key, 0, 0), Key(key, 0, 2) });
+    }
+    public static void CanvasUndoKey(IntPtr owner, uint pid) {
+        if (!ForegroundIsOwned(owner, pid) || DialogFocus(owner) != owner)
+            throw new InvalidOperationException("Expected the drawing surface to have focus before Ctrl+Z.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        SendPhysical(new[] { Key(0x11, 0, 0), Key(0x5A, 0, 0), Key(0x5A, 0, 2), Key(0x11, 0, 2) });
     }
     public static void TypeEditorText(IntPtr owner, uint pid, IntPtr edit, string prefix) {
         if (!ForegroundIsOwned(owner, pid) || DialogFocus(owner) != edit ||
@@ -571,16 +583,16 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, 
     return $result
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status,
-                     [switch]$AlreadyOpened, [string]$ExpectedError = '') {
+                     [switch]$AlreadyOpened, [string]$ExpectedError = '', [switch]$CanvasSave) {
     if (!$AlreadyOpened) { Native-Menu 109 $Item $Caption }
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
-    $defaultName = switch ($Item) {
+    $defaultName = if ($CanvasSave) { 'canvas.canvas' } else { switch ($Item) {
         3 { 'note.md' }
         4 { 'paperroom-backup.sqlite3' }
         30 { 'paperroom-html.zip' }
         34 { 'vault.zip' }
         default { '' }
-    }
+    } }
     try {
         $edit = Wait-For "unique native file name field for $Caption" {
             [PaperroomHighlightGui]::FilenameField($dialog, $process.Id, $defaultName)
@@ -592,7 +604,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $Item -notin 1, 11
+    $saving = $CanvasSave -or $Item -notin 1, 11
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -680,7 +692,7 @@ function Native-VaultExport([string]$Title, [string]$Path, [string]$ExpectedErro
     Native-Menu 109 $choice "$Title  (#" -MenuOpen -CaptionPrefix
     Native-File 34 '匯出 Vault ZIP（含來源附件）…' $Path '已匯出 2 篇 Markdown 與 2 個來源附件。' -AlreadyOpened -ExpectedError $ExpectedError
 }
-function Read-CanvasInk {
+function Read-CanvasInk([int]$Red = 237, [int]$Green = 33, [int]$Blue = 125) {
     try { $area = [PaperroomHighlightGui]::CanvasArea($window, $process.Id) }
     catch {
         if ($_.Exception.Message.Contains('The synthetic Canvas is obscured.')) { return $null }
@@ -703,7 +715,7 @@ function Read-CanvasInk {
                 $offset=$y*$pixels.Stride
                 for ($x=0; $x -lt $w; $x++) {
                     $i=$offset+4*$x
-                    if ($data[$i] -eq 125 -and $data[$i+1] -eq 33 -and $data[$i+2] -eq 237) {
+                    if ($data[$i] -eq $Blue -and $data[$i+1] -eq $Green -and $data[$i+2] -eq $Red) {
                         if ($x -lt $left) { $left=$x }; if ($x -gt $right) { $right=$x }
                         if ($y -lt $top) { $top=$y }; if ($y -gt $bottom) { $bottom=$y }
                     }
@@ -744,6 +756,63 @@ function Pan-Canvas($Bounds, [int]$Dx, [int]$Dy, [switch]$Cancel) {
         }
     } finally { [PaperroomHighlightGui]::MiddleButton($window,$process.Id,$false) }
     $null = Wait-For 'Canvas middle button released capture' { ![PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+}
+function Drag-Canvas([int]$X, [int]$Y, [int]$EndX, [int]$EndY, [switch]$Cancel) {
+    $null = [PaperroomHighlightGui]::CanvasCursor($window,$process.Id,$X,$Y)
+    [PaperroomHighlightGui]::LeftButton($window,$process.Id,$true)
+    try {
+        $null = Wait-For 'Canvas left button capture' { [PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+        $null = [PaperroomHighlightGui]::CanvasCursor($window,$process.Id,$EndX,$EndY)
+        if ($Cancel) {
+            [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
+            $null = Wait-For 'Canvas Escape released left capture' { ![PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+        }
+    } finally { [PaperroomHighlightGui]::LeftButton($window,$process.Id,$false) }
+    $null = Wait-For 'Canvas left button released capture' { ![PaperroomHighlightGui]::CanvasCaptured($window,$process.Id) }
+}
+function Assert-CanvasEdit([string]$Database, [string]$Title, [string]$Source, [string]$State, [string]$Export = '-') {
+    @'
+from pathlib import Path
+from contextlib import closing
+import json,sqlite3,sys
+database,title,source,state,export=sys.argv[1:]
+original=Path(source).read_bytes()
+before=json.loads(original)
+with closing(sqlite3.connect(Path(database).as_uri()+'?mode=ro',uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    rows=db.execute("SELECT c.source,u.source FROM saved_canvases c LEFT JOIN canvas_edit_undo u "
+                    "ON u.canvas_id=c.id WHERE c.title=?", (title,)).fetchall()
+assert len(rows)==1
+raw,undo=rows[0]
+canvas=json.loads(raw)
+if state in ("undone","untouched"):
+    assert raw.encode("utf-8")==original and undo is None
+elif state in ("moved","imported"):
+    delta=[canvas["nodes"][0][axis]-before["nodes"][0][axis] for axis in ("x","y")]
+    assert all(20 < change < 65 for change in delta), delta
+    for node in before["nodes"][:2]:
+        for axis,shift in zip(("x","y"),delta):
+            node[axis]+=shift
+    assert canvas==before, "Nonselected node, connection, extension, dimensions or group spacing changed"
+    if state=="moved":
+        assert undo.encode("utf-8")==original
+    else:
+        assert undo is None, "The imported Canvas inherited source workspace history"
+elif state in ("connected","disconnected","edge-restored"):
+    assert canvas["nodes"]==before["nodes"] and canvas["extra"]==before["extra"]
+    extra={"id":"paperroom-edge-1","fromNode":"b","toNode":"a"}
+    if state=="disconnected":
+        assert canvas["edges"]==[extra] and json.loads(undo)["edges"]==before["edges"]+[extra]
+    else:
+        assert canvas["edges"]==before["edges"]+[extra]
+        assert (undo is None if state=="edge-restored" else undo.encode("utf-8")==original)
+else:
+    raise AssertionError(state)
+if export != "-":
+    assert Path(export).read_bytes()==raw.encode("utf-8")
+print(f"SQLite Canvas {state}: {len(canvas['nodes'])} nodes, {len(canvas['edges'])} edges.")
+'@ | python - $Database $Title $Source $State $Export
+    if ($LASTEXITCODE -ne 0) { throw "Canvas persistence or export check failed at $State." }
 }
 function Start-Notebook([string]$Folder) {
     $binary = Join-Path $Folder 'Paperroom.exe'
@@ -1154,7 +1223,7 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process = $null
     Write-Host 'PASS: native Vault folder import, duplicate snapshots, portable image and text attachment export, extraction, reimport and reopen, and safe refusal.'
     $canvasFile = Join-Path $root 'CanvasViewFixture.canvas'
-    $canvasJson = '{"nodes":[{"id":"a","type":"text","x":0,"y":0,"width":100,"height":70,"text":"First","color":"#ed217d"},{"id":"b","type":"text","x":230,"y":110,"width":95,"height":65,"text":"Second"}],"edges":[{"id":"c","fromNode":"a","toNode":"b","label":"kept"}],"extra":{"marker":true}}'
+    $canvasJson = '{"nodes":[{"id":"a","type":"text","x":0,"y":0,"width":100,"height":70,"text":"First","color":"#ed217d"},{"id":"b","type":"text","x":230,"y":110,"width":95,"height":65,"text":"Second","color":"#047bea"},{"id":"d","type":"text","x":65,"y":155,"width":58,"height":69,"text":"Unselected"}],"edges":[{"id":"c","fromNode":"a","toNode":"b","label":"kept","extension":{"flag":true}}],"extra":{"marker":true}}'
     [IO.File]::WriteAllText($canvasFile,$canvasJson,[Text.UTF8Encoding]::new($false))
     $process = Start-Notebook $live
     $window = $process.MainWindowHandle
@@ -1200,10 +1269,97 @@ print('Reopened SQLite preserves the two original imports and the independent re
         $ink -and $ink.L -eq $before.L -and $ink.T -eq $before.T -and $ink.W -eq $before.W
     }
     if ((Read-CanvasStamp $liveDb $canvasFile) -cne '[null, null, null]') { throw 'Fit command did not clear the prior view.' }
+    Write-Host 'PASS: physical Canvas middle-button pan and wheel zoom, pointer anchoring, Escape cancel, native reopen and fit, with byte-identical Canvas JSON.'
+
+    $a = Read-CanvasInk
+    $b = Wait-For 'painted second Canvas node' { Read-CanvasInk 4 123 234 }
+    $nearX = $a.ScreenX+$a.L-5
+    $nearY = $a.ScreenY+$a.T-5
+    Drag-Canvas $nearX $nearY ($b.ScreenX+$b.R+5) ($b.ScreenY+$b.B+5)
+    $null = Wait-For 'exactly two enclosed nodes selected' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 2 個畫布節點。' }
+    $dragX = $a.ScreenX+$a.L+[int]($a.W/2)
+    $dragY = $a.ScreenY+$a.T+[int]($a.H/2)
+    Drag-Canvas $dragX $dragY ($dragX+54) ($dragY+48) -Cancel
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'untouched'
+    Drag-Canvas $dragX $dragY ($dragX+54) ($dragY+48)
+    $null = Wait-For 'group move stored' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。' }
+    $null = Wait-For 'both painted nodes moved' {
+        $ma = Read-CanvasInk
+        $mb = Read-CanvasInk 4 123 234
+        if ($ma -and $mb -and $ma.L-$a.L -eq $mb.L-$b.L -and $ma.T-$a.T -eq $mb.T-$b.T -and
+            [Math]::Abs($ma.L-$a.L-54) -le 2 -and [Math]::Abs($ma.T-$a.T-48) -le 2) { $ma }
+    }
+    $portableCanvas = Join-Path $root 'CanvasReadback.canvas'
+    Native-Menu 120 1 '匯出原始 JSON Canvas…'
+    Native-File 1 '匯出原始 JSON Canvas…' $portableCanvas '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'moved' $portableCanvas
+
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-Menu 109 12 '開啟已匯入的 Canvas…'
+    Native-Menu 109 1 'CanvasViewFixture' -MenuOpen
+    $null = Wait-For 'reopened Canvas edit view' {
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq 'Canvas 操作' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('中鍵拖曳平移')
+    }
+    $null = Wait-For 'reopened Canvas paint' { Read-CanvasInk }
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'moved' $portableCanvas
+    Drag-Canvas $nearX $nearY $nearX $nearY
+    $null = Wait-For 'real click focused the Canvas' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 0 個畫布節點。' }
+    [PaperroomHighlightGui]::CanvasUndoKey($window,$process.Id)
+    $null = Wait-For 'physical Ctrl+Z restored the move' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已復原上一次 Canvas 修改。' }
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'undone'
+
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 11 '新增連線…' -MenuOpen
+    Native-Menu 120 2 '2　Second' -MenuOpen -CaptionPrefix
+    Native-Menu 120 1 '1　First' -MenuOpen -CaptionPrefix
+    $prompt = Wait-For 'native connection label prompt' {
+        [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '新增連線', 1)
+    }
+    $submit = Control $prompt 1
+    $point = [PaperroomHighlightGui]::ButtonPoint($prompt, $process.Id, $submit)
+    [PaperroomHighlightGui]::MouseAction($window, $process.Id, $submit, $point, 0)
+    $null = Wait-For 'native connection created' {
+        ![PaperroomHighlightGui]::IsWindowVisible($prompt) -and [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。'
+    }
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'connected'
+    Drag-Canvas $nearX $nearY $nearX $nearY
+    $null = Wait-For 'selection cleared before deletion' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 0 個畫布節點。' }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 13 '刪除連線…' -MenuOpen
+    Native-Menu 120 1 '1　a → b' -MenuOpen -CaptionPrefix
+    $confirmation = Wait-For 'synthetic connection deletion confirmation' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'刪除連線')
+    }
+    $yes = Control $confirmation 6
+    $point = [PaperroomHighlightGui]::ButtonPoint($confirmation,$process.Id,$yes)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$yes,$point,0)
+    $null = Wait-For 'native connection deleted' {
+        ![PaperroomHighlightGui]::IsWindowVisible($confirmation) -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。'
+    }
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'disconnected'
+    Native-Menu 120 12 '復原上一次 Canvas 修改'
+    $null = Wait-For 'native Undo restored the deleted connection' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已復原上一次 Canvas 修改。' }
+    Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'edge-restored'
+
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $restored
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $portableCanvas '中鍵拖曳平移'
+    $null = Wait-For 'imported Canvas painted in second workspace' { Read-CanvasInk }
+    Assert-CanvasEdit $restoreDb 'CanvasReadback' $canvasFile 'imported' $portableCanvas
+    Native-Menu 120 12 '復原上一次 Canvas 修改'
+    $null = Wait-For 'second workspace has no unrelated Undo record' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '這份畫布目前沒有可復原的修改。' }
+    if ([IO.File]::ReadAllText($canvasFile) -cne $canvasJson) { throw 'The imported original was modified on disk.' }
     Close-Notebook $process
     $process.Dispose()
     $process = $null
-    Write-Host 'PASS: physical Canvas middle-button pan and wheel zoom, pointer anchoring, Escape cancel, native reopen and fit, with byte-identical Canvas JSON.'
+    Write-Host 'PASS: physical Canvas marquee, canceled drag, equal group movement, reopen and Ctrl+Z, connect/disconnect and Undo, and exact export to a second workspace.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

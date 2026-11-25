@@ -169,7 +169,7 @@ fn color(item: &Object) -> Result<()> {
 
 // Test mathematical integrality without rounding through f64 or converting a
 // coordinate to a machine-sized integer. Geometry is preserved, never executed.
-fn integer(value: Option<&Value>) -> bool {
+pub(crate) fn integer(value: Option<&Value>) -> bool {
     let Some(number) = value.and_then(Value::as_number) else { return false };
     let spelling = number.as_str();
     let (mantissa, exponent) = spelling.split_once(['e', 'E']).unwrap_or((spelling, "0"));

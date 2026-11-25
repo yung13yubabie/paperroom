@@ -1,7 +1,7 @@
 use crate::canvas::{self, Document};
 use serde_json::Value;
 
-const MAX_COORDINATE: i64 = 1_000_000_000_000_000;
+pub(crate) const MAX_COORDINATE: i64 = 1_000_000_000_000_000;
 const MAX_VIEW_ORIGIN: f64 = 4e15;
 const MIN_VIEW_SCALE: f64 = 1e-16;
 const MAX_VIEW_SCALE: f64 = 12.0;
@@ -37,6 +37,12 @@ pub fn nodes(doc: &Document) -> impl Iterator<Item = (&Value, Geometry)> {
 }
 
 impl Projection {
+    pub fn drag_offset(self, start: [i32; 2], end: [i32; 2]) -> [i64; 2] {
+        let pixels = [end[0].saturating_sub(start[0]), end[1].saturating_sub(start[1])];
+        if pixels.iter().all(|amount| amount.unsigned_abs() < 3) { return [0; 2]; }
+        pixels.map(|amount| (f64::from(amount) / self.scale).round() as i64)
+    }
+
     pub fn fit(doc: &Document, area: Rect, inset: i32) -> Option<Self> {
         let mut geometry = nodes(doc).map(|(_, geometry)| geometry);
         let [x, y, width, height] = geometry.next()?;
@@ -167,35 +173,25 @@ pub fn hit_node(
     }).last()
 }
 
-pub struct Drag {
-    pub id: String,
-    pub projection: Projection,
-    pub original: Geometry,
-    pub start: [i32; 2],
-    pub current: [i32; 2],
-    pub resize: bool,
+pub fn enclose(a: [i32; 2], b: [i32; 2]) -> Rect {
+    [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
 }
 
-impl Drag {
-    pub fn geometry(&self) -> Geometry {
-        let dx = self.current[0].saturating_sub(self.start[0]);
-        let dy = self.current[1].saturating_sub(self.start[1]);
-        let [x, y, width, height] = self.original;
-        if dx.unsigned_abs().max(dy.unsigned_abs()) < 3 {
-            return self.original;
-        }
-        let to_world = |amount: i32| (f64::from(amount) / self.projection.scale).round() as i64;
-        let (dx, dy) = (to_world(dx), to_world(dy));
-        if self.resize {
-            [x, y, width.saturating_add(dx).clamp(1, MAX_COORDINATE),
-             height.saturating_add(dy).clamp(1, MAX_COORDINATE)]
-        } else {
-            let move_axis = |origin: i64, delta: i64| {
-                origin.saturating_add(delta).clamp(-MAX_COORDINATE, MAX_COORDINATE)
-            };
-            [move_axis(x, dx), move_axis(y, dy), width, height]
-        }
+pub fn encloses([left, top, right, bottom]: Rect, [x0, y0, x1, y1]: Rect) -> bool {
+    left <= x0 && top <= y0 && x1 <= right && y1 <= bottom
+}
+
+pub fn move_offset(mut delta: [i64; 2], geometries: impl Iterator<Item = Geometry>) -> [i64; 2] {
+    for [x, y, ..] in geometries {
+        delta[0] = delta[0].clamp(-MAX_COORDINATE - x, MAX_COORDINATE - x);
+        delta[1] = delta[1].clamp(-MAX_COORDINATE - y, MAX_COORDINATE - y);
     }
+    delta
+}
+
+pub fn resize([x, y, width, height]: Geometry, [dx, dy]: [i64; 2]) -> Geometry {
+    [x, y, width.saturating_add(dx).clamp(1, MAX_COORDINATE),
+     height.saturating_add(dy).clamp(1, MAX_COORDINATE)]
 }
 
 // A bounded preview plan. Origin stays on the uncut group when scrolled,
@@ -286,20 +282,21 @@ mod tests {
         let start = [left + 20, top + 20];
         let (id, original, resize) = hit_node(&doc, p, start, 10).unwrap();
         assert_eq!((id, original, resize), ("top", [10, 30, 80, 90], false));
-        let mut drag = Drag { id: id.into(), projection: p, original, start, current: start, resize };
-        drag.current = [start[0] + 2, start[1] + 2];
-        assert_eq!(drag.geometry(), original);
-        drag.current = [start[0] - 28, start[1] + 13];
-        assert_eq!(drag.geometry(), [-18, 43, 80, 90]);
-        assert_eq!(p.rectangle(drag.geometry()), [left - 28, top + 13, right - 28, bottom + 13]);
+        assert_eq!(p.drag_offset(start, [start[0] + 2, start[1] + 2]), [0, 0]);
+        let [dx, dy] = p.drag_offset(start, [start[0] - 28, start[1] + 13]);
+        assert_eq!(p.rectangle([original[0] + dx, original[1] + dy, original[2], original[3]]),
+            [left - 28, top + 13, right - 28, bottom + 13]);
+        let marquee = enclose([right + 2, bottom + 2], [left - 2, top - 2]);
+        assert!(encloses(marquee, [left, top, right, bottom]));
+        assert!(!encloses(marquee, [left - 3, top, right, bottom]));
+        assert_eq!(move_offset([99, -99], [
+            [MAX_COORDINATE - 3, 0, 10, 10], [0, 4 - MAX_COORDINATE, 10, 10],
+        ].into_iter()), [3, -4]);
 
         let corner = [right - 3, bottom - 3];
-        let (_, _, resize) = hit_node(&doc, p, corner, 10).unwrap();
-        assert!(resize);
-        drag.resize = resize;
-        drag.start = corner;
-        drag.current = [corner[0] + 23, corner[1] - 150];
-        assert_eq!(drag.geometry(), [10, 30, 103, 1]);
+        assert!(hit_node(&doc, p, corner, 10).unwrap().2);
+        assert_eq!(super::resize(original, p.drag_offset(corner, [corner[0] + 23, corner[1] - 150])),
+            [10, 30, 103, 1]);
         assert!(p.grip([520, 210, 558, 270], 10).is_none());
         assert!(hit_node(&doc, p, [0, 0], 10).is_none());
         Ok(())

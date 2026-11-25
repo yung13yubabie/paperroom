@@ -83,6 +83,23 @@ unsafe fn content(hwnd: HWND, kind: &str, initial: &str) -> Result<Option<String
 }
 
 impl App {
+    pub(in crate::window) unsafe fn undo_canvas(&mut self) -> Result<()> {
+        unsafe {
+            if self.cancel_canvas_drag() { return Ok(()); }
+            let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_mut() else { return Ok(()); };
+            let Some(doc) = self.notebook.undo_canvas_edit(view.id, &view.doc)? else {
+                label(self.widgets.status, "這份畫布目前沒有可復原的修改。");
+                return Ok(());
+            };
+            view.doc = doc;
+            view.selection.clear();
+            if view.bundle.is_some() { view.bundle = self.notebook.canvas_bundle_view(view.id)?; }
+            self.present();
+            label(self.widgets.status, "已復原上一次 Canvas 修改。");
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn canvas_edit_menu(&mut self, canvas_id: i64) -> Result<()> {
         unsafe {
             let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_mut() else { return Ok(()); };
@@ -206,6 +223,7 @@ impl App {
                 _ => return Ok(()),
             };
             view.doc = self.notebook.edit_canvas(canvas_id, &view.doc, edit)?;
+            view.selection.clear();
             if view.bundle.is_some() {
                 view.bundle = self.notebook.canvas_bundle_view(canvas_id)?;
             }

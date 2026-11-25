@@ -304,6 +304,7 @@ mod tests {
             legacy.execute_batch(super::super::pdf_regions::SCHEMA)?;
             legacy.execute_batch(super::super::collections::SCHEMA)?;
             legacy.execute_batch(super::super::collection_views::SCHEMA)?;
+            legacy.execute_batch(super::super::workspace::SCHEMA)?;
             legacy.execute_batch(
                 "INSERT INTO board_groups VALUES(2,1,'舊分區'),(3,1,'占用'),(4,2,'舊分區');
                  INSERT INTO board_group_cards VALUES(1,10,2),(1,11,2),(1,12,2),(2,10,4);

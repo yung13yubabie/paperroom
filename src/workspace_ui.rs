@@ -1,5 +1,5 @@
 use super::*;
-use crate::canvas_projection::{Drag, Projection};
+use crate::canvas_projection::Projection;
 use std::fmt::Write;
 
 #[path = "canvas_editor_ui.rs"]
@@ -46,7 +46,8 @@ pub(super) struct Canvas {
     doc: crate::canvas::Document,
     bundle: Option<crate::store::canvas_bundle::CanvasBundleView>,
     projection: Cell<Option<Projection>>,
-    drag: Option<Drag>,
+    drag: Option<canvas_view_ui::Drag>,
+    selection: std::collections::HashSet<String>,
     camera: Option<crate::canvas_projection::Camera>,
     pan: Option<canvas_view_ui::Pan>,
 }
@@ -69,7 +70,7 @@ impl WorkspaceView {
             Self::Kanban(view) if view.is_list() => "點選資料列開啟筆記　滾輪捲動清單",
             Self::Kanban(view) if view.checkbox.is_some() => "點選右欄切換勾選　資料列會依照篩選更新",
             Self::Kanban(_) => "使用看板操作新增或移動資料列　滾輪捲動卡片",
-            Self::Canvas(_) => "中鍵拖曳平移　滾輪縮放　左鍵拖曳節點或右下角　Esc 取消拖曳",
+            Self::Canvas(_) => "中鍵拖曳平移　滾輪縮放　左鍵框選或拖曳　Esc 取消　Ctrl+Z 復原",
             Self::Pdf(_) => "在 PDF 頁面上拖曳選區　使用 PDF 操作換頁或檢視本頁標註",
             Self::Graph(_) => "捲動查看更多連結，點選節點即可開啟筆記",
         }
@@ -185,7 +186,8 @@ impl App {
         let camera = self.notebook.canvas_camera(id)?;
         unsafe {
             self.activate_workspace(WorkspaceView::Canvas(Canvas {
-                id, title, doc, bundle, projection: Cell::new(None), drag: None, camera, pan: None,
+                id, title, doc, bundle, projection: Cell::new(None), drag: None,
+                selection: Default::default(), camera, pan: None,
             }));
         }
         Ok(())
@@ -310,7 +312,7 @@ impl App {
                     let initial_binding = self.notebook.canvas_vault(id)?;
                     let mut choices = vec![
                         (1, "匯出原始 JSON Canvas…"), (2, "檢視格式摘要"), (3, "移除已匯入的 Canvas…"),
-                        (7, "編輯 Canvas…"), (8, "將畫布調整至視窗"),
+                        (7, "編輯 Canvas…"), (8, "將畫布調整至視窗"), (12, "復原上一次 Canvas 修改"),
                     ];
                     if view.bundle.is_some() {
                         choices.extend([
@@ -368,6 +370,8 @@ impl App {
                     } else if action == 7 {
                         self.cancel_canvas_drag();
                         self.canvas_edit_menu(id)?;
+                    } else if action == 12 {
+                        self.undo_canvas()?;
                     } else if action == 8 {
                         self.notebook.set_canvas_camera(id, None)?;
                         self.cancel_canvas_drag();

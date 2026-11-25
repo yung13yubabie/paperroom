@@ -1686,6 +1686,9 @@ impl App {
                     self.flush(true);
                 }
                 b'E' => self.toggle_edit(),
+                b'Z' if msg.hwnd == self.hwnd && matches!(self.extras.workspace, Some(WorkspaceView::Canvas(_))) => {
+                    if let Err(error) = self.undo_canvas() { self.show_error(error); }
+                }
                 _ => return false,
             }
             true

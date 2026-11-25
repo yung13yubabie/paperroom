@@ -1,8 +1,19 @@
 use super::{Notebook, Result};
 use crate::canvas::{self, Document};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+
+pub(super) const UNDO_SCHEMA: &str = "
+CREATE TABLE canvas_edit_undo(
+    canvas_id INTEGER NOT NULL UNIQUE REFERENCES saved_canvases(id) ON DELETE CASCADE,
+    source TEXT NOT NULL
+);
+CREATE TRIGGER clear_canvas_edit_undo AFTER UPDATE OF source ON saved_canvases
+WHEN old.source <> new.source
+BEGIN
+    DELETE FROM canvas_edit_undo WHERE canvas_id = old.id;
+END;";
 
 #[derive(Clone, Copy)]
 pub(crate) enum EdgeStyleField { FromSide, ToSide, FromEnd, ToEnd, Color }
@@ -22,6 +33,7 @@ impl EdgeStyleField {
 pub(crate) enum CanvasEdit<'a> {
     AddNode { kind: &'a str, content: &'a str, geometry: [i64; 4] },
     Geometry { id: &'a str, geometry: [i64; 4] },
+    Translate { ids: &'a HashSet<String>, offset: [i64; 2] },
     Content { id: &'a str, value: &'a str },
     NodeLabel { id: &'a str, label: Option<&'a str> },
     ZOrder { id: &'a str, front: bool },
@@ -102,6 +114,27 @@ fn apply(original: &Document, edit: CanvasEdit<'_>) -> Result<Document> {
             let index = position(nodes, id)?;
             set_geometry(&mut nodes[index], geometry);
         }
+        CanvasEdit::Translate { ids, offset } => {
+            let mut found = 0;
+            for node in array(&mut tree, "nodes")? {
+                if !node["id"].as_str().is_some_and(|id| ids.contains(id)) { continue; }
+                for (field, amount) in ["x", "y"].into_iter().zip(offset) {
+                    if amount == 0 { continue; }
+                    // Drawing accepts integer notation such as 1.2e2. Every
+                    // integer in the editable range is exactly representable.
+                    let value = node[field].as_f64()
+                        .filter(|origin| origin.abs() <= crate::canvas_projection::MAX_COORDINATE as f64
+                            && canvas::integer(node.get(field)))
+                        .map(|origin| origin as i64)
+                        .and_then(|origin| origin.checked_add(amount))
+                        .filter(|value| value.abs_diff(0) <= crate::canvas_projection::MAX_COORDINATE as u64)
+                        .ok_or("無法安全移動選取的節點。請檢查座標是否為可編輯範圍內的整數。")?;
+                    node[field] = Value::from(value);
+                }
+                found += 1;
+            }
+            if found != ids.len() { return Err("有選取的節點已不存在。請重新開啟畫布。".into()); }
+        }
         CanvasEdit::Content { id, value } => {
             let nodes = array(&mut tree, "nodes")?;
             let index = position(nodes, id)?;
@@ -168,25 +201,118 @@ impl Notebook {
         &self, canvas_id: i64, expected: &Document, edit: CanvasEdit<'_>,
     ) -> Result<Document> {
         let revised = apply(expected, edit)?;
-        let changed = self.connection.execute(
-            "UPDATE saved_canvases SET source=?3
-             WHERE id=?1 AND source=?2
-             AND length(CAST(?3 AS BLOB)) +
-                 (SELECT coalesce(sum(length(CAST(source AS BLOB))),0)
-                  FROM saved_canvases WHERE id<>?1) <= ?4",
-            params![canvas_id, expected.as_str(), revised.as_str(), super::workspace::MAX_CANVAS_STORAGE_BYTES],
-        )?;
-        if changed == 0 {
-            return Err("畫布已更改、已移除，或工作區的 Canvas 已達容量上限。請重新開啟畫布。".into());
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        replace_source(&tx, canvas_id, expected, &revised)?;
+        if revised.as_str() != expected.as_str() {
+            tx.execute("INSERT INTO canvas_edit_undo(canvas_id, source) VALUES (?1, ?2)",
+                params![canvas_id, expected.as_str()])?;
+            // Keep the most recent action per canvas with a workspace-wide byte budget.
+            tx.execute(
+                "DELETE FROM canvas_edit_undo WHERE rowid IN (
+                    SELECT rowid FROM (
+                        SELECT rowid, sum(length(CAST(source AS BLOB))) OVER (ORDER BY rowid DESC) AS bytes
+                        FROM canvas_edit_undo
+                    ) WHERE bytes > ?1
+                 )", [super::workspace::MAX_CANVAS_STORAGE_BYTES],
+            )?;
         }
+        tx.commit()?;
         Ok(revised)
     }
+
+    pub(crate) fn undo_canvas_edit(&self, canvas_id: i64, expected: &Document) -> Result<Option<Document>> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT source FROM canvas_edit_undo WHERE canvas_id=?1", [canvas_id], |row| row.get(0),
+        ).optional()?;
+        let Some(previous) = previous else { return Ok(None); };
+        let restored = expected.reparse(previous)?;
+        replace_source(&tx, canvas_id, expected, &restored)?;
+        tx.commit()?;
+        Ok(Some(restored))
+    }
+}
+
+fn replace_source(
+    tx: &Transaction<'_>, canvas_id: i64, expected: &Document, revised: &Document,
+) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE saved_canvases SET source=?3
+         WHERE id=?1 AND source=?2
+         AND length(CAST(?3 AS BLOB)) +
+             (SELECT coalesce(sum(length(CAST(source AS BLOB))),0)
+              FROM saved_canvases WHERE id<>?1) <= ?4",
+        params![canvas_id, expected.as_str(), revised.as_str(), super::workspace::MAX_CANVAS_STORAGE_BYTES],
+    )?;
+    if changed == 0 {
+        return Err("畫布已更改、已移除，或工作區的 Canvas 已達容量上限。請重新開啟畫布。".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use CanvasEdit::*;
+
+    #[test]
+    fn group_translation_undo_reopens_and_keeps_links_and_untouched_data() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("notes.sqlite3");
+        let db = Notebook::open(&path, false)?;
+        let raw = " {\n\"nodes\":[{\"id\":\"a\",\"type\":\"text\",\"x\":1.2e2,\"y\":-10,\"width\":81,\"height\":50,\"text\":\"文字\"},{\"id\":\"b\",\"type\":\"file\",\"x\":5,\"y\":30,\"width\":12,\"height\":20,\"file\":\"資料/筆記.md\",\"subpath\":\"#一\"},{\"id\":\"c\",\"type\":\"group\",\"x\":7,\"y\":11,\"width\":111,\"height\":99}],\"edges\":[{\"id\":\"e\",\"fromNode\":\"a\",\"toNode\":\"b\",\"extra\":true}]}\n";
+        let starting = canvas::parse(raw.into())?;
+        let id = db.save_canvas("合成畫布", &starting)?;
+        let ids = HashSet::from(["a".to_owned(), "b".to_owned()]);
+        let bad_ids = HashSet::from(["a".to_owned(), "missing".to_owned()]);
+        assert!(db.edit_canvas(id, &starting, Translate { ids: &bad_ids, offset: [2, 3] }).is_err());
+        assert!(db.edit_canvas(id, &starting, Translate { ids: &ids, offset: [i64::MAX, 1] }).is_err());
+        assert_eq!(db.read_canvas(id)?.as_str(), raw);
+        assert!(db.undo_canvas_edit(id, &starting)?.is_none());
+        let moved = db.edit_canvas(id, &starting, Translate { ids: &ids, offset: [-7, 9] })?;
+        assert_eq!(moved.json()["nodes"][0]["x"], 113);
+        assert_eq!(moved.json()["nodes"][1]["x"], -2);
+        assert_eq!(moved.json()["nodes"][0]["y"], -1);
+        assert_eq!(moved.json()["nodes"][1]["y"], 39);
+        for key in ["id", "file", "subpath", "width", "height"] {
+            assert_eq!(moved.json()["nodes"][1][key], starting.json()["nodes"][1][key]);
+        }
+        assert_eq!(moved.json()["nodes"][2], starting.json()["nodes"][2]);
+        assert_eq!(moved.json()["edges"], starting.json()["edges"]);
+        assert!(db.undo_canvas_edit(id, &starting).is_err());
+        drop(db);
+
+        let db = Notebook::open(&path, false)?;
+        let reopened = db.read_canvas(id)?;
+        assert_eq!(reopened.as_str(), moved.as_str());
+        let undone = db.undo_canvas_edit(id, &reopened)?.unwrap();
+        assert_eq!(undone.as_str(), raw);
+        assert_eq!(db.read_canvas(id)?.as_str(), raw);
+        assert!(db.undo_canvas_edit(id, &undone)?.is_none());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn undo_of_edge_deletion_is_exact_and_other_source_writes_invalidate_undo() -> Result<()> {
+        let db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let initial = canvas::parse(r#"{"nodes":[{"id":"a","type":"group","x":0,"y":0,"width":1,"height":1},{"id":"b","type":"group","x":2,"y":2,"width":1,"height":1}],"edges":[{"id":"line","fromNode":"a","toNode":"b","extra":42}]}"#.to_owned())?;
+        let id = db.save_canvas("連線", &initial)?;
+        let disconnected = db.edit_canvas(id, &initial, DeleteEdge { id: "line" })?;
+        assert_eq!(disconnected.edges, 0);
+        let no_op = db.edit_canvas(id, &disconnected, ZOrder { id: "b", front: true })?;
+        let restored = db.undo_canvas_edit(id, &no_op)?.unwrap();
+        assert_eq!(restored.as_str(), initial.as_str());
+        let changed = db.edit_canvas(id, &restored, DeleteEdge { id: "line" })?;
+        // Workspace operations such as Vault relocation may write the source directly.
+        db.connection.execute("UPDATE saved_canvases SET source=?2 WHERE id=?1",
+            params![id, format!(" {}", changed.as_str())])?;
+        let current = db.read_canvas(id)?;
+        assert!(db.undo_canvas_edit(id, &current)?.is_none());
+        assert_eq!(db.read_canvas(id)?.as_str(), current.as_str());
+        Ok(())
+    }
 
     #[test]
     fn edits_preserve_extensions_precise_numbers_and_native_node_order() -> Result<()> {

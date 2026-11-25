@@ -255,10 +255,15 @@ mod tests {
         let collection = old.create_collection("舊集合")?;
         old.add_to_collection(collection, note, "待處理")?;
         old.compare_set_property_type("日期", None, Some(PropertyType::Date))?;
-        old.connection.execute_batch(
-            "DROP TABLE collection_field_rules; DROP INDEX collection_notes_by_note; PRAGMA user_version=29;"
-        )?;
+        crate::store::tests::remove_v29_schema(&old.connection)?;
+        old.connection.execute_batch("PRAGMA user_version=29; CREATE TABLE collection_field_rules (wrong_column TEXT);")?;
         drop(old);
+        assert!(Notebook::open(&path,false).is_err());
+        let legacy = Connection::open(&path)?;
+        let version: i32 = legacy.pragma_query_value(None,"user_version", |row| row.get(0))?;
+        assert_eq!(version,29);
+        legacy.execute_batch("DROP TABLE collection_field_rules;")?;
+        drop(legacy);
         let db = Notebook::open(&path, false)?;
         assert!(db.collection_field_rules(collection)?.is_empty());
         assert!(db.properties(note)?.is_empty());

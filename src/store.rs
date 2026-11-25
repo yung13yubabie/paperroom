@@ -734,7 +734,13 @@ mod tests {
         Ok(())
     }
 
+    pub(super) fn remove_v29_schema(connection: &Connection) -> Result<()> {
+        connection.execute_batch("DROP TABLE collection_field_rules; DROP INDEX collection_notes_by_note;")?;
+        Ok(())
+    }
+
     pub(super) fn remove_v28_schema(connection: &Connection) -> Result<()> {
+        remove_v29_schema(connection)?;
         connection.execute_batch(
             "DROP TRIGGER search_note_insert;
              DROP TRIGGER search_note_change;

@@ -2364,7 +2364,14 @@ mod tests {
         let days = db.calendar_dated_rows(id, week, day("2028-02-28"), day("2028-03-05"))?;
         assert_eq!(days.keys().map(|key| key.iso()).collect::<Vec<_>>(), ["2028-02-29", "2028-03-01"]);
 
-        db.compare_set_property(note, "結束", Some("2028-03-02"), Some("2028-02-26"))?;
+        assert!(db.compare_set_property(note, "結束", Some("2028-03-02"), Some("2028-02-26")).is_err());
+        assert_eq!(db.calendar_collection_rows(id, month, march)?.keys().copied().collect::<Vec<_>>(), [1, 2]);
+        // Seed the reversed date a legacy workspace could already contain, then
+        // verify that display and repair still tolerate that stored state.
+        db.connection.execute(
+            "UPDATE note_properties SET value=?3 WHERE note_id=?1 AND key=?2",
+            params![note, "結束", "2028-02-26"],
+        )?;
         assert_eq!(db.calendar_collection_rows(id, month, feb)?.keys().copied().collect::<Vec<_>>(), [27]);
         assert!(db.calendar_collection_rows(id, month, march)?.is_empty());
         db.set_collection_row_dates(

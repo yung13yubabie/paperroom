@@ -1,7 +1,7 @@
 name: Build unsigned Windows artifact
 on:
   push:
-    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125', 'dev/integration/pr1-11-notion-canvas-20261125']
     paths-ignore:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -401,7 +401,7 @@ jobs:
           Write-Host "Verified the same downloadable ZIP $env:PACKAGE_HASH and extracted EXE $env:EXE_HASH on Windows Server."
 
       - name: Verify the public v0.1.1 upgrade with the downloaded candidate EXE
-        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' }}
+        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' || github.ref == 'refs/heads/dev/integration/pr1-11-notion-canvas-20261125' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $legacy = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'Paperroom-v0.1.1.exe'

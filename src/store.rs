@@ -60,6 +60,8 @@ pub(crate) mod migration_media;
 pub(crate) mod vault_import_review;
 #[path = "notion_handoff.rs"]
 pub(crate) mod notion_handoff;
+#[path = "notion_page_links.rs"]
+mod notion_page_links;
 #[path = "notion_preview.rs"]
 pub(crate) mod notion_preview;
 #[path = "notion_relation_resolver.rs"]
@@ -117,7 +119,11 @@ pub use boards::DEFAULT_BOARD_ID;
 #[cfg(any(windows, test))]
 pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 
-const SCHEMA_VERSION: i32 = 30;
+#[cfg(test)]
+#[path = "integration_imports.rs"]
+mod integration_imports;
+
+const SCHEMA_VERSION: i32 = 31;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -368,6 +374,9 @@ impl Notebook {
         }
         if version < 30 {
             tx.execute_batch(collection_field_rules::SCHEMA)?;
+        }
+        if version < 31 {
+            tx.execute_batch(notion_page_links::SCHEMA)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -660,6 +669,13 @@ impl Notebook {
                     tx.execute("INSERT INTO vault_push_verified(note_id) VALUES(?1)", [parent])?;
                 }
             }
+            if let Some((part, source)) = csv.as_ref().and_then(|s| s.page_origins.get(&page.parts)) {
+                tx.execute(
+                    "INSERT INTO notion_page_paths(note_id,import_root,archive_part,relative_path)
+                     VALUES(?1,?2,?3,?4)",
+                    params![parent, root, part.as_deref().unwrap_or(""), source],
+                )?;
+            }
             media.attach(&tx, parent, &path)?;
         }
         if let Some(csv) = csv {
@@ -751,7 +767,13 @@ mod tests {
         Ok(())
     }
 
+    pub(super) fn remove_v30_schema(connection: &Connection) -> Result<()> {
+        connection.execute_batch("DROP TABLE notion_page_paths;")?;
+        Ok(())
+    }
+
     pub(super) fn remove_v29_schema(connection: &Connection) -> Result<()> {
+        remove_v30_schema(connection)?;
         connection.execute_batch("DROP TABLE collection_field_rules; DROP INDEX collection_notes_by_note;")?;
         Ok(())
     }

@@ -112,7 +112,7 @@ pub(super) fn has_expected_signature(kind: &str, data: &[u8]) -> bool {
 }
 
 #[cfg(windows)]
-fn require_local_volume(path: &Path) -> Result<()> {
+pub(super) fn require_local_volume(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Prefix};
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;

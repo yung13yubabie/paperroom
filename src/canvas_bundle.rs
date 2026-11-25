@@ -8,6 +8,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+#[cfg(any(windows, test))]
+#[path = "canvas_bundle_local.rs"]
+mod local;
+#[cfg(any(windows, test))]
+pub(crate) use local::LocalCanvasBundle;
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE canvas_bundles(
     canvas_id INTEGER PRIMARY KEY REFERENCES saved_canvases(id) ON DELETE CASCADE,
@@ -29,7 +35,7 @@ const TOTAL_ASSETS: i64 = 256 * 1024 * 1024;
 const MAX_PREVIEWS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CanvasAssetState { Stored(String), Missing, Ambiguous, Unsafe }
+pub(crate) enum CanvasAssetState { Stored(String), Missing, Ambiguous, Unsafe, Oversized }
 
 pub(crate) struct CanvasBundleImage {
     pub(crate) width: i32,
@@ -49,12 +55,18 @@ pub(crate) struct CanvasBundleReport {
 }
 impl CanvasBundleReport {
     pub(crate) fn summary(&self) -> String {
+        self.describe(false)
+    }
+
+    fn describe(&self, preview: bool) -> String {
         let mut text = format!("只保存可精確配對的附件；原始畫布資料照存。\r\n附件參照：{}；未知節點：{}（原始資料保留）。\r\n", self.references.len(), self.unknown_nodes);
         for (path, state) in self.references.iter().take(100) {
             let shown = path.chars().take(200).map(|c| if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { ' ' } else { c }).collect::<String>();
             let status = match state {
+                CanvasAssetState::Stored(_) if preview => "將保存",
                 CanvasAssetState::Stored(_) => "已保存", CanvasAssetState::Missing => "缺少",
-                CanvasAssetState::Ambiguous => "歧義", CanvasAssetState::Unsafe => "不安全或不在封裝內",
+                CanvasAssetState::Ambiguous => "歧義", CanvasAssetState::Unsafe => "無法安全讀取或不在匯入範圍",
+                CanvasAssetState::Oversized => "超過單一附件上限（16 MiB）",
             };
             text.push_str(&format!("\r\n{status}：{shown}"));
         }
@@ -117,10 +129,11 @@ fn resolve_indexed(raw: &str, canvas_path: &str, index: &PathIndex<'_>) -> Canva
 fn resolve_reference(raw: &str, canvas_path: &str, names: &BTreeSet<String>) -> CanvasAssetState {
     resolve_indexed(raw, canvas_path, &path_index(names))
 }
-fn report(doc: &canvas::Document, canvas_path: &str, names: &BTreeSet<String>) -> CanvasBundleReport {
+fn inspect_references(
+    doc: &canvas::Document, mut resolve: impl FnMut(&str) -> CanvasAssetState,
+) -> CanvasBundleReport {
     let mut references = BTreeMap::new();
     let mut unknown_nodes = 0;
-    let index = path_index(names);
     for node in doc.json()["nodes"].as_array().into_iter().flatten() {
         let key = match node["type"].as_str() {
             Some("file") => node["file"].as_str(),
@@ -129,10 +142,15 @@ fn report(doc: &canvas::Document, canvas_path: &str, names: &BTreeSet<String>) -
             _ => { unknown_nodes += 1; None }
         };
         if let Some(raw) = key {
-            references.entry(raw.into()).or_insert_with(|| resolve_indexed(raw, canvas_path, &index));
+            references.entry(raw.into()).or_insert_with(|| resolve(raw));
         }
     }
     CanvasBundleReport { references, unknown_nodes }
+}
+
+fn report(doc: &canvas::Document, canvas_path: &str, names: &BTreeSet<String>) -> CanvasBundleReport {
+    let index = path_index(names);
+    inspect_references(doc, |raw| resolve_indexed(raw, canvas_path, &index))
 }
 
 struct Input { archive: ZipArchive<File>, sizes: BTreeMap<String, usize>, _parents: Vec<File> }
@@ -254,10 +272,18 @@ impl Notebook {
         let doc = canvas::parse_bundle(String::from_utf8(input.read(path, *size)?)?)?;
         let names = input.sizes.keys().filter(|name| *name != path).cloned().collect();
         let report = report(&doc, path, &names);
-        let keep: BTreeSet<_> = report.references.values().filter_map(|state| match state {
-            CanvasAssetState::Stored(name) => Some(name.as_str()), _ => None,
+        let keep: BTreeMap<_, _> = report.references.values().filter_map(|state| match state {
+            CanvasAssetState::Stored(name) => Some((name.as_str(), input.sizes[name])), _ => None,
         }).collect();
-        let needed: i64 = keep.iter().map(|name| input.sizes[*name] as i64).sum();
+        let (id, title) = self.store_canvas_bundle(path, &doc, &names, keep, |name, size| input.read(name, size))?;
+        Ok(ImportedCanvasBundle { id, title, report })
+    }
+
+    fn store_canvas_bundle(
+        &self, path: &str, doc: &canvas::Document, names: &BTreeSet<String>,
+        keep: BTreeMap<&str, usize>, mut read: impl FnMut(&str, usize) -> Result<Vec<u8>>,
+    ) -> Result<(i64, String)> {
+        let needed: i64 = keep.values().map(|size| *size as i64).sum();
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let existing: i64 = tx.query_row("SELECT coalesce(sum(length(bytes)),0) FROM canvas_bundle_assets",
             [], |r| r.get(0))?;
@@ -276,14 +302,13 @@ impl Notebook {
         let id = tx.last_insert_rowid();
         tx.execute("INSERT INTO canvas_bundles(canvas_id,canvas_path,inventory) VALUES(?1,?2,?3)",
             params![id, path, serde_json::to_string(&names)?])?;
-        for name in keep {
-            let size = input.sizes[name];
-            let bytes = input.read(name, size)?;
+        for (name, size) in keep {
+            let bytes = read(name, size)?;
             tx.execute("INSERT INTO canvas_bundle_assets(canvas_id,path,bytes) VALUES(?1,?2,?3)",
                 params![id, name, bytes])?;
         }
         tx.commit()?;
-        Ok(ImportedCanvasBundle { id, title, report })
+        Ok((id, title))
     }
 
     fn canvas_bundle_source(&self, id: i64) -> Result<Option<(String, String, String)>> {
@@ -339,7 +364,7 @@ impl Notebook {
 
     pub(crate) fn export_canvas_bundle(&self, id: i64, output: &Path) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
-        let (canvas_path, raw, inventory) = self.canvas_bundle_source(id)?.ok_or("這份 Canvas 不含 ZIP 封裝。")?;
+        let (canvas_path, raw, inventory) = self.canvas_bundle_source(id)?.ok_or("這份 Canvas 不含附件封裝。")?;
         let names = self.canvas_bundle_paths(id)?;
         if !portable(&canvas_path) || !canvas_name(&canvas_path) || names.iter().any(|n| !portable(n) || n == &canvas_path) {
             return Err("Canvas ZIP 的儲存路徑無效。".into());

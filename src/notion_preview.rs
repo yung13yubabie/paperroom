@@ -2,7 +2,7 @@
 //! edit any workspace, or suggest edges without explicitly approved page/column scope.
 
 use super::csv_table::parse_csv_preview;
-use super::notion_handoff::{CsvSources, windows_zip_path};
+use super::notion_handoff::CsvSources;
 use super::notion_relation_resolver as relation;
 pub(crate) use super::notion_relation_resolver::{CellEncoding, Part};
 use super::snapshot_sha256::sha256;
@@ -168,11 +168,10 @@ impl NotionPreviewSession {
         // Read and identify only one bounded snapshot, even if the user replaces
         // the filename on disk while the dialog is open.
         let mut sources = CsvSources::default();
-        let imported = read_archive_snapshot(snapshot, None, Some(&mut sources))?;
+        read_archive_snapshot(snapshot, None, Some(&mut sources))?;
         let archive_sha256 = sha256(snapshot);
         let mut pages = BTreeMap::new();
-        for (part, path) in &imported.notion_members {
-            if !windows_zip_path(path) { continue; }
+        for (part, path) in sources.page_origins.values() {
             let Some(id) = page_candidate(path) else { continue; };
             let member = Member::new(part.as_deref(), path);
             if pages.insert(member.clone(),PageChoice { member, page_id_candidate:id.into(),archive_sha256 }).is_some() {

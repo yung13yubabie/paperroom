@@ -273,6 +273,27 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn import_local_canvas_ui(&mut self) -> Result<()> {
+        unsafe {
+            let Some(path) = file_dialog(self.hwnd, "JSON Canvas\0*.canvas\0\0", "canvas", None)? else {
+                return Ok(());
+            };
+            let preview = crate::store::canvas_bundle::LocalCanvasBundle::read(&path)?;
+            if !crate::dialog::preview_decision(
+                self.hwnd, "預覽 Canvas 與同資料夾附件", &preview.description(),
+                "確認匯入", "取消匯入",
+            )? { return Ok(()); }
+            self.mutate(|app| {
+                let (id, title) = preview.save(&app.notebook)?;
+                let doc = app.notebook.read_canvas(id)?;
+                app.activate_canvas(id, title, doc, None)?;
+                label(app.widgets.status, "已匯入 Canvas 與同資料夾附件。");
+                Ok(())
+            });
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn import_canvas_bundle_ui(&mut self) -> Result<()> {
         unsafe {
             let Some(path) = file_dialog(self.hwnd, "JSON Canvas ZIP\0*.zip\0\0", "zip", None)? else {
@@ -294,7 +315,7 @@ impl App {
         &mut self, id: i64, anchor: Option<&str>, syntax: crate::markdown::AnchorSyntax,
     ) -> Result<()> {
         unsafe {
-            if let Some(anchor) = anchor.filter(|anchor| anchor.starts_with("#^")) {
+            if let Some(anchor) = anchor.filter(|anchor| syntax != crate::markdown::AnchorSyntax::NotionMarkdown && anchor.starts_with("#^")) {
                 self.preview_block_link(id, anchor)
             } else {
                 self.open_note_destination(id, anchor, syntax, true)
@@ -327,7 +348,7 @@ impl App {
                 self.present();
             }
             let body = &self.current.as_ref().unwrap().body;
-            let (section, selection) = if anchor.starts_with("#^") {
+            let (section, selection) = if syntax != crate::markdown::AnchorSyntax::NotionMarkdown && anchor.starts_with("#^") {
                 match resolve_block(body, anchor) {
                     BlockLookup::Found { source, .. } => {
                         let selection = if select_source {
@@ -711,6 +732,9 @@ impl App {
                 if origin.is_some() {
                     options.push((9, "查看匯入來源路徑"));
                 }
+                if crate::store::notion_handoff::is_notion_csv(&file.name, origin.as_deref()) {
+                    options.push((10, "從 Notion CSV 建立新集合…"));
+                }
                 let action = popup(hwnd, anchor, None, &options);
                 match action {
                     1 => {
@@ -777,6 +801,16 @@ impl App {
                     }
                     7 => self.open_pdf_view(file.id, 1)?,
                     8 => self.jump_pdf_annotation(file.id, anchor)?,
+                    10 => {
+                        let Some(title) = crate::dialog::prompt(
+                            hwnd, "從 Notion CSV 建立新集合",
+                            "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）", "", 120,
+                        )? else { return Ok(()); };
+                        let (id, count) = self.notebook.create_collection_from_notion_csv(note, file.id, &title)?;
+                        self.rebuild();
+                        self.open_kanban(id, title.trim().to_owned())?;
+                        label(self.widgets.status, &format!("已建立集合，匯入 {count} 列。原始 CSV 已保留。"));
+                    }
                     9 => {
                         if let Some(path) = origin {
                             crate::dialog::show_text(hwnd, "匯入時的相對附件路徑", &path)?;

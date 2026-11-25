@@ -170,7 +170,7 @@ jobs:
           git merge-base --is-ancestor $env:PINNED_SOURCE $head
           if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
           $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
-          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1', 'scripts/windows-about-notices.ps1')
+          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
           if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
           }

@@ -10,9 +10,9 @@
 
 工作中的資料庫請放在本機磁碟；程式可離線使用，SQLite 已編入執行檔。執行檔尚未經 Authenticode 簽章，受管理電腦的執行政策可能禁止開啟。
 
-![首次開啟紙間，左側有示範筆記，右側是歡迎頁](docs/screenshots/first-launch.png)
+![首次開啟紙間，左側有示範筆記，右側是歡迎頁](docs/screenshots/candidate-first-launch-msvc.png)
 
-圖中是 v0.1.1 在斷網的 Wine 10 測試環境中首次啟動的畫面。測試使用 Noto Sans CJK TC 顯示繁體中文。
+圖為 [Windows Server 2022 的原生 MSVC 測試版](https://github.com/yung13yubabie/paperroom/actions/runs/45524897467)；擷取的是全新工作區，只有內建示範資料。
 
 ## 建立和整理筆記
 
@@ -37,7 +37,7 @@
 
 ## 匯入、匯出與備份
 
-以下為此分支的候選版操作。已發布的 v0.1.1 與上方舊版截圖不包含所有新選單。
+以下為此分支的候選版操作。已發布的 v0.1.1 不包含所有新選單。
 
 - **匯入 Markdown**：選擇 **檔案 → 匯入 Markdown**，讀取 UTF-8 編碼的 `.md` 或 `.markdown` 檔案。
 - **匯入 Notion**：在 Notion 匯出時選擇 **Markdown & CSV** 並勾選 **Include subpages**，再於紙間選擇 **匯入 Notion Markdown ZIP**。紙間依包內路徑建立 Markdown 頁面與子頁，保留可辨識的包內附件及原始 CSV，並列出未能匯入的項目。

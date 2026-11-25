@@ -10,9 +10,9 @@
 
 紙間採單一執行檔與本機儲存設計，不依賴雲端同步。候選版的啟動測試在 Windows Server 持續整合環境執行，尚未在乾淨且斷網的 Windows 10／11 電腦實測。執行檔尚未做 Authenticode 簽章，受管電腦的執行政策可能禁止開啟。
 
-![紙間首次啟動，左側為示範筆記、右側為歡迎頁](screenshots/first-launch.png)
+![紙間首次啟動，左側為示範筆記、右側為歡迎頁](screenshots/candidate-first-launch-msvc.png)
 
-圖為 v0.1.1 在斷網 Wine 測試環境的畫面，只用來辨認基本介面。
+首次開啟時，左側是筆記清單，右側是內建歡迎筆記；下方顯示「已儲存至此電腦」。這張圖拍攝於原生 Windows Server 測試，未代表乾淨斷網的 Windows 10／11 已驗收。
 
 ## 寫一頁筆記
 

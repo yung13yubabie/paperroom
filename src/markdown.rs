@@ -354,3 +354,57 @@ fn displays_standard_callouts_and_keeps_unknown_markers_literal() {
     assert!(rendered.contains("[!custom] My label"));
     assert!(!rendered.contains("[!warning]"));
 }
+
+#[cfg(test)]
+mod note_format_roundtrip_tests {
+    #[test]
+    fn note_format_survives_storage_reading_view_and_markdown_export() -> crate::store::Result<()> {
+        use crate::store::Notebook;
+        use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = loop {
+            let candidate = std::env::temp_dir().join(format!(
+                "paperroom-inline-format-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let result = (|| -> crate::store::Result<()> {
+            let workspace = dir.join("notes.sqlite3");
+            let export = dir.join("sample.md");
+            let title = "筆記格式保留";
+            let body = concat!(
+                "**Bold 粗😀** and *Italic 斜* then ~~Strike 刪~~.\n\n",
+                "==literal-mark== and `==code-mark==` and \\=\\=escaped-mark\\=\\=.\n",
+            );
+            let mut notebook = Notebook::open(&workspace, false)?;
+            let id = notebook.add(None, title, "initial")?;
+            let version = notebook.note(id)?.ok_or("initial note missing")?.version;
+            let saved = notebook.save(id, version, title, body)?;
+            drop(notebook);
+
+            let notebook = Notebook::open(&workspace, false)?;
+            let note = notebook.note(id)?.ok_or("saved note missing")?;
+            assert_eq!(note.version, saved);
+            assert_eq!(note.row.title, title);
+            assert_eq!(note.body.as_bytes(), body.as_bytes());
+            let rtf = super::preview(&note.body);
+            assert!(rtf.contains(r"{\b Bold ") && rtf.contains(r"{\i Italic ")
+                 && rtf.contains(r"{\strike Strike "));
+            assert!(rtf.contains("==literal-mark==") && rtf.contains("==escaped-mark=="));
+            assert!(rtf.contains(r"{\f1\cf4 ==code-mark==}"));
+            crate::archive::export_note(&export, &note.row.title, &note.body)?;
+            assert_eq!(fs::read(&export)?, format!("# {title}\n\n{body}").as_bytes());
+            let imported = crate::archive::markdown(&export)?;
+            assert_eq!(imported.title, title);
+            assert_eq!(imported.body.as_bytes(), body.as_bytes());
+            Ok(())
+        })();
+        fs::remove_dir_all(dir)?;
+        result
+    }
+}

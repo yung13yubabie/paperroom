@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-const MAX_ZIP_BYTES: u64 = 120 * 1024 * 1024;
+pub(crate) const MAX_ZIP_BYTES: u64 = 120 * 1024 * 1024;
 const MAX_TOTAL_TEXT_BYTES: u64 = 80 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 15_000;
 const MAX_DEPTH: usize = 64;
@@ -146,7 +146,7 @@ pub(crate) fn read_archive_snapshot(
     Ok(result)
 }
 
-fn read_bounded(entry: impl Read, limit: u64) -> Result<Vec<u8>> {
+pub(crate) fn read_bounded(entry: impl Read, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     entry.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {

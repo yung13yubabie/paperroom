@@ -43,7 +43,8 @@ jobs:
         run: |
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
           $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
-          $flags = @('-C', 'link-arg=/PDBALTPATH:%_PDB%')
+          # Encoded flags replace, rather than extend, the target Cargo config.
+          $flags = @('-C', 'target-feature=+crt-static', '-C', 'link-arg=/PDBALTPATH:%_PDB%')
           $roots = @{ '/paperroom' = $env:GITHUB_WORKSPACE; '/cargo' = $cargoHome; '/toolchain' = $rustupHome; '/build-temp' = $env:RUNNER_TEMP }
           foreach ($token in $roots.Keys | Sort-Object { $roots[$_].Length }) {
             $path = [IO.Path]::GetFullPath($roots[$token]).TrimEnd('\', '/')
@@ -70,6 +71,7 @@ jobs:
           Copy-Item -LiteralPath $built -Destination $exe
           python ./scripts/windows-candidate.py audit $exe
           if ($LASTEXITCODE -ne 0) { throw 'Executable privacy audit failed.' }
+          ./scripts/assert-windows-system-crt.ps1 -Exe $exe
           $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
           $fixedFile = $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart -join '.'
           $fixedProduct = $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart -join '.'

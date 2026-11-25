@@ -29,6 +29,9 @@ jobs:
         run: cargo test --locked --target x86_64-pc-windows-msvc
       - name: Build Windows x64 smoke-test binary
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Check the candidate for VC runtime DLL imports
+        shell: pwsh
+        run: ./scripts/assert-windows-system-crt.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
       - name: Fetch and verify the pinned public v0.1.1 upgrade baseline
         id: legacy
         shell: pwsh

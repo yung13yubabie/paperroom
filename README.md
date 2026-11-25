@@ -57,7 +57,9 @@ SQLite 的 WAL 和 SHM 是資料庫運作的一部分，不要手動刪除。筆
 
 ## 從原始碼建置
 
-Windows 開發者可安裝 Rust 及 Windows GNU 工具鏈，再執行：
+新的 Windows x64 候選檔使用 Rust 1.100.0 與 Visual Studio C++（MSVC）工具鏈。建置採用靜態 VC 執行階段，CI 會檢查候選 EXE 是否仍直接匯入另行安裝的 VC 執行階段 DLL。此檢查不能取代乾淨 Windows 客戶端的斷網實測，也不等於完成再散布清單。
+
+Windows GNU 工具鏈可供開發與交叉編譯；它不是上述 MSVC 候選檔的建置方式：
 
 ```powershell
 cargo build --locked --release --target x86_64-pc-windows-gnu

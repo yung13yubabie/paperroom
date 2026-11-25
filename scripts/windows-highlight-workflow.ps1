@@ -1564,6 +1564,13 @@ print('Reopened SQLite preserves the two original imports and the independent re
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkSender'
     }
     Native-Menu 120 3 '前往　到標題 #細節' -CaptionPrefix
+    $dialog = Wait-For 'native Markdown heading excerpt' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#細節',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $dialog 101)).Contains('乙的原文')) {
+        throw 'The Markdown heading preview did not show the expected same-name source.'
+    }
+    Finish-Revision $dialog 1
     Assert-SearchSelection 104 '# 細節' '標題連結：第 1 行，細節'
     Native-Menu 120 2 '反向連結　LinkSender　｜ 現場/LinkSender.md' -CaptionPrefix
     $null = Wait-For 'returned from heading to backlink source' {

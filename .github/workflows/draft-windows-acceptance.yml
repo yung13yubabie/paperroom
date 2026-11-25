@@ -1,7 +1,7 @@
 name: Verify pinned draft Windows candidate
 on:
   push:
-    branches: ['dev/offline-workspace-handoff']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**']
     paths:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   acceptance:
-    if: github.repository == 'yung13yubabie/paperroom'
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/offline-workspace-handoff'
     runs-on: windows-2022
     timeout-minutes: 18
     defaults:
@@ -153,9 +153,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: c08ff78daefae72f93fd09e421b0f3e616e1d230
-      PINNED_EXE_SHA: ae33a30d36ee2ef62c5197ecd13482cc5b6a88ea193e0c3ff525c4cf29c13d22
-      PINNED_ZIP_SHA: cce012ff858427540fe05421a54503ac3498040061dff4c43d588b4e2213ef82
+      PINNED_SOURCE: 900115351e09158b275b6d0c23c509ef2a249e3a
+      PINNED_EXE_SHA: 8849c2f745322e9b42265fcdef826a99f18c4d901fae81de4185fd4e590ba804
+      PINNED_ZIP_SHA: 5c89aec94dbfa6779dbbba3117416dac15c69645bcb3889f041d97780fac94fe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -170,7 +170,7 @@ jobs:
           git merge-base --is-ancestor $env:PINNED_SOURCE $head
           if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
           $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
-          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1', 'scripts/windows-about-notices.ps1')
+          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
           if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
           }
@@ -180,11 +180,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15016141093"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15017793333"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45600579227 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45605590055 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'

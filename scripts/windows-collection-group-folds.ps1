@@ -19,10 +19,10 @@ function Open-GroupView([string]$Caption) {
     Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
     Native-Menu 120 1 $Caption -MenuOpen
 }
-function Assert-GroupRows([string[]]$Expected) {
+function Assert-GroupRows([string[]]$Expected, [string]$Status = '待處理') {
     Native-Menu 120 3 '開啟資料列…'
     $actual = @(foreach ($text in @(Collection-MenuLabels)) {
-        if ($text -cnotmatch '^待處理　(.+)  \(\d+\)$') { throw "Unexpected collection row: $text" }
+        if ($text -cnotmatch ('^' + [regex]::Escape($Status) + '　(.+)  \(\d+\)$')) { throw "Unexpected collection row: $text" }
         $Matches[1]
     })
     if (($actual -join '|') -cne ($Expected -join '|')) { throw "Wrong visible order: [$actual], expected [$Expected]" }

@@ -1,7 +1,7 @@
 name: Build unsigned Windows artifact
 on:
   push:
-    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125', 'dev/integration/pr1-11-notion-canvas-20261125', 'dev/integration/pr1-12-readiness-20261125']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125', 'dev/integration/pr1-11-notion-canvas-20261125', 'dev/integration/pr1-12-readiness-20261125', 'dev/integration/pr13-16-readiness-20261125']
     paths-ignore:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -401,7 +401,7 @@ jobs:
           Write-Host "Verified the same downloadable ZIP $env:PACKAGE_HASH and extracted EXE $env:EXE_HASH on Windows Server."
 
       - name: Verify the public v0.1.1 upgrade with the downloaded candidate EXE
-        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' || github.ref == 'refs/heads/dev/integration/pr1-11-notion-canvas-20261125' || github.ref == 'refs/heads/dev/integration/pr1-12-readiness-20261125' }}
+        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' || github.ref == 'refs/heads/dev/integration/pr1-11-notion-canvas-20261125' || github.ref == 'refs/heads/dev/integration/pr1-12-readiness-20261125' || github.ref == 'refs/heads/dev/integration/pr13-16-readiness-20261125' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $legacy = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'Paperroom-v0.1.1.exe'
@@ -419,12 +419,18 @@ jobs:
         id: gui
         if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         run: |
-          if ($env:GITHUB_REF -ceq 'refs/heads/dev/integration/pr1-12-readiness-20261125') {
+          $joint = $env:GITHUB_REF -ceq 'refs/heads/dev/integration/pr13-16-readiness-20261125'
+          if ($joint) {
+            $env:PAPERROOM_GROUP_HISTORY_RECEIPT = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'group-history-restore.json'
+          }
+          if ($joint -or $env:GITHUB_REF -ceq 'refs/heads/dev/integration/pr1-12-readiness-20261125') {
             $env:PAPERROOM_VAULT_RESTORE_RECEIPT = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'vault-restore.json'
           }
           ./scripts/windows-highlight-workflow.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:EXE_HASH
-          if ($env:PAPERROOM_VAULT_RESTORE_RECEIPT -and !(Test-Path -LiteralPath $env:PAPERROOM_VAULT_RESTORE_RECEIPT -PathType Leaf)) {
-            throw 'The full native suite did not produce the Vault restore receipt.'
+          foreach ($receipt in @($env:PAPERROOM_VAULT_RESTORE_RECEIPT, $env:PAPERROOM_GROUP_HISTORY_RECEIPT)) {
+            if ($receipt -and !(Test-Path -LiteralPath $receipt -PathType Leaf)) {
+              throw 'The full native suite did not produce a required restore receipt.'
+            }
           }
 
       - name: Retain the actual Vault restore receipt
@@ -433,6 +439,16 @@ jobs:
         with:
           name: Paperroom-Vault-Restore-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/vault-restore.json
+          if-no-files-found: error
+
+      - name: Retain native integration and isolated backup evidence
+        if: ${{ steps.gui.outcome == 'success' && github.ref == 'refs/heads/dev/integration/pr13-16-readiness-20261125' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-PR13-16-Integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/vault-restore.json
+            ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/group-history-restore.json
           if-no-files-found: error
 
       - name: Remove the downloaded QA inputs

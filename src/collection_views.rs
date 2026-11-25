@@ -1601,6 +1601,10 @@ fn decimal_order(a:&str,b:&str) -> std::cmp::Ordering {
 mod due_filters_tests;
 
 #[cfg(test)]
+#[path = "collection_history_integration_tests.rs"]
+mod history_integration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn day(raw: &str) -> CalendarDay { CalendarDay::parse(raw).unwrap() }

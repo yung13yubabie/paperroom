@@ -169,7 +169,7 @@
 | 快速切換器 | 部分 | F7 依標題、來源路徑或完整別名打開指定筆記，也可用 tag:#父層 找含子標籤的匯入筆記。模糊排序、快速新建及新分頁待做。 | [官方](https://obsidian.md/help/plugins/quick-switcher) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 大綱 | 部分 | F8 依標題層級與行號列出已保存內容或目前草稿，可跳到同名標題的精確位置。拖曳重新排序段落待做。 | [官方](https://obsidian.md/help/plugins/outline) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 懸浮頁面預覽 | 未實作 | 沒有上述獨立入口。 | [官方](https://obsidian.md/help/plugins/page-preview) · [window.rs](../src/window.rs) |
-| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可框選節點整批移動、新增或刪除連線，並在重開後復原最近一步。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出。畫布可保存各自的平移與縮放。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [Canvas 操作](UI-ACCEPTANCE.md#canvas-框選復原與搬移) |
+| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可框選節點整批移動、新增或刪除連線，並在重開後復原最近一步。可從框選建立具名群組，拖群組時一起移動框內節點，並以標準 `group` 節點匯入與匯出。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出。畫布可保存各自的平移與縮放。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [Canvas 操作](UI-ACCEPTANCE.md#canvas-框選復原與搬移) |
 | 文字節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 檔案節點 | 部分 | 核對 Vault 搬移時，可在同一交易更新綁定該批次的檔案節點。保留原節點 ID、子路徑和未知欄位。原磁碟檔由外部工具管理。自動監聽待做。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 連結節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |

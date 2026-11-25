@@ -750,6 +750,43 @@ function Read-CanvasInk([int]$Red = 237, [int]$Green = 33, [int]$Blue = 125) {
         } finally { $bitmap.UnlockBits($pixels) }
     } finally { $bitmap.Dispose() }
 }
+function Assert-NamedCanvasGroup([string]$Database, [string]$Title, [string]$Source, [string]$Grouped, [string]$Exported, [string]$Phase) {
+    @'
+from contextlib import closing
+from pathlib import Path
+import json, sqlite3, sys
+
+database,title,source,grouped,exported,phase=sys.argv[1:]
+before=json.loads(Path(source).read_bytes())
+grouped_bytes=Path(grouped).read_bytes()
+moved_bytes=Path(exported).read_bytes()
+doc=json.loads(grouped_bytes)
+assert len(doc["nodes"])==5
+group=doc["nodes"].pop(0)
+assert group=={"id":"paperroom-node-1","type":"group","label":"\u7814\u7a76\u5206\u93e1 \U0001f4cc",
+               "x":20,"y":26,"width":329,"height":176}
+assert doc==before, "Original group metadata, card order, edges or extensions were lost"
+moved=json.loads(moved_bytes)
+assert len(moved["nodes"])==5
+delta=[moved["nodes"][0][key]-group[key] for key in ("x","y")]
+assert all(12 < shift < 58 for shift in delta), delta
+doc["nodes"].insert(0,group)
+for node in doc["nodes"][:4]:
+    for key,shift in zip(("x","y"),delta):
+        node[key]+=shift
+assert moved==doc, "Moved nodes differ beyond one translation or the partly overlapping card moved"
+with closing(sqlite3.connect(Path(database).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    rows=db.execute("SELECT c.source,u.source FROM saved_canvases c LEFT JOIN canvas_edit_undo u "
+                    "ON u.canvas_id=c.id WHERE c.title=?", (title,)).fetchall()
+assert len(rows)==1
+raw,undo=rows[0]
+assert raw.encode("utf-8")== (grouped_bytes if phase=="undone" else moved_bytes)
+assert undo== (grouped_bytes.decode("utf-8") if phase=="moved" else None)
+print(f"Named group {phase}: standard fields, exact bytes, preserved nested group and edges, consistent group translation.")
+'@ | python - $Database $Title $Source $Grouped $Exported $Phase
+    if ($LASTEXITCODE -ne 0) { throw "Named Canvas group failed its independent document and workspace checks ($Phase)." }
+}
 function Read-CanvasStamp([string]$Database, [string]$Source) {
     $stamp = @'
 from pathlib import Path
@@ -1439,6 +1476,94 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: physical Canvas marquee, canceled drag, equal group movement, reopen and Ctrl+Z, connect/disconnect and Undo, and exact export to a second workspace.'
+
+    $groupFile = Join-Path $root 'CanvasGroupFixture.canvas'
+    $groupBefore = Join-Path $root 'CanvasGroupBefore.canvas'
+    $groupExport = Join-Path $root 'CanvasGroupReadback.canvas'
+    $groupJson = '{"nodes":[{"id":"inner","type":"group","x":44,"y":50,"width":133,"height":96,"label":"內層","color":"#12a474","background":"assets/frame.png","backgroundStyle":"ratio","vendor":true},{"id":"a","type":"text","x":60,"y":75,"width":100,"height":55,"text":"鏡頭 A","color":"#ed217d"},{"id":"b","type":"text","x":235,"y":118,"width":90,"height":60,"text":"鏡頭 B","color":"#047bea"},{"id":"outside","type":"text","x":310,"y":158,"width":90,"height":60,"text":"部分相交","color":"#6f5092"}],"edges":[{"id":"e","fromNode":"a","toNode":"outside","label":"保留連線","color":"#a2572e","vendor":123}],"vendor":{"script":"合成測資"}}'
+    [IO.File]::WriteAllText($groupFile,$groupJson,[Text.UTF8Encoding]::new($false))
+    $groupInputHash=(Get-FileHash -LiteralPath $groupFile).Hash
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $groupFile '中鍵拖曳平移'
+    $inner = Wait-For 'original standard group is actually painted' { Read-CanvasInk 18 164 116 }
+    $second = Wait-For 'second card is actually painted' { Read-CanvasInk 4 123 234 }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $errorDialog = Wait-For 'empty selection refusal' { [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間') }
+    if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'請先框選要放入群組的節點')) {
+        throw 'The empty selection refusal was missing.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'closed the selection refusal' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
+    Drag-Canvas ($inner.ScreenX+$inner.L-5) ($inner.ScreenY+$inner.T-5) ($second.ScreenX+$second.R+5) ($second.ScreenY+$second.B+5)
+    $null = Wait-For 'marquee selected the nested frame and two cards' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 3 個畫布節點。'
+    }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $prompt = Wait-For 'native group name prompt' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','建立 Canvas 群組',1)
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
+    $null = Wait-For 'canceled group name prompt' { ![PaperroomHighlightGui]::IsWindowVisible($prompt) }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $prompt = Wait-For 'name prompt after cancellation' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','建立 Canvas 群組',1)
+    }
+    Type-SearchFilter $prompt 101 '研究分鏡 📌'
+    Finish-Revision $prompt 1
+    $null = Wait-For 'named group saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。' }
+    Native-Menu 120 8 '將畫布調整至視窗'
+    $outer = Wait-For 'painted named group border' { Read-CanvasInk 23 98 78 }
+    Native-Menu 120 1 '匯出原始 JSON Canvas…'
+    Native-File 1 '匯出原始 JSON Canvas…' $groupBefore '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave
+    $groupX = $outer.ScreenX+$outer.L+20
+    $groupY = $outer.ScreenY+$outer.T+6
+    Drag-Canvas $groupX $groupY ($groupX+50) ($groupY+32) -Cancel
+    $null = Wait-For 'canceled physical drag restored the frame position' {
+        $ink = Read-CanvasInk 23 98 78
+        $ink -and $ink.L -eq $outer.L -and $ink.T -eq $outer.T
+    }
+    Drag-Canvas $groupX $groupY ($groupX+50) ($groupY+32)
+    $null = Wait-For 'dragging the outer frame saved a single Canvas edit' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。'
+    }
+    Native-Menu 120 1 '匯出原始 JSON Canvas…'
+    Native-File 1 '匯出原始 JSON Canvas…' $groupExport '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-Menu 109 12 '開啟已匯入的 Canvas…'
+    Native-Menu 109 2 'CanvasGroupFixture' -MenuOpen
+    $null = Wait-For 'reopened Canvas group painted' { Read-CanvasInk 23 98 78 }
+    Assert-NamedCanvasGroup $liveDb 'CanvasGroupFixture' $groupFile $groupBefore $groupExport 'moved'
+    $surface = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+    $x=$surface.Right-10
+    $y=$surface.Bottom-10
+    Drag-Canvas $x $y $x $y
+    $null = Wait-For 'reopened Canvas has focus' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 0 個畫布節點。'
+    }
+    [PaperroomHighlightGui]::CanvasUndoKey($window,$process.Id)
+    $null = Wait-For 'Ctrl+Z reverted the group move after reopen' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已復原上一次 Canvas 修改。'
+    }
+    Assert-NamedCanvasGroup $liveDb 'CanvasGroupFixture' $groupFile $groupBefore $groupExport 'undone'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $restored
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $groupExport '中鍵拖曳平移'
+    $null = Wait-For 'standard moved group painted in a separate workspace' { Read-CanvasInk 23 98 78 }
+    Assert-NamedCanvasGroup $restoreDb 'CanvasGroupReadback' $groupFile $groupBefore $groupExport 'imported'
+    if ((Get-FileHash -LiteralPath $groupFile).Hash -cne $groupInputHash) { throw 'Source .canvas was changed.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native named Canvas group from a physical marquee, nested frame and fully enclosed cards translate together, overlap is left in place, empty selection and Escape preserve data, Ctrl+Z after reopening, and standard .canvas export and reimport into a separate workspace.'
 
     $searchVault = Join-Path $root 'SearchFixture'
     $folder = Join-Path $searchVault '製片'

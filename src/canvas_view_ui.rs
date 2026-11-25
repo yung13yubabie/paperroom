@@ -19,15 +19,13 @@ pub(super) struct Drag {
 
 enum DragAction {
     Marquee,
-    Move,
+    Move { ids: HashSet<String>, geometries: Vec<Geometry> },
     Resize { id: String, original: Geometry },
 }
 
-fn selected_offset(view: &Canvas, drag: &Drag) -> [i64; 2] {
+fn drag_offset(drag: &Drag, geometries: &[Geometry]) -> [i64; 2] {
     projection::move_offset(drag.projection.drag_offset(drag.start, drag.current),
-        projection::nodes(&view.doc).filter_map(|(node, geometry)| {
-            node["id"].as_str().filter(|id| view.selection.contains(*id)).map(|_| geometry)
-        }))
+        geometries.iter().copied())
 }
 
 unsafe fn frame(dc: HDC, rect: RECT, accent: u32) {
@@ -241,7 +239,8 @@ impl App {
                                         view.selection.clear();
                                         view.selection.insert(id.to_owned());
                                     }
-                                    DragAction::Move
+                                    let (ids, geometries) = projection::move_nodes(&view.doc, &view.selection);
+                                    DragAction::Move { ids, geometries }
                                 }
                                 None => DragAction::Marquee,
                             };
@@ -280,10 +279,10 @@ impl App {
                                 label(self.widgets.status, &format!("已選取 {} 個畫布節點。", view.selection.len()));
                                 return Ok(());
                             }
-                            DragAction::Move => {
-                                let offset = selected_offset(view, &drag);
+                            DragAction::Move { ids, geometries } => {
+                                let offset = drag_offset(&drag, geometries);
                                 if offset == [0, 0] { return Ok(()); }
-                                CanvasEdit::Translate { ids: &view.selection, offset }
+                                CanvasEdit::Translate { ids, offset }
                             }
                             DragAction::Resize { id, original } => {
                                 let offset = drag.projection.drag_offset(drag.start, point);
@@ -316,8 +315,10 @@ impl App {
                     pan.projection.pan(pan.start, pan.current, self.dpi)));
             let drag = view.drag.as_ref()
                 .filter(|drag| drag.projection.area == area && drag.projection.inset == inset);
-            let offset = drag.filter(|drag| matches!(drag.action, DragAction::Move))
-                .map_or([0, 0], |drag| selected_offset(view, drag));
+            let move_preview = drag.and_then(|drag| match &drag.action {
+                DragAction::Move { ids, geometries } => Some((ids, drag_offset(drag, geometries))),
+                _ => None,
+            });
             let grip_size = self.scaled(10);
             let mut places = HashMap::new();
             let mut cards = Vec::new();
@@ -330,7 +331,9 @@ impl App {
                     let delta = drag.projection.drag_offset(drag.start, drag.current);
                     if delta != [0, 0] { geometry = projection::resize(*original, delta); }
                 }
-                if view.selection.contains(id) {
+                if let Some((ids, offset)) = move_preview
+                    && ids.contains(id)
+                {
                     geometry[0] += offset[0];
                     geometry[1] += offset[1];
                 }

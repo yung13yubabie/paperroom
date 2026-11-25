@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Exe,
-    [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256
+    [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
+    [switch]$ProvePortableLinkGap
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1655,6 +1656,92 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native Markdown note and heading links, precise backlinks with source path, no result, stable same-name insertion, rename and reopen, trash without retargeting, restoration and preserved source file.'
+
+    if ($ProvePortableLinkGap) {
+        $portableSource = Join-Path $root 'PortableFixture'
+        $portableFiles = Join-Path $portableSource '場'
+        $portableLive = Join-Path $root 'portable-origin'
+        $portableNew = Join-Path $root 'portable-destination'
+        foreach ($folder in $portableFiles,$portableLive,$portableNew) {
+            [void][IO.Directory]::CreateDirectory($folder)
+        }
+        foreach ($folder in $portableLive,$portableNew) { Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe') }
+        $plain = "[相對引用](./PortableB.md)`r`n"
+        $originalA = Join-Path $portableFiles 'PortableA.md'
+        [IO.File]::WriteAllText($originalA,$plain,[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $portableFiles 'PortableB.md'),'精確的 B 內容',[Text.UTF8Encoding]::new($false))
+        $portableZip = Join-Path $root 'PortableFixture.zip'
+        $process = Start-Notebook $portableLive
+        $window = $process.MainWindowHandle
+        Native-VaultFolder $portableSource '附件綁定 0 筆，未解析 0 筆'
+        Open-LinkedFixture 'PortableA' '場'
+        Find-LinkTarget '場/PortableB.md'
+        Native-Menu 120 1 'PortableB　匯入：PortableFixture' -MenuOpen -CaptionPrefix
+        $null = Wait-For 'selector created the scoped note link' {
+            [PaperroomHighlightGui]::Read((Control $window 104)) -cmatch '\[\[paperroom:note:\d+:[0-9a-f]{32}\|PortableB\]\]' -and
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+        }
+        Native-Menu 120 3 '前往　PortableB　｜ PortableB' -CaptionPrefix
+        $null = Wait-For 'scope link opens B before rename' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableB' }
+        Click-WorkspaceButton 110
+        $null = Wait-For 'B editor visible' { [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) }
+        Replace-EditorText (Control $window 103) 'PortableRenamed'
+        $null = Wait-For 'B rename persisted' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦' }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = Start-Notebook $portableLive
+        $window = $process.MainWindowHandle
+        Open-LinkedFixture 'PortableA' '場'
+        Native-Menu 120 2 '前往　相對引用　｜ PortableRenamed' -CaptionPrefix
+        $null = Wait-For 'relative link opens B after a title-only change and restart' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed'
+        }
+        Native-Menu 120 2 '反向連結　PortableA' -CaptionPrefix
+        $null = Wait-For 'returned to A' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableA' }
+        Native-Menu 120 3 '前往　PortableB　｜ PortableRenamed' -CaptionPrefix
+        $null = Wait-For 'scoped link opens the same B after rename and restart' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed'
+        }
+        Native-Menu 109 34 '匯出 Vault ZIP（含來源附件）…'
+        Native-Menu 109 1 '匯入：PortableFixture  (#' -MenuOpen -CaptionPrefix
+        Native-File 34 '匯出 Vault ZIP（含來源附件）…' $portableZip '已匯出 2 篇 Markdown 與 0 個來源附件。' -AlreadyOpened
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        $portableUnpacked = Join-Path $root 'PortableReadback'
+        @'
+from pathlib import Path
+from zipfile import ZipFile
+import re,sys
+parent="\u5834"
+with ZipFile(sys.argv[1]) as z:
+    assert set(z.namelist()) == {f"{parent}/PortableA.md",f"{parent}/PortableB.md"}
+    assert z.testzip() is None
+    a=z.read(f"{parent}/PortableA.md")
+    assert b"./PortableB.md" in a and re.search(rb'paperroom:note:\d+:[0-9a-f]{32}\|PortableB',a)
+    z.extractall(sys.argv[2])
+print("Baseline export contains both reference types and exactly two Markdown members.")
+'@ | python - $portableZip $portableUnpacked
+        if ($LASTEXITCODE -ne 0) { throw 'Actual baseline Vault ZIP failed its two-note check.' }
+        $process = Start-Notebook $portableNew
+        $window = $process.MainWindowHandle
+        Native-VaultFolder $portableUnpacked '附件綁定 0 筆，未解析 0 筆'
+        Open-LinkedFixture 'PortableA' '場'
+        Native-Menu 120 2 '前往　相對引用　｜ PortableB' -CaptionPrefix
+        $null = Wait-For 'relative link works in the fresh workspace' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableB' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains('精確的 B 內容')
+        }
+        Native-Menu 120 2 '反向連結　PortableA' -CaptionPrefix
+        $null = Wait-For 'returned to A in the fresh workspace' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableA' }
+        Native-Menu 120 3 '開啟筆記關聯圖…'
+        $null = Wait-For 'scoped link absent in the fresh workspace' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '關聯圖操作' }
+        if ([IO.File]::ReadAllText($originalA) -cne $plain) { throw 'The baseline altered original A.' }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        Write-Host 'REPRODUCED on the pinned EXE: both links survive a same-workspace rename and restart; after actual Vault ZIP export, extraction and fresh workspace import, only the relative Markdown link opens B.'
+    }
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

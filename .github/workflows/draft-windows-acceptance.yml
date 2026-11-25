@@ -212,7 +212,7 @@ jobs:
             $aboutError = $null
             try { ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA }
             catch { $aboutError = $_; Write-Host "Native About failed: $($_.Exception.Message)" }
-            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA -ProvePortableLinkGap
             if ($aboutError) { throw $aboutError }
           } finally {
             Remove-Item -LiteralPath $root -Recurse -Force

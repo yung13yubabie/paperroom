@@ -95,7 +95,7 @@ jobs:
           if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Expected a three-part release version.' }
 
           $built = 'target/x86_64-pc-windows-msvc/release/paperroom.exe'
-          $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+          $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($builtHash -cne $env:BUILD_EXE_HASH) { throw 'The executable differs from the recorded release build.' }
           $folder = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'paperroom-unsigned')
           $exe = Join-Path $folder.FullName 'Paperroom.exe'
@@ -121,7 +121,7 @@ jobs:
           } else {
             ./scripts/windows-storage.ps1 -Exe $exe
           }
-          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -cne $builtHash) { throw 'Staged executable differs from the build.' }
           $status = git status --porcelain=v1 --untracked-files=all
           if ($LASTEXITCODE -ne 0 -or $status) { throw 'Build or tests modified the checkout.' }

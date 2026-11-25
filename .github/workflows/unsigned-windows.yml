@@ -64,9 +64,6 @@ jobs:
       - name: Test the MSVC provenance checker
         run: python -B ./scripts/test_windows_build_provenance.py
 
-      - name: Run Windows tests with locked dependencies
-        run: cargo test --locked --target x86_64-pc-windows-msvc
-
       - name: Test the same-link witness parser
         run: python -B ./scripts/test_windows_link_inventory.py
 
@@ -80,6 +77,9 @@ jobs:
           "exe_hash=$($receipt.ExeHash)" >> $env:GITHUB_OUTPUT
           "map_hash=$($receipt.MapHash)" >> $env:GITHUB_OUTPUT
           "link_inventory_sha=$($receipt.InventoryHash)" >> $env:GITHUB_OUTPUT
+
+      - name: Run Windows tests with locked dependencies
+        run: cargo test --locked --target x86_64-pc-windows-msvc
 
       - name: Verify and exercise the unsigned artifact
         id: verify

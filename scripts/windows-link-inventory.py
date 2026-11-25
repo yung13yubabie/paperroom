@@ -44,6 +44,9 @@ VS_PRODUCTS = frozenset("Microsoft.VisualStudio.Product." + name for name in
 SEARCHING = re.compile(r'^\s*Searching\s+(.+?\.(?:lib|rlib)"?)\s*:\s*$', re.I)
 LOADED = re.compile(r'^\s*Loaded\s+(.+?\.(?:lib|rlib)"?)\s*\(([^()]*)\)\s*$', re.I)
 
+LOADED_COLON = re.compile(r'^\s*Loaded\s+(.+?\.(?:lib|rlib)"?)\s*:\s*([^():]+)\s*$', re.I)
+ANSI_COLOR = re.compile(r'\x1b\[[0-9;]{0,32}m')
+
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -63,13 +66,28 @@ def bounded(path, limit=MAX_EVIDENCE):
     return data
 
 
-def decode(raw):
+def decode_with_encoding(raw):
+    if not raw:
+        return "", "empty"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16")
+        return raw.decode("utf-16"), "utf-16-with-bom"
+    sample = raw[:8192]
+    pairs = len(sample) // 2
+    if pairs >= 8:
+        even = sample[:pairs * 2:2].count(0)
+        odd = sample[1:pairs * 2:2].count(0)
+        for high, low, encoding in ((odd, even, "utf-16-le"), (even, odd, "utf-16-be")):
+            if high * 100 >= pairs * 35 and low * 100 <= pairs * 8:
+                return raw.decode(encoding, errors="replace"), encoding + "-without-bom"
     try:
-        return raw.decode("utf-8-sig")
+        return raw.decode("utf-8-sig"), "utf-8-with-bom" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
     except UnicodeDecodeError:
-        return raw.decode("mbcs" if os.name == "nt" else "windows-1252", errors="replace")
+        return (raw.decode("mbcs" if os.name == "nt" else "windows-1252", errors="replace"),
+                "windows-ansi" if os.name == "nt" else "windows-1252-fallback")
+
+
+def decode(raw):
+    return decode_with_encoding(raw)[0]
 
 
 def canonical_windows(value):
@@ -250,19 +268,38 @@ def parse_verbose(streams, roots, registry=None):
     for text in streams:
         active = None
         for line in text.splitlines():
+            counts["decoded_lines"] += 1
+            line, removed = ANSI_COLOR.subn("", line)
+            counts["ansi_color_sequences_removed"] += removed
+            action = line.strip().lower()
+            if action.startswith("searching "):
+                counts["searching_literal_rows"] += 1
+            if action.startswith("loaded "):
+                counts["loaded_literal_rows"] += 1
+            if action.startswith("found "):
+                counts["found_symbol_marker_rows"] += 1
+            if action.startswith("referenced in "):
+                counts["referenced_in_marker_rows"] += 1
+            if action == "finished searching libraries":
+                counts["finished_search_marker_rows"] += 1
             search = SEARCHING.fullmatch(line)
             if search:
                 active = search[1].strip().strip('"')
                 counts["library_search_rows"] += 1
                 continue
-            action = line.strip().lower()
             if action.startswith("searching ") or action == "finished searching libraries":
                 active = None
             selected = LOADED.fullmatch(line)
-            if selected is None:
-                if action.startswith("loaded "):
-                    counts["unattributed_loaded_rows"] += 1
-                continue
+            if selected is not None:
+                counts["loaded_parenthesized_format_rows"] += 1
+            else:
+                selected = LOADED_COLON.fullmatch(line)
+                if selected is not None:
+                    counts["loaded_colon_format_rows"] += 1
+                else:
+                    if action.startswith("loaded "):
+                        counts["unattributed_loaded_rows"] += 1
+                    continue
             loaded, member = selected.groups()
             # For bare "Loaded X.lib(member)" use the immediately preceding
             # Searching row only when archive basenames also agree.
@@ -308,7 +345,9 @@ def build_report(exe, expected, commit, map_data, verbose, stderr, roots, toolch
     registry = lock_packages(cargo_lock)
     pe = pe_identity(exe, expected)
     mapped, map_counts = parse_map(decode(map_data), pe, registry)
-    loaded, verbose_counts, instances, hashes = parse_verbose([decode(verbose), decode(stderr)], roots, registry)
+    stdout_text, stdout_encoding = decode_with_encoding(verbose)
+    stderr_text, stderr_encoding = decode_with_encoding(stderr)
+    loaded, verbose_counts, instances, hashes = parse_verbose([stdout_text, stderr_text], roots, registry)
     seen_labels = {(archive, member) for archive, _, member, _ in loaded}
     different_roots = defaultdict(set)
     for archive, _, member, origin in loaded:
@@ -352,6 +391,18 @@ def build_report(exe, expected, commit, map_data, verbose, stderr, roots, toolch
         },
         "verbose_selections": {
             "status": "observed" if verbose_rows else "unresolved",
+            "trace_streams": {
+                "stdout": {"byte_count": len(verbose), "encoding": stdout_encoding,
+                           "nul_byte_count": verbose.count(0)},
+                "stderr": {"byte_count": len(stderr), "encoding": stderr_encoding,
+                           "nul_byte_count": stderr.count(0)},
+            },
+            "trace_marker_counts": {key: verbose_counts[key] for key in (
+                "decoded_lines", "ansi_color_sequences_removed", "searching_literal_rows",
+                "loaded_literal_rows", "found_symbol_marker_rows", "referenced_in_marker_rows",
+                "finished_search_marker_rows", "loaded_parenthesized_format_rows",
+                "loaded_colon_format_rows",
+            )},
             "library_search_rows": verbose_counts["library_search_rows"],
             "attributed_loaded_rows": verbose_counts["attributed_loaded_rows"],
             "unattributed_loaded_rows": verbose_counts["unattributed_loaded_rows"],

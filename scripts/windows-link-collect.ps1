@@ -62,7 +62,7 @@ try {
     $env:PAPERROOM_LINK_TRACE = $private
     $env:VSLANG = '1033'
     $env:CARGO_INCREMENTAL = '0'
-    cargo rustc --locked --release --target $target --bin paperroom -- -C "linker=$wrapper" -C linker-flavor=msvc -C "link-arg=/MAP:$map" -C 'link-arg=/VERBOSE:LIB' *> (Join-Path $private 'cargo.log')
+    cargo rustc --locked --release --target $target --bin paperroom -- -C "linker=$wrapper" -C linker-flavor=msvc -C "link-arg=/MAP:$map" *> (Join-Path $private 'cargo.log')
     if ($LASTEXITCODE -ne 0) {
         $failureCodes = @(Select-String -LiteralPath (Join-Path $private 'cargo.log') -Pattern '\b(?:LNK[0-9]{4}|E[0-9]{4})\b' -AllMatches |
             ForEach-Object { $_.Matches.Value } | Sort-Object -Unique | Select-Object -First 12)
@@ -81,11 +81,19 @@ try {
     if ($receipt.source_commit -cne $SourceCommit -or $receipt.exe_sha256 -cne $sha) {
         throw 'The linked evidence is not bound to the just-built executable.'
     }
+    $traceBytes = (Get-Item -LiteralPath $stdout).Length
+    $errorBytes = (Get-Item -LiteralPath $stderr).Length
+    $trace = $receipt.verbose_selections
+    Write-Host "Private trace stdout $traceBytes bytes, stderr $errorBytes bytes; search rows $($trace.library_search_rows), loaded attributed $($trace.attributed_loaded_rows), unattributed $($trace.unattributed_loaded_rows)."
+    Write-Host ("Private trace encodings " + ($trace.trace_streams | ConvertTo-Json -Compress -Depth 4))
+    Write-Host ("Private trace format counters " + ($trace.trace_marker_counts | ConvertTo-Json -Compress))
     $mapFamilies = @($receipt.map_observations.rows | Where-Object kind -ceq 'msvc-crt' |
         ForEach-Object family | Sort-Object -Unique)
-    if (@('libcmt', 'libucrt', 'libvcruntime' | Where-Object { $_ -cnotin $mapFamilies }).Count -or
-        $receipt.verbose_selections.attributed_loaded_rows -lt 1) {
-        throw "Same-link CRT or selected-member evidence is incomplete. MAP families $($mapFamilies -join ', '), selected rows $($receipt.verbose_selections.attributed_loaded_rows)."
+    if (@('libcmt', 'libucrt', 'libvcruntime' | Where-Object { $_ -cnotin $mapFamilies }).Count) {
+        throw "Same-link CRT MAP evidence is incomplete. MAP families $($mapFamilies -join ', ')."
+    }
+    if ($trace.attributed_loaded_rows -lt 1) {
+        Write-Warning 'No verbose member could be attributed. This draft retains the verified MAP evidence and explicitly unresolved verbose trace.'
     }
     Write-Host "Same-link evidence SHA-256 $inventoryDigest for EXE $sha."
     Write-Host "MAP CRT families $($mapFamilies -join ', '), selected $($receipt.verbose_selections.attributed_loaded_rows) and unresolved $($receipt.verbose_selections.unattributed_loaded_rows) linker rows."

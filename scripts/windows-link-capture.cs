@@ -40,7 +40,9 @@ internal static class PaperroomLinkCapture
 
         try
         {
-            var start = new ProcessStartInfo(linker, String.Join(" ", Array.ConvertAll(args, Quote)))
+            // Put the verbosity switch at the real linker boundary, after a possible response file.
+            var nativeArguments = String.Join(" ", Array.ConvertAll(args, Quote)) + " /VERBOSE:LIB";
+            var start = new ProcessStartInfo(linker, nativeArguments)
             {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,

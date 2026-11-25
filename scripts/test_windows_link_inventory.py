@@ -172,6 +172,36 @@ Loaded libprivate_png-124578abcd.rlib(private.obj)
                          ("memchr", "cargo-registry-archive"))
 
 
+    def test_bomless_windows_encodings_and_trace_shapes_remain_safe(self):
+        exe = fake_pe()
+        trace = ("\x1b[01;32mSearching C:\\private-user\\VC Tools\\lib\\LIBCMT.lib:\x1b[0m\r\n"
+                 " Found secret-symbol-identity\r\n"
+                 " Referenced in private-object.obj\r\n"
+                 " Loaded LIBCMT.lib    (exe_main.obj)\r\n"
+                 " Loaded LIBCMT.lib : second.obj\r\n"
+                 " Loaded unexpected shape\r\n"
+                 "Finished searching libraries\r\n")
+        for encoding in ("utf-16-le", "utf-16-be"):
+            raw = trace.encode(encoding)
+            report = inventory.build_report(exe, inventory.sha(exe), COMMIT,
+                PRIVATE_MAP.encode(encoding), raw, b"", inventory.parse_roots(ROOTS))
+            selections = report["verbose_selections"]
+            self.assertEqual(selections["trace_streams"]["stdout"]["encoding"], encoding + "-without-bom")
+            self.assertEqual(selections["trace_streams"]["stdout"]["byte_count"], len(raw))
+            self.assertEqual(selections["trace_streams"]["stderr"]["encoding"], "empty")
+            stats = selections["trace_marker_counts"]
+            self.assertEqual(stats["ansi_color_sequences_removed"], 2)
+            self.assertEqual(stats["loaded_literal_rows"], 3)
+            self.assertEqual(stats["loaded_colon_format_rows"], 1)
+            self.assertEqual(stats["loaded_parenthesized_format_rows"], 1)
+            self.assertEqual(stats["referenced_in_marker_rows"], 1)
+            self.assertEqual(selections["attributed_loaded_rows"], 2)
+            self.assertEqual(selections["unattributed_loaded_rows"], 1)
+            encoded = json.dumps(report)
+            for private in ["private-user", "secret-symbol-identity", "private-object.obj"]:
+                self.assertNotIn(private, encoded)
+        self.assertEqual(inventory.decode_with_encoding("Searching libraries".encode())[1], "utf-8")
+
     def test_release_cli_refuses_bad_map_and_never_outputs_private_paths(self):
         exe = fake_pe()
         with tempfile.TemporaryDirectory(prefix="private-user-") as dir:

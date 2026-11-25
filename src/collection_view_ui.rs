@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeMap;
 use crate::store::collection_views::{
     CalendarDay, ChildDraft, CollectionLayout, CollectionTemplate, CollectionView, FieldEdit, FilterGroup, FilterKind, FilterMode, FilterOperator, FilterRule, MAX_FILTERS, MAX_FILTER_GROUP_DEPTH, MAX_FILTER_GROUPS, Month,
-    Presentation, PropertyFilter, RelationMember, ScheduleAdjustment, ScheduledRow, SortRule, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body,
+    Presentation, PropertyFilter, RelationMember, ScheduleAdjustment, ScheduledRow, SortRule, SortSource, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body,
 };
 use crate::store::typed_properties::PropertyType;
 
@@ -891,7 +891,7 @@ impl App {
                 match popup(hwnd, anchor, None, &[
                     (1,"新增篩選…"), (2,"新增排序…"), (3,filter_toggle_label(rules.mode)), (4,&summary), (5,"儲存變更"),
                     (6,"取消所有未儲存變更"), (7,"新增篩選群組…"), (8,"編輯篩選群組…"),
-                    (9,"查看衍生欄位的篩選錯誤…"),
+                    (9,"查看衍生欄位的篩選或排序錯誤…"),
                 ]) {
                     1 => {
                         if rules.filters.len() == leaf_limit {
@@ -901,26 +901,31 @@ impl App {
                         }
                     }
                     2 => {
-                        if fields.is_empty() {
-                            return Err("請先在工作區設定數字、核取方塊或日期型別。".into());
-                        }
-                        let Some(index) = choose(hwnd, anchor, &fields, |(key, kind)| format!("{key}　{}", kind.hint()))
+                        let Some((key, kind, argument)) = self.pick_collection_column(id, &fields, true)?
                         else { continue };
-                        let (key, kind) = &fields[index];
+                        let source = match kind {
+                            FilterKind::Typed(kind) => SortSource::Property(Some(kind)),
+                            FilterKind::Text => SortSource::Property(None),
+                            FilterKind::Formula(kind) => SortSource::Formula(kind),
+                            FilterKind::RollupCount => SortSource::RollupCount,
+                            FilterKind::RollupSum => SortSource::RollupSum(argument.ok_or("加總缺少數值欄位。")?),
+                            _ => return Err("這個欄位無法用於排序。".into()),
+                        };
                         let descending = match popup(hwnd, anchor, None, &[(1,"升冪"),(2,"降冪")]) {
                             1 => false, 2 => true, _ => continue,
                         };
-                        if let Some(sort) = rules.sorts.iter_mut().find(|sort| sort.key == *key) {
-                            *sort = SortRule { key: key.clone(), kind: Some(*kind), descending };
+                        let rule = SortRule { key, source, descending };
+                        if let Some(sort) = rules.sorts.iter_mut().find(|sort| sort.same_column(&rule)) {
+                            *sort = rule;
                         } else {
-                            rules.sorts.push(SortRule { key: key.clone(), kind: Some(*kind), descending });
+                            rules.sorts.push(rule);
                         }
                     }
                     3 => toggle_filter_mode(&mut rules.mode),
                     4 => {
                         let mut entries = rules.filters.iter().map(filter_summary).collect::<Vec<_>>();
                         entries.extend(rules.sorts.iter().enumerate().map(|(index, sort)|
-                            format!("第 {} 排序  {}  {}", index + 1, sort.key, if sort.descending {"降冪"} else {"升冪"})
+                            format!("第 {} 排序  {}  {}", index + 1, sort.label(), if sort.descending {"降冪"} else {"升冪"})
                         ));
                         let Some(index) = choose(hwnd, anchor, &entries, String::clone) else { continue };
                         if index < rules.filters.len() {
@@ -945,14 +950,14 @@ impl App {
                     7 => self.add_filter_group(id, &mut rules.groups, &fields, 1, group_room)?,
                     8 => self.pick_filter_group(id, &mut rules.groups, &fields, 1, group_room)?,
                     9 => {
-                        let problems = self.notebook.collection_filter_problems(id, &view)?;
+                        let problems = self.notebook.collection_rule_problems(id, &view)?;
                         let mut report = if problems.entries.is_empty() {
                             "已儲存的規則沒有遇到衍生欄位錯誤。".to_owned()
                         } else {
                             format!("已儲存規則中實際評估到的錯誤\r\n\r\n{}", problems.entries.join("\r\n"))
                         };
                         if problems.omitted > 0 { write!(report, "\r\n另有 {} 項。", problems.omitted)?; }
-                        crate::dialog::show_text(hwnd, "衍生欄位的篩選錯誤", &report)?;
+                        crate::dialog::show_text(hwnd, "衍生欄位的篩選與排序錯誤", &report)?;
                     }
                     _ => return Ok(()),
                 }
@@ -960,16 +965,18 @@ impl App {
         }
     }
 
-    unsafe fn prompt_collection_filter(&self, collection: i64, fields: &[(String, PropertyType)]) -> Result<Option<FilterRule>> {
+    unsafe fn pick_collection_column(
+        &self, collection: i64, fields: &[(String, PropertyType)], sorting: bool,
+    ) -> Result<Option<(String, FilterKind, Option<String>)>> {
         let hwnd = self.hwnd;
         let anchor = self.widgets.links;
-        let definitions: Vec<_> = fields.iter().map(|(key, kind)| {
+        let mut definitions: Vec<_> = fields.iter().map(|(key, kind)| {
             (key.as_str(), FilterKind::Typed(*kind))
-        }).chain([
-            ("", FilterKind::Title), ("", FilterKind::Status), ("", FilterKind::Text),
-            ("", FilterKind::Formula(None)), ("", FilterKind::Relation),
-            ("", FilterKind::RollupCount), ("", FilterKind::RollupSum),
-        ]).collect();
+        }).collect();
+        if !sorting { definitions.extend([("", FilterKind::Title), ("", FilterKind::Status)]); }
+        definitions.extend([("", FilterKind::Text), ("", FilterKind::Formula(None))]);
+        if !sorting { definitions.push(("", FilterKind::Relation)); }
+        definitions.extend([("", FilterKind::RollupCount), ("", FilterKind::RollupSum)]);
         unsafe {
             let Some(index) = choose(hwnd, anchor, &definitions, |(key, kind)| match kind {
                 FilterKind::Title => "筆記標題".into(),
@@ -985,7 +992,7 @@ impl App {
             let mut argument = None;
             let key = match kind {
                 FilterKind::Text => {
-                    let Some(value) = crate::dialog::prompt(hwnd, "文字欄位篩選", "輸入未宣告型別的文字欄位名稱。", "", MAX_KEY_BYTES)?
+                    let Some(value) = crate::dialog::prompt(hwnd, "文字欄位", "輸入未宣告型別的文字欄位名稱。", "", MAX_KEY_BYTES)?
                     else { return Ok(None) };
                     value
                 }
@@ -1005,10 +1012,10 @@ impl App {
                     formulas[which].0.clone()
                 }
                 FilterKind::Relation | FilterKind::RollupCount | FilterKind::RollupSum => {
-                    let Some(name) = crate::dialog::prompt(hwnd, "關聯或彙總篩選", "輸入具名關聯的名稱。", "", MAX_KEY_BYTES)?
+                    let Some(name) = crate::dialog::prompt(hwnd, "關聯或彙總欄位", "輸入具名關聯的名稱。", "", MAX_KEY_BYTES)?
                     else { return Ok(None) };
                     if kind == FilterKind::RollupSum {
-                        let Some(field) = crate::dialog::prompt(hwnd, "彙總加總篩選", "輸入關聯目標的數值欄位名稱。", "", MAX_KEY_BYTES)?
+                        let Some(field) = crate::dialog::prompt(hwnd, "彙總加總欄位", "輸入關聯目標的數值欄位名稱。", "", MAX_KEY_BYTES)?
                         else { return Ok(None) };
                         argument = Some(field);
                     }
@@ -1016,6 +1023,15 @@ impl App {
                 }
                 _ => column.to_owned(),
             };
+            Ok(Some((key, kind, argument)))
+        }
+    }
+
+    unsafe fn prompt_collection_filter(&self, collection: i64, fields: &[(String, PropertyType)]) -> Result<Option<FilterRule>> {
+        let hwnd = self.hwnd;
+        let anchor = self.widgets.links;
+        unsafe {
+            let Some((key, kind, argument)) = self.pick_collection_column(collection, fields, false)? else { return Ok(None); };
             let choices: Vec<_> = FilterOperator::OPTIONS.into_iter().enumerate()
                 .filter(|(_, (op, _))| kind.allows(*op)).map(|(index, (_, label))| (index + 1, label)).collect();
             let Some(index) = popup(hwnd, anchor, None, &choices).checked_sub(1) else { return Ok(None) };

@@ -34,7 +34,7 @@ fn v31_text_history_migrates_without_clearing_live_properties_or_attachments() -
         assert_eq!(db.note(note)?.unwrap().body, "舊正文");
         assert_eq!(db.properties(note)?, [("欄位".into(), "應保留".into())]);
         assert_eq!(payload(&db, file)?, b"current original bytes");
-        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, 32);
+        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, super::super::SCHEMA_VERSION);
         assert!(db.preview_note_revision(note, db.note_revisions(note)?[0].id)?.metadata.contains("同名.txt"));
         Ok(())
     })();

@@ -125,7 +125,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 32;
+const SCHEMA_VERSION: i32 = 33;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -383,6 +383,7 @@ impl Notebook {
         if version < 32 {
             tx.execute_batch(note_history_state::SCHEMA)?;
         }
+        // Version 33 adds saved date operators to rules_json. Older readers reject their IDs.
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

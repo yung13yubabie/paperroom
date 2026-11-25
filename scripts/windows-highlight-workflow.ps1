@@ -1326,8 +1326,10 @@ print('Reopened SQLite preserves the two original imports and the independent re
         ![PaperroomHighlightGui]::IsWindowVisible($prompt) -and [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。'
     }
     Assert-CanvasEdit $liveDb 'CanvasViewFixture' $canvasFile 'connected'
-    Drag-Canvas $nearX $nearY $nearX $nearY
-    $null = Wait-For 'selection cleared before deletion' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 0 個畫布節點。' }
+    Native-Menu 120 8 '將畫布調整至視窗'
+    $null = Wait-For 'fit view before deleting a connection' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將畫布調整至視窗。'
+    }
     Native-Menu 120 7 '編輯 Canvas…'
     Native-Menu 120 13 '刪除連線…' -MenuOpen
     Native-Menu 120 1 '1　a → b' -MenuOpen -CaptionPrefix

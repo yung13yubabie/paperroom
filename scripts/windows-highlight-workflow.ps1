@@ -671,7 +671,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 31, 37, 38
+    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 31, 37, 38, 39
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -737,8 +737,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
 }
-function Open-VaultFolderReview([string]$Folder) {
-    Native-Menu 109 6 '匯入 Obsidian Markdown 資料夾…'
+function Pick-NativeVaultFolder([string]$Folder) {
     $picker = Wait-For 'native Vault folder picker' {
         [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1)
     }
@@ -751,6 +750,11 @@ function Open-VaultFolderReview([string]$Folder) {
     $ok = Control $picker 1
     $point = [PaperroomHighlightGui]::ButtonPoint($picker, $process.Id, $ok)
     [PaperroomHighlightGui]::MouseAction($window, $process.Id, $ok, $point, 0)
+    $null = Wait-For 'native Vault folder picker closed' { ![PaperroomHighlightGui]::IsWindowVisible($picker) }
+}
+function Open-VaultFolderReview([string]$Folder) {
+    Native-Menu 109 6 '匯入 Obsidian Markdown 資料夾…'
+    Pick-NativeVaultFolder $Folder
     Wait-For 'read-only Vault folder import preview' {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','預覽 Vault 資料夾匯入',1)
     }
@@ -3051,6 +3055,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     . (Join-Path $PSScriptRoot 'windows-notion-page-links.ps1')
     . (Join-Path $PSScriptRoot 'windows-canvas-local-assets.ps1')
     . (Join-Path $PSScriptRoot 'windows-joint-notion-canvas.ps1')
+    . (Join-Path $PSScriptRoot 'windows-canvas-vault-root.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

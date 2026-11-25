@@ -1151,6 +1151,7 @@ impl App {
                 (10, "資料集合與看板…"),
                 (11, "匯入 JSON Canvas…"),
                 (38, "匯入 JSON Canvas 與同資料夾附件…"),
+                (39, "從 Obsidian Vault 匯入 Canvas…"),
                 (12, "開啟已匯入的 Canvas…"),
                 (13, "搜尋 PDF 標註…"),
                 (14, "屬性型別…"),
@@ -1189,8 +1190,8 @@ impl App {
                 }
                 return;
             }
-            if action == 38 {
-                if let Err(error) = self.import_local_canvas_ui() { self.show_error(error); }
+            if matches!(action, 38 | 39) {
+                if let Err(error) = self.import_local_canvas_ui(action == 39) { self.show_error(error); }
                 return;
             }
             if action == 25 {
@@ -1817,8 +1818,18 @@ unsafe fn file_dialog(
     extension: &str,
     name: Option<&str>,
 ) -> Result<Option<PathBuf>> {
+    unsafe { file_dialog_in(hwnd, filter, extension, name, None) }
+}
+
+unsafe fn file_dialog_in(
+    hwnd: HWND,
+    filter: &str,
+    extension: &str,
+    name: Option<&str>,
+    directory: Option<&Path>,
+) -> Result<Option<PathBuf>> {
     unsafe {
-        use std::os::windows::ffi::OsStringExt;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
         let mut buffer = vec![0u16; 32_768];
         if let Some(name) = name {
             let initial = wide(name);
@@ -1826,6 +1837,8 @@ unsafe fn file_dialog(
         }
         let filter = wide(filter);
         let extension = wide(extension);
+        let directory = directory.map(|path|
+            path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>());
         let mut dialog = OPENFILENAMEW {
             lStructSize: size_of::<OPENFILENAMEW>() as u32,
             hwndOwner: hwnd,
@@ -1833,6 +1846,7 @@ unsafe fn file_dialog(
             lpstrFile: buffer.as_mut_ptr(),
             nMaxFile: buffer.len() as u32,
             lpstrDefExt: extension.as_ptr(),
+            lpstrInitialDir: directory.as_ref().map_or(null(), |path| path.as_ptr()),
             Flags: OFN_NOCHANGEDIR
                 | OFN_PATHMUSTEXIST
                 | OFN_EXPLORER

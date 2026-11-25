@@ -36,6 +36,9 @@ jobs:
       - name: Test the release checker
         run: python -B ./scripts/test_windows_candidate.py
 
+      - name: Test the MSVC provenance checker
+        run: python -B ./scripts/test_windows_build_provenance.py
+
       - name: Run Windows tests with locked dependencies
         run: cargo test --locked --target x86_64-pc-windows-msvc
 
@@ -133,6 +136,41 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "exe_hash=$hash" >> $env:GITHUB_OUTPUT
 
+      - name: Record sanitized MSVC dependency and Rust evidence
+        id: provenance
+        env:
+          VERIFIED_EXE_HASH: ${{ steps.verify.outputs.exe_hash }}
+        run: |
+          $inputsDir = Join-Path $env:RUNNER_TEMP ('paperroom-cargo-input-' + [guid]::NewGuid().ToString('N'))
+          $receiptDir = Join-Path $env:RUNNER_TEMP 'paperroom-provenance'
+          $receipt = Join-Path $receiptDir 'paperroom-msvc-provenance.json'
+          [void](New-Item -ItemType Directory -Path $inputsDir, $receiptDir)
+          try {
+            $metadata = Join-Path $inputsDir 'cargo-metadata.json'
+            $compiler = Join-Path $inputsDir 'rustc-info.txt'
+            cargo metadata --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 > $metadata
+            if ($LASTEXITCODE -ne 0) { throw 'Target-filtered Cargo metadata failed.' }
+            rustc -vV > $compiler
+            if ($LASTEXITCODE -ne 0) { throw 'Rust compiler metadata failed.' }
+            $sysroot = rustc --print sysroot
+            if ($LASTEXITCODE -ne 0 -or !$sysroot) { throw 'Rust sysroot was unavailable.' }
+            python -B ./scripts/windows-build-provenance.py --metadata $metadata --exe-sha256 $env:VERIFIED_EXE_HASH --rustc-info $compiler --rust-sysroot $sysroot > $receipt
+            if ($LASTEXITCODE -ne 0) { throw 'The sanitized MSVC build receipt was not generated.' }
+            $data = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+            if ($data.exe_sha256 -cne $env:VERIFIED_EXE_HASH.ToLowerInvariant() -or
+                $data.target -cne 'x86_64-pc-windows-msvc' -or $data.rustc.host -cne 'x86_64-pc-windows-msvc' -or
+                $data.rustc.release -cne $env:RUSTUP_TOOLCHAIN) {
+              throw 'MSVC build receipt does not match the verified EXE and toolchain.'
+            }
+            $hash = (Get-FileHash -LiteralPath $receipt -Algorithm SHA256).Hash.ToLowerInvariant()
+            "sha256=$hash" >> $env:GITHUB_OUTPUT
+            "packages=$($data.packages.Count)" >> $env:GITHUB_OUTPUT
+            "rust_library_notice_observed=$($data.rust_toolchain_notices.copyright_library_observed)" >> $env:GITHUB_OUTPUT
+            Write-Host "Sanitized MSVC build receipt SHA-256 $hash for EXE $($data.exe_sha256); $($data.packages.Count) resolved packages"
+          } finally {
+            Remove-Item -LiteralPath $inputsDir -Recurse -Force
+          }
+
       - name: Upload Paperroom.exe as the only archive member
         if: ${{ github.event_name == 'push' || !inputs.verify_only }}
         id: upload
@@ -140,6 +178,15 @@ jobs:
         with:
           name: Paperroom-${{ steps.verify.outputs.version }}-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/paperroom-unsigned/Paperroom.exe
+          if-no-files-found: error
+
+      - name: Upload the separate build provenance receipt
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        id: upload_provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-msvc-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paperroom-provenance/paperroom-msvc-provenance.json
           if-no-files-found: error
 
       - name: Upload the separate CI-only guide capture
@@ -160,6 +207,10 @@ jobs:
           VERIFY_ONLY: ${{ inputs.verify_only }}
           MAP_HASH: ${{ steps.build.outputs.map_hash }}
           CRT_EVIDENCE: ${{ steps.build.outputs.crt_evidence }}
+          PROVENANCE_HASH: ${{ steps.provenance.outputs.sha256 }}
+          PROVENANCE_PACKAGES: ${{ steps.provenance.outputs.packages }}
+          RUST_LIBRARY_NOTICE: ${{ steps.provenance.outputs.rust_library_notice_observed }}
+          PROVENANCE_ARTIFACT: ${{ steps.upload_provenance.outputs.artifact-id }}
         run: |
           $summary = @(
             "Paperroom $env:VERSION unsigned Windows x64 (MSVC)"
@@ -170,16 +221,21 @@ jobs:
             "- Paperroom.exe SHA-256: $env:EXE_HASH"
             "- Private MSVC MAP SHA-256: $env:MAP_HASH"
             "- MSVC CRT public-symbol row counts: $env:CRT_EVIDENCE"
+            "- MSVC build receipt SHA-256: $env:PROVENANCE_HASH ($env:PROVENANCE_PACKAGES resolved packages)"
+            "- Rust library copyright file observed: $env:RUST_LIBRARY_NOTICE"
           )
           if ($env:VERIFY_ONLY -eq 'true') {
             $summary += '- Verification only. Artifact upload was skipped.'
           } else {
-            if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:ARCHIVE_HASH -notmatch '^[a-f0-9]{64}$') {
-              throw 'GitHub did not return a valid artifact ID and archive digest.'
+            if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or
+                $env:ARCHIVE_HASH -notmatch '^[a-f0-9]{64}$' -or
+                $env:PROVENANCE_ARTIFACT -notmatch '^[1-9][0-9]*$') {
+              throw 'GitHub did not return valid artifact IDs and the EXE archive digest.'
             }
             $summary += @(
               "- GitHub artifact ID: $env:ARTIFACT_ID"
               "- GitHub artifact ZIP SHA-256: $env:ARCHIVE_HASH"
+              "- Separate MSVC build receipt artifact ID: $env:PROVENANCE_ARTIFACT"
             )
           }
           Write-Host "MSVC CRT public-symbol row counts for EXE SHA-256 $($env:EXE_HASH): $env:CRT_EVIDENCE; map SHA-256 $env:MAP_HASH"

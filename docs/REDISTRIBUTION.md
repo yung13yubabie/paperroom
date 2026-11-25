@@ -31,3 +31,9 @@ v0.1.1 Windows ZIP 的 `licenses/DEPENDENCIES.txt` 列出 Windows 依賴，並�
 ## 來源檔補充核查
 
 已逐一檢查 Windows 選定依賴 registry 套件的巢狀檔名，未發現額外名為 LICENSE、NOTICE、COPYING 或 COPYRIGHT 的巢狀檔；這不是對所有原始碼內嵌聲明的完整保證。`zlib-rs 0.6.8` 套件根目錄的 Zlib 授權聲明列 Trifecta Tech Foundation，已包含於 v0.1.1 ZIP；其 README 稱為 zlib 的純 Rust 實作。未因名稱相同就推斷已包含原版 zlib 或補造第三方作者。若後續完整來源審查或其他建置的連結 map 證實額外組件，須保存其原文通知後再發佈。
+
+## MSVC 候選建置證據
+
+未簽章 Windows CI 另存一份建置證據，不改動只含 EXE 的測試 ZIP。證據包含該 EXE 的 SHA-256、Rust 版本與提交，以及 Cargo 解出的 MSVC 目標和主機建置相依。相依套件列出名稱、版號、授權宣告與授權檔名，省略建置路徑。若該 Rust 工具鏈帶有版權通知檔，證據會記錄相應雜湊。
+
+發佈前仍須核對最終包實際連結的物件、適用的 MSVC／Windows SDK 條款，以及應附的 Rust、相依套件和內嵌素材通知原文。Cargo 相依圖與連結 MAP 計數各自只能證明其中一部分。

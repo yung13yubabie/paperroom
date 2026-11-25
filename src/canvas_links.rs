@@ -11,7 +11,7 @@ CREATE TABLE canvas_vault_bindings (
     import_root INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE
 );";
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CanvasFileLink {
     pub node_id: String,
     pub file: String,
@@ -59,6 +59,115 @@ fn file_link(node: &serde_json::Value) -> Result<CanvasFileLink> {
         label: node.get("label").and_then(|v| v.as_str()).map(str::to_owned),
         note_id: None,
     })
+}
+
+#[cfg(any(windows, test))]
+pub(crate) struct CanvasNotePlacement {
+    pub canvas_id: i64,
+    pub title: String,
+    pub occurrences: usize,
+    import_root: i64,
+}
+
+#[cfg(any(windows, test))]
+pub(crate) struct CanvasNoteOccurrence {
+    pub link: CanvasFileLink,
+    pub can_focus: bool,
+}
+
+#[cfg(any(windows, test))]
+fn file_nodes_for_path<'a>(doc: &'a crate::canvas::Document, path: &'a str) -> impl Iterator<Item = (usize, &'a Value)> {
+    doc.json()["nodes"].as_array().into_iter().flatten().enumerate().filter(move |(_, node)| {
+        node["type"].as_str() == Some("file") && node["file"].as_str()
+            .and_then(relative_key).as_deref() == Some(path)
+    })
+}
+
+#[cfg(any(windows, test))]
+impl Notebook {
+    fn active_canvas_note_path(&self, note: i64) -> Result<Option<(i64, String)>> {
+        Ok(self.connection.query_row(
+            "SELECT p.import_root,p.relative_path FROM vault_paths p
+             JOIN notes n ON n.id=p.note_id JOIN notes r ON r.id=p.import_root
+             WHERE p.note_id=?1 AND n.trash_root IS NULL AND r.trash_root IS NULL",
+            [note], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?)
+    }
+
+    pub(crate) fn canvas_note_placements(&self, note: i64) -> Result<Vec<CanvasNotePlacement>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let Some((import_root, path)) = self.active_canvas_note_path(note)? else { return Ok(Vec::new()); };
+        let canvases = {
+            let mut stmt = tx.prepare(
+                "SELECT c.id,c.title FROM saved_canvases c
+                 JOIN canvas_vault_bindings b ON b.canvas_id=c.id
+                 WHERE b.import_root=?1 ORDER BY c.title COLLATE BINARY,c.id",
+            )?;
+            stmt.query_map([import_root], |row| Ok((row.get(0)?,row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<(i64,String)>>>()?
+        };
+        let mut placements = Vec::new();
+        for (canvas_id, title) in canvases {
+            let doc = self.read_canvas(canvas_id)?;
+            let occurrences = file_nodes_for_path(&doc, &path).count();
+            if occurrences != 0 {
+                placements.push(CanvasNotePlacement { canvas_id, title, occurrences, import_root });
+            }
+        }
+        tx.commit()?;
+        Ok(placements)
+    }
+
+    fn current_placement_path(&self, note: i64, placement: &CanvasNotePlacement) -> Result<String> {
+        let (root, path) = self.active_canvas_note_path(note)?
+            .ok_or("找不到可用的來源筆記，請重新開啟。")?;
+        if root != placement.import_root || self.canvas_vault(placement.canvas_id)? != Some(root) {
+            return Err("Canvas 的來源筆記庫已變更，請重新查看出現位置。".into());
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn canvas_note_occurrences(
+        &self, note: i64, placement: &CanvasNotePlacement,
+    ) -> Result<Vec<CanvasNoteOccurrence>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let path = self.current_placement_path(note, placement)?;
+        let doc = self.read_canvas(placement.canvas_id)?;
+        let mut occurrences = Vec::new();
+        for (index, node) in file_nodes_for_path(&doc, &path) {
+            let mut link = file_link(node)?;
+            link.note_id = Some(note);
+            occurrences.push(CanvasNoteOccurrence {
+                link,
+                can_focus: index < crate::canvas_projection::MAX_DRAWN_NODES
+                    && crate::canvas::geometry_for_preview(node).is_some(),
+            });
+        }
+        tx.commit()?;
+        Ok(occurrences)
+    }
+
+    pub(crate) fn locate_canvas_note(
+        &self, note: i64, placement: &CanvasNotePlacement, occurrence: &CanvasNoteOccurrence,
+    ) -> Result<(crate::canvas::Document, crate::canvas_projection::Geometry)> {
+        let tx = self.connection.unchecked_transaction()?;
+        let path = self.current_placement_path(note, placement)?;
+        let doc = self.read_canvas(placement.canvas_id)?;
+        let (_, node) = file_nodes_for_path(&doc, &path)
+            .find(|(_, node)| node["id"].as_str() == Some(&occurrence.link.node_id))
+            .ok_or("這個 Canvas 節點已移除或不再指向此筆記。請重新查看出現位置。")?;
+        let mut link = file_link(node)?;
+        link.note_id = Some(note);
+        if link != occurrence.link {
+            return Err("這個 Canvas 節點已變更，請重新查看出現位置。".into());
+        }
+        let geometry = crate::canvas_projection::nodes(&doc)
+            .find(|(node, _)| node["id"].as_str() == Some(&link.node_id))
+            .map(|(_, rect)| rect)
+            .ok_or("這個節點的座標無法顯示，或它超出目前可繪製的前 500 個節點。")?;
+        tx.commit()?;
+        Ok((doc, geometry))
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -326,6 +435,93 @@ mod tests {
         drop(second);
         drop(first);
         std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reverse_locations_preserve_each_node_and_refuse_stale_targets_after_reopen() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let db_path = dir.join("locations.sqlite3");
+        let mut db = Notebook::open(&db_path, false)?;
+        let note_page = || ImportedPage {
+            parts: vec!["資料".into(), "筆記.md".into()], title: "筆記".into(), body: "# 節\n合成正文".into(),
+        };
+        let original = db.import_vault("同名庫", vec![note_page()])?;
+        let other = db.import_vault("同名庫", vec![note_page()])?;
+        let note_in = |db: &Notebook, root: i64| db.connection.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1", [root], |r| r.get::<_, i64>(0));
+        let note = note_in(&db, original)?;
+        let different = note_in(&db, other)?;
+        let file = |id: &str, x: i64| serde_json::json!({
+            "id":id, "type":"file", "file":"資料/筆記.md", "label":"重複名稱", "subpath":"#節",
+            "x":x, "y":20, "width":120,"height":80
+        });
+        let raw = serde_json::json!({"nodes":[file("right",2000), file("left",-900)],
+            "custom":{"keep":true}}).to_string();
+        let doc = crate::canvas::parse(raw.clone())?;
+        let one = db.save_canvas("同名 Canvas", &doc)?;
+        let two = db.save_canvas("同名 Canvas", &crate::canvas::parse(serde_json::json!({"nodes":[file("only",0)]}).to_string())?)?;
+        let unrelated = db.save_canvas("其他集合", &doc)?;
+        let _unbound = db.save_canvas("沒有綁定", &doc)?;
+        db.set_canvas_vault(one, Some(original))?;
+        db.set_canvas_vault(two, Some(original))?;
+        db.set_canvas_vault(unrelated, Some(other))?;
+        drop(db);
+
+        let mut db = Notebook::open(&db_path, false)?;
+        let results = db.canvas_note_placements(note)?;
+        assert_eq!(results.iter().map(|p| (p.canvas_id,p.occurrences)).collect::<Vec<_>>(), [(one,2),(two,1)]);
+        assert_eq!(db.canvas_note_placements(different)?[0].canvas_id, unrelated);
+        let nodes = db.canvas_note_occurrences(note, &results[0])?;
+        assert_eq!(nodes.iter().map(|n|n.link.node_id.as_str()).collect::<Vec<_>>(), ["right","left"]);
+        let (opened, geometry) = db.locate_canvas_note(note, &results[0], &nodes[1])?;
+        assert_eq!(geometry, [-900,20,120,80]);
+        assert_eq!(opened.as_str(), raw);
+        assert!(db.canvas_camera(one)?.is_none());
+        assert_eq!(db.resolve_canvas_file_link(one, Some(original), "left")?.note_id, Some(note));
+
+        let moved = db.edit_canvas(one, &opened, super::super::canvas_edit::CanvasEdit::Geometry {
+            id:"left", geometry:[-700,40,120,80],
+        })?;
+        assert_eq!(db.locate_canvas_note(note, &results[0], &nodes[1])?.1, [-700,40,120,80]);
+        db.edit_canvas(one, &moved, super::super::canvas_edit::CanvasEdit::Content { id:"left", value:"未有.md" })?;
+        assert!(db.locate_canvas_note(note, &results[0], &nodes[1]).is_err());
+        db.set_canvas_vault(one, Some(other))?;
+        assert!(db.canvas_note_occurrences(note, &results[0]).is_err());
+        let remaining = db.canvas_note_occurrences(note, &results[1])?;
+        db.trash(note)?;
+        assert!(db.canvas_note_placements(note)?.is_empty());
+        assert!(db.locate_canvas_note(note, &results[1], &remaining[0]).is_err());
+        db.restore(note)?;
+        let doc = db.read_canvas(two)?;
+        db.remove_canvas(two, &doc)?;
+        assert!(db.locate_canvas_note(note, &results[1], &remaining[0]).is_err());
+        assert!(db.canvas_note_placements(note)?.is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_node_beyond_the_draw_limit_is_reported_without_opening_the_wrong_node() -> Result<()> {
+        let mut db = Notebook::open(Path::new(":memory:"), false)?;
+        let root = db.import_vault("來源", vec![ImportedPage {
+            parts: vec!["A.md".into()], title:"A".into(), body:"".into(),
+        }])?;
+        let note = db.connection.query_row("SELECT note_id FROM vault_paths", [], |r| r.get::<_, i64>(0))?;
+        let mut nodes = (0..crate::canvas_projection::MAX_DRAWN_NODES).map(|id| serde_json::json!({
+            "id":id.to_string(), "type":"text", "text":"合成", "x":0, "y":0, "width":1, "height":1
+        })).collect::<Vec<_>>();
+        nodes.push(serde_json::json!({"id":"after-limit","type":"file","file":"A.md","x":0,"y":0,"width":1,"height":1}));
+        let doc = crate::canvas::parse(serde_json::json!({"nodes":nodes}).to_string())?;
+        let id = db.save_canvas("大畫布", &doc)?;
+        db.set_canvas_vault(id, Some(root))?;
+        let placement = db.canvas_note_placements(note)?.remove(0);
+        assert_eq!(placement.occurrences, 1);
+        let occurrence = db.canvas_note_occurrences(note, &placement)?.remove(0);
+        assert!(!occurrence.can_focus);
+        assert!(db.locate_canvas_note(note, &placement, &occurrence).is_err());
+        assert!(db.canvas_camera(id)?.is_none());
         Ok(())
     }
 

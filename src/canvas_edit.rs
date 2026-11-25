@@ -32,6 +32,7 @@ impl EdgeStyleField {
 
 pub(crate) enum CanvasEdit<'a> {
     AddNode { kind: &'a str, content: &'a str, geometry: [i64; 4] },
+    GroupSelection { ids: &'a HashSet<String>, label: &'a str },
     Geometry { id: &'a str, geometry: [i64; 4] },
     Translate { ids: &'a HashSet<String>, offset: [i64; 2] },
     Content { id: &'a str, value: &'a str },
@@ -99,6 +100,49 @@ fn set_geometry(node: &mut Value, geometry: [i64; 4]) {
     }
 }
 
+fn group_bounds(original: &Document, ids: &HashSet<String>) -> Result<[i64; 4]> {
+    use crate::canvas_projection::{MAX_COORDINATE, all_geometry, encloses_geometry};
+
+    const PADDING: i64 = 24;
+    let mut selected = all_geometry(original).filter_map(|(node, rect)| {
+        node["id"].as_str().filter(|id| ids.contains(*id)).map(|_| rect)
+    });
+    let [x, y, w, h] = selected.next().ok_or("請先框選要放入群組的節點。")?;
+    let (mut left, mut top, mut right, mut bottom) = (x, y, x + w, y + h);
+    let mut count = 1;
+    for [x, y, w, h] in selected {
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x + w);
+        bottom = bottom.max(y + h);
+        count += 1;
+    }
+    if count != ids.len() {
+        return Err("部分選取的節點已不存在或座標無法編輯。".into());
+    }
+    let bounds = [left - PADDING, top - PADDING,
+        right - left + 2 * PADDING, bottom - top + 2 * PADDING];
+    if bounds.iter().any(|v| v.abs() > MAX_COORDINATE) {
+        return Err("選取範圍太大或太靠近畫布座標邊界。".into());
+    }
+
+    let groups = all_geometry(original).filter_map(|(node, rect)| {
+        (node["type"].as_str() == Some("group")
+            && node["id"].as_str().is_some_and(|id| ids.contains(id))).then_some(rect)
+    }).collect::<Vec<_>>();
+    for (node, rect) in all_geometry(original) {
+        let is_group = node["type"].as_str() == Some("group");
+        let already_inside = groups.iter().any(|group|
+            (!is_group || *group != rect) && encloses_geometry(*group, rect));
+        if encloses_geometry(bounds, rect) && !already_inside
+            && !node["id"].as_str().is_some_and(|id| ids.contains(id))
+        {
+            return Err("這個群組也會包含未選取的節點。請調整框選範圍後再試。".into());
+        }
+    }
+    Ok(bounds)
+}
+
 fn apply(original: &Document, edit: CanvasEdit<'_>) -> Result<Document> {
     let mut tree = original.json().clone();
     match edit {
@@ -108,6 +152,19 @@ fn apply(original: &Document, edit: CanvasEdit<'_>) -> Result<Document> {
             node[field] = text(content)?;
             set_geometry(&mut node, geometry);
             array(&mut tree, "nodes")?.push(node);
+        }
+        CanvasEdit::GroupSelection { ids, label } => {
+            let label = label.trim();
+            if label.is_empty() { return Err("請輸入群組名稱。".into()); }
+            let geometry = group_bounds(original, ids)?;
+            let mut group = json!({"id": unique_id(&tree, "node"), "type": "group", "label": text(label)?});
+            set_geometry(&mut group, geometry);
+            let first = crate::canvas_projection::all_geometry(original)
+                .find(|(_, rect)| crate::canvas_projection::encloses_geometry(geometry, *rect))
+                .and_then(|(node, _)| node["id"].as_str()).ok_or("找不到選取的節點。")?;
+            let nodes = array(&mut tree, "nodes")?;
+            let index = position(nodes, first)?;
+            nodes.insert(index, group);
         }
         CanvasEdit::Geometry { id, geometry } => {
             let nodes = array(&mut tree, "nodes")?;
@@ -254,6 +311,52 @@ fn replace_source(
 mod tests {
     use super::*;
     use CanvasEdit::*;
+
+    #[test]
+    fn named_group_keeps_standard_fields_and_moves_only_enclosed_nodes() -> Result<()> {
+        use crate::canvas_projection::move_nodes;
+        let db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let original = canvas::parse(r#"{
+            "nodes":[
+                {"id":"child","type":"text","x":40,"y":40,"width":20,"height":20,"text":"原文"},
+                {"id":"nested","type":"group","x":32,"y":32,"width":40,"height":42,"label":"內層","background":"assets/image.png","backgroundStyle":"ratio","vendor":true},
+                {"id":"second","type":"text","x":80,"y":32,"width":20,"height":20,"text":"另一張"},
+                {"id":"overlap","type":"text","x":100,"y":62,"width":60,"height":50,"text":"只相交"},
+                {"id":"within-padding","type":"text","x":105,"y":35,"width":10,"height":10,"text":"靠近"}
+            ],"edges":[{"id":"e","fromNode":"child","toNode":"overlap","label":"仍連得上"}],"vendor":{"root":true}
+        }"#.to_owned())?;
+        let id = db.save_canvas("群組驗收", &original)?;
+        let selection = HashSet::from(["nested".to_owned(), "second".to_owned()]);
+        for (ids, label) in [(&selection, " "), (&selection, "拒絕額外節點"),
+            (&HashSet::new(), "空選取"), (&HashSet::from(["不存在".into()]), "過期選取")] {
+            assert!(db.edit_canvas(id, &original, GroupSelection { ids, label }).is_err());
+        }
+        assert_eq!(db.read_canvas(id)?.as_str(), original.as_str());
+        assert!(db.undo_canvas_edit(id, &original)?.is_none());
+        let doc = db.edit_canvas(id, &original, Geometry { id:"within-padding", geometry:[160,35,10,10] })?;
+        let grouped = db.edit_canvas(id, &doc, GroupSelection { ids: &selection, label:"外框 📌" })?;
+        assert_eq!(grouped.json()["nodes"][0], json!({"id":"paperroom-node-1","type":"group",
+            "x":8,"y":8,"width":116,"height":90,"label":"外框 📌"}));
+        for field in ["edges","vendor"] { assert_eq!(grouped.json()[field], doc.json()[field]); }
+        assert_eq!(&grouped.json()["nodes"].as_array().unwrap()[1..], doc.json()["nodes"].as_array().unwrap());
+        let picked = HashSet::from(["paperroom-node-1".to_owned(), "child".to_owned()]);
+        let (moves, _) = move_nodes(&grouped, &picked);
+        assert_eq!(moves, ["paperroom-node-1","nested","child","second"].map(str::to_owned).into());
+        let moved = db.edit_canvas(id, &grouped, Translate { ids: &moves, offset:[51,-20] })?;
+        for (before, after) in grouped.json()["nodes"].as_array().unwrap().iter()
+            .zip(moved.json()["nodes"].as_array().unwrap())
+        {
+            let mut expected = before.clone();
+            if moves.contains(before["id"].as_str().unwrap()) {
+                expected["x"] = json!(before["x"].as_i64().unwrap() + 51);
+                expected["y"] = json!(before["y"].as_i64().unwrap() - 20);
+            }
+            assert_eq!(&expected, after);
+        }
+        assert_eq!(moved.json()["edges"], original.json()["edges"]);
+        assert_eq!(db.undo_canvas_edit(id, &moved)?.unwrap().as_str(), grouped.as_str());
+        Ok(())
+    }
 
     #[test]
     fn group_translation_undo_reopens_and_keeps_links_and_untouched_data() -> Result<()> {

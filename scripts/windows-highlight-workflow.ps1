@@ -415,6 +415,22 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
+    public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+        int count = GetMenuItemCount(menu);
+        if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
+        var labels = new string[count];
+        for (int i = 0; i < count; ++i) {
+            var label = new StringBuilder(256);
+            if (GetMenuItemID(menu, i) != (uint)(i + 1) ||
+                GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+                throw new InvalidOperationException("Expected a sequential Paperroom list.");
+            labels[i] = label.ToString();
+        }
+        return labels;
+    }
     private static int MenuPosition(IntPtr menu, uint itemId, string caption, bool prefix) {
         int count = GetMenuItemCount(menu);
         if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
@@ -654,7 +670,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $CanvasSave -or $Item -notin 1, 11, 37
+    $saving = $CanvasSave -or $Item -notin 1, 9, 11, 37
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -715,7 +731,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
 }
-function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
+function Open-VaultFolderReview([string]$Folder) {
     Native-Menu 109 6 '匯入 Obsidian Markdown 資料夾…'
     $picker = Wait-For 'native Vault folder picker' {
         [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1)
@@ -729,6 +745,16 @@ function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
     $ok = Control $picker 1
     $point = [PaperroomHighlightGui]::ButtonPoint($picker, $process.Id, $ok)
     [PaperroomHighlightGui]::MouseAction($window, $process.Id, $ok, $point, 0)
+    Wait-For 'read-only Vault folder import preview' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','預覽 Vault 資料夾匯入',1)
+    }
+}
+function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
+    $review = Open-VaultFolderReview $Folder
+    if (![PaperroomHighlightGui]::Read((Control $review 101)).Contains($ReportLine)) {
+        throw 'The read-only Vault folder preview has an unexpected attachment count.'
+    }
+    Finish-Revision $review 1
     $report = Wait-For 'Vault import report' {
         [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '匯入報告', 1)
     }
@@ -737,6 +763,17 @@ function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
     }
     Finish-Revision $report 1
     Write-Host "Native folder picker and import report verified: $ReportLine"
+}
+function Get-VaultReviewStamp([string]$Database) {
+    $state = @'
+from contextlib import closing
+from pathlib import Path
+import hashlib,sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    print(hashlib.sha256("\n".join(db.iterdump()).encode()).hexdigest())
+'@ | python - $Database
+    if ($LASTEXITCODE -ne 0 -or $state -notmatch '^[0-9a-f]{64}$') { throw 'Failed to read logical workspace state.' }
+    return $state
 }
 function Vault-ChoiceIndex([string]$Database, [string]$Title) {
     $number = @'
@@ -791,6 +828,77 @@ function Read-CanvasInk([int]$Red = 237, [int]$Green = 33, [int]$Blue = 125) {
                                ScreenX=$area.Left; ScreenY=$area.Top }
         } finally { $bitmap.UnlockBits($pixels) }
     } finally { $bitmap.Dispose() }
+}
+function Assert-NamedCanvasGroup([string]$Database, [string]$Title, [string]$Source, [string]$Grouped, [string]$Exported, [string]$Phase) {
+    @'
+from contextlib import closing
+from pathlib import Path
+import json, sqlite3, sys
+
+database,title,source,grouped,exported,phase=sys.argv[1:]
+before=json.loads(Path(source).read_bytes())
+grouped_bytes=Path(grouped).read_bytes()
+moved_bytes=Path(exported).read_bytes()
+doc=json.loads(grouped_bytes)
+assert len(doc["nodes"])==5
+group=doc["nodes"].pop(0)
+assert group=={"id":"paperroom-node-1","type":"group","label":"\u7814\u7a76\u5206\u93e1 \U0001f4cc",
+               "x":20,"y":26,"width":329,"height":176}
+assert doc==before, "Original group metadata, card order, edges or extensions were lost"
+moved=json.loads(moved_bytes)
+assert len(moved["nodes"])==5
+delta=[moved["nodes"][0][key]-group[key] for key in ("x","y")]
+assert all(12 < shift < 58 for shift in delta), delta
+doc["nodes"].insert(0,group)
+for node in doc["nodes"][:4]:
+    for key,shift in zip(("x","y"),delta):
+        node[key]+=shift
+assert moved==doc, "Moved nodes differ beyond one translation or the partly overlapping card moved"
+with closing(sqlite3.connect(Path(database).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    rows=db.execute("SELECT c.source,u.source FROM saved_canvases c LEFT JOIN canvas_edit_undo u "
+                    "ON u.canvas_id=c.id WHERE c.title=?", (title,)).fetchall()
+assert len(rows)==1
+raw,undo=rows[0]
+assert raw.encode("utf-8")== (grouped_bytes if phase=="undone" else moved_bytes)
+assert undo== (grouped_bytes.decode("utf-8") if phase=="moved" else None)
+print(f"Named group {phase}: standard fields, exact bytes, preserved nested group and edges, consistent group translation.")
+'@ | python - $Database $Title $Source $Grouped $Exported $Phase
+    if ($LASTEXITCODE -ne 0) { throw "Named Canvas group failed its independent document and workspace checks ($Phase)." }
+}
+
+function Locate-NoteOnCanvas([int]$CanvasIndex, [string]$CanvasName, [int]$CanvasId, [int]$Count,
+                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb) {
+    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    Native-Menu 113 $CanvasIndex ("$CanvasName  (#${CanvasId}，$Count 處)") -MenuOpen
+    Native-Menu 113 $NodeIndex "${NodeIndex}　同一張卡 〔$NodeId〕" -MenuOpen -CaptionPrefix
+    $null = Wait-For 'exact Canvas and occurrence are active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)) -ceq $CanvasName -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq "已定位 Canvas 節點「$NodeId」。"
+    }
+    $ink = Wait-For 'painted the chosen occurrence using its unique native border' { Read-CanvasInk $Rgb[0] $Rgb[1] $Rgb[2] }
+    $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+    if ([Math]::Abs($ink.L+$ink.R-($area.Right-$area.Left-1)) -gt 5 -or
+        [Math]::Abs($ink.T+$ink.B-($area.Bottom-$area.Top-1)) -gt 5) {
+        throw "The painted node '$NodeId' was not centered."
+    }
+    Write-Host "Verified painted centered occurrence by border bounds: $CanvasName / $NodeId."
+}
+function Open-LocationSource([string]$Title = '鏡頭', [string]$ExactBody = '場景原本的獨特引文') {
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $null = Wait-For 'the selected Canvas occurrence opens the exact note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $Title -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains($ExactBody)
+    }
+}
+function Return-FromCanvasLocation {
+    $button = Control $window 119
+    $point = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,$button)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$button,$point,0)
+    $null = Wait-For 'returned to the original note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
 }
 function Read-CanvasStamp([string]$Database, [string]$Source) {
     $stamp = @'
@@ -964,6 +1072,68 @@ function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
     [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$ExactText)
     $null = Wait-For "exact workspace search filter $FieldId" {
         [PaperroomHighlightGui]::Read($edit) -ceq $ExactText
+    }
+}
+function Collection-Prompt([string]$Caption, [string]$Value = '') {
+    $prompt = Wait-For "collection prompt $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    if ($Value) { Type-SearchFilter $prompt 101 $Value }
+    Finish-Revision $prompt 1
+}
+function Collection-MenuLabels {
+    $menu = Wait-For 'actual collection row picker' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
+    }
+    [PaperroomHighlightGui]::CurrentMenuLabels($window,$process.Id,$menu)
+}
+function Choose-CollectionRow([string]$CaptionPrefix) {
+    $options = @(Collection-MenuLabels)
+    $matches = @(for ($i=0; $i -lt $options.Count; $i++) {
+        if ($options[$i].StartsWith($CaptionPrefix,[StringComparison]::Ordinal)) { $i+1 }
+    })
+    if ($matches.Count -ne 1) { throw "The exact synthetic row '$CaptionPrefix' was not unique in $($options -join ' | ')." }
+    Native-Menu 120 $matches[0] $CaptionPrefix -MenuOpen -CaptionPrefix
+}
+function Open-SortCollection([string]$Name = 'SortAudition') {
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 1 '開啟集合看板…' -MenuOpen
+    Native-Menu 109 1 $Name -MenuOpen
+    $null = Wait-For 'collection layout opened' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+}
+function Open-SortNamedView([int]$Index, [string]$Name) {
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
+    Native-Menu 120 $Index "${Name}（表格）" -MenuOpen
+}
+function Assert-RankedRows([string[]]$Expected) {
+    Native-Menu 120 3 '開啟資料列…'
+    $labels = @(Collection-MenuLabels)
+    if ($labels.Count -ne $Expected.Count) { throw "Wrong result count in the actual row picker: $($labels -join ' | ')." }
+    for ($i=0; $i -lt $Expected.Count; $i++) {
+        if ($labels[$i] -cnotmatch ('^待處理　'+[regex]::Escape($Expected[$i])+'  \(\d+\)$')) {
+            throw "Wrong order in the actual row picker: $($labels -join ' | ')."
+        }
+    }
+    Native-Menu 120 1 "待處理　$($Expected[0])  (" -MenuOpen -CaptionPrefix
+    $null = Wait-For 'the first ranked row opens its original note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $Expected[0] -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟集合資料列'
+    }
+    Write-Host "Observed ordered collection rows through the actual menu: $($Expected -join ', ')."
+}
+function Set-SortColumn([string]$Column) {
+    Native-Menu 120 2 '新增排序…' -MenuOpen
+    if ($Column -eq 'formula') {
+        Native-Menu 120 3 '公式結果…' -MenuOpen
+        Native-Menu 120 1 '審閱順位' -MenuOpen
+        Native-Menu 120 1 '數字結果' -MenuOpen
+        Native-Menu 120 2 '降冪' -MenuOpen
+    } else {
+        Native-Menu 120 5 '彙總加總…' -MenuOpen
+        Collection-Prompt '關聯或彙總欄位' '明細'
+        Collection-Prompt '彙總加總欄位' '工時'
+        Native-Menu 120 1 '升冪' -MenuOpen
     }
 }
 function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {
@@ -1226,7 +1396,11 @@ try {
     $stamp = Read-HistoryStamp $liveDb $title
     Replace-EditorText $historyTitle $tooLong
     $null = Wait-For 'invalid unsaved draft stayed in the editor' {
-        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗')
+        try { [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗') }
+        catch {
+            if (!$_.Exception.Message.Contains('Native text missing or truncated.')) { throw }
+            return $false
+        }
     }
     $preview = Open-Revision 1
     $report = [PaperroomHighlightGui]::Read((Control $preview 101))
@@ -1507,6 +1681,94 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: physical Canvas marquee, canceled drag, equal group movement, reopen and Ctrl+Z, connect/disconnect and Undo, and exact export to a second workspace.'
+
+    $groupFile = Join-Path $root 'CanvasGroupFixture.canvas'
+    $groupBefore = Join-Path $root 'CanvasGroupBefore.canvas'
+    $groupExport = Join-Path $root 'CanvasGroupReadback.canvas'
+    $groupJson = '{"nodes":[{"id":"inner","type":"group","x":44,"y":50,"width":133,"height":96,"label":"內層","color":"#12a474","background":"assets/frame.png","backgroundStyle":"ratio","vendor":true},{"id":"a","type":"text","x":60,"y":75,"width":100,"height":55,"text":"鏡頭 A","color":"#ed217d"},{"id":"b","type":"text","x":235,"y":118,"width":90,"height":60,"text":"鏡頭 B","color":"#047bea"},{"id":"outside","type":"text","x":310,"y":158,"width":90,"height":60,"text":"部分相交","color":"#6f5092"}],"edges":[{"id":"e","fromNode":"a","toNode":"outside","label":"保留連線","color":"#a2572e","vendor":123}],"vendor":{"script":"合成測資"}}'
+    [IO.File]::WriteAllText($groupFile,$groupJson,[Text.UTF8Encoding]::new($false))
+    $groupInputHash=(Get-FileHash -LiteralPath $groupFile).Hash
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $groupFile '中鍵拖曳平移'
+    $inner = Wait-For 'original standard group is actually painted' { Read-CanvasInk 18 164 116 }
+    $second = Wait-For 'second card is actually painted' { Read-CanvasInk 4 123 234 }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $errorDialog = Wait-For 'empty selection refusal' { [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間') }
+    if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'請先框選要放入群組的節點')) {
+        throw 'The empty selection refusal was missing.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'closed the selection refusal' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
+    Drag-Canvas ($inner.ScreenX+$inner.L-5) ($inner.ScreenY+$inner.T-5) ($second.ScreenX+$second.R+5) ($second.ScreenY+$second.B+5)
+    $null = Wait-For 'marquee selected the nested frame and two cards' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 3 個畫布節點。'
+    }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $prompt = Wait-For 'native group name prompt' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','建立 Canvas 群組',1)
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
+    $null = Wait-For 'canceled group name prompt' { ![PaperroomHighlightGui]::IsWindowVisible($prompt) }
+    Native-Menu 120 7 '編輯 Canvas…'
+    Native-Menu 120 15 '從選取建立群組…' -MenuOpen
+    $prompt = Wait-For 'name prompt after cancellation' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','建立 Canvas 群組',1)
+    }
+    Type-SearchFilter $prompt 101 '研究分鏡 📌'
+    Finish-Revision $prompt 1
+    $null = Wait-For 'named group saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。' }
+    Native-Menu 120 8 '將畫布調整至視窗'
+    $outer = Wait-For 'painted named group border' { Read-CanvasInk 23 98 78 }
+    Native-Menu 120 1 '匯出原始 JSON Canvas…'
+    Native-File 1 '匯出原始 JSON Canvas…' $groupBefore '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave
+    $groupX = $outer.ScreenX+$outer.L+20
+    $groupY = $outer.ScreenY+$outer.T+6
+    Drag-Canvas $groupX $groupY ($groupX+50) ($groupY+32) -Cancel
+    $null = Wait-For 'canceled physical drag restored the frame position' {
+        $ink = Read-CanvasInk 23 98 78
+        $ink -and $ink.L -eq $outer.L -and $ink.T -eq $outer.T
+    }
+    Drag-Canvas $groupX $groupY ($groupX+50) ($groupY+32)
+    $null = Wait-For 'dragging the outer frame saved a single Canvas edit' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存畫布修改。'
+    }
+    Native-Menu 120 1 '匯出原始 JSON Canvas…'
+    Native-File 1 '匯出原始 JSON Canvas…' $groupExport '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-Menu 109 12 '開啟已匯入的 Canvas…'
+    Native-Menu 109 2 'CanvasGroupFixture' -MenuOpen
+    $null = Wait-For 'reopened Canvas group painted' { Read-CanvasInk 23 98 78 }
+    Assert-NamedCanvasGroup $liveDb 'CanvasGroupFixture' $groupFile $groupBefore $groupExport 'moved'
+    $surface = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+    $x=$surface.Right-10
+    $y=$surface.Bottom-10
+    Drag-Canvas $x $y $x $y
+    $null = Wait-For 'reopened Canvas has focus' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已選取 0 個畫布節點。'
+    }
+    [PaperroomHighlightGui]::CanvasUndoKey($window,$process.Id)
+    $null = Wait-For 'Ctrl+Z reverted the group move after reopen' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已復原上一次 Canvas 修改。'
+    }
+    Assert-NamedCanvasGroup $liveDb 'CanvasGroupFixture' $groupFile $groupBefore $groupExport 'undone'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $restored
+    $window = $process.MainWindowHandle
+    Native-File 11 '匯入 JSON Canvas…' $groupExport '中鍵拖曳平移'
+    $null = Wait-For 'standard moved group painted in a separate workspace' { Read-CanvasInk 23 98 78 }
+    Assert-NamedCanvasGroup $restoreDb 'CanvasGroupReadback' $groupFile $groupBefore $groupExport 'imported'
+    if ((Get-FileHash -LiteralPath $groupFile).Hash -cne $groupInputHash) { throw 'Source .canvas was changed.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native named Canvas group from a physical marquee, nested frame and fully enclosed cards translate together, overlap is left in place, empty selection and Escape preserve data, Ctrl+Z after reopening, and standard .canvas export and reimport into a separate workspace.'
 
     $searchVault = Join-Path $root 'SearchFixture'
     $folder = Join-Path $searchVault '製片'
@@ -1877,6 +2139,508 @@ print("Verified exact B content and identity separately from its display title; 
             [IO.File]::ReadAllText($originalA) -cne $plain) { throw 'Import changed the original ZIP or Vault Markdown.' }
         Write-Host 'PASS: native two-note portable Vault ZIP, verified rebinding, both link types after restart, independent title and content checks, checksum refusal without partial import, and untouched sources.'
     }
+
+    $sortFolder = Join-Path $root 'derived-sort-workspace'
+    [void][IO.Directory]::CreateDirectory($sortFolder)
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $sortFolder 'Paperroom.exe')
+    $sortDb = Join-Path $sortFolder 'paperroom-data/notes.sqlite3'
+    $sortCsv = Join-Path $root 'SortAudition.csv'
+    $sortFixture = @'
+標題,工時
+Rank-A,7
+Rank-B,7
+Rank-Bad,壞值
+Rank-Empty,
+Rank-Zero,0
+Lookup-High,8
+Lookup-Low,2
+'@
+    [IO.File]::WriteAllText($sortCsv,$sortFixture,[Text.UTF8Encoding]::new($false))
+    $csvHash = (Get-FileHash -LiteralPath $sortCsv).Hash
+    $process = Start-Notebook $sortFolder
+    $window = $process.MainWindowHandle
+    Native-File 9 '匯入 CSV 表格…' $sortCsv '已從 CSV 匯入 7 列'
+    Native-Menu 109 14 '屬性型別…'
+    Native-Menu 109 1 '設定屬性型別…' -MenuOpen
+    Collection-Prompt '設定工作區屬性型別' '工時'
+    Native-Menu 109 1 '數字' -MenuOpen
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 2 '新增集合…' -MenuOpen
+    Collection-Prompt '新增集合' 'SortAudition'
+    $null = Wait-For 'new native collection' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+    foreach ($title in @('Rank-A','Rank-B','Rank-Bad','Rank-Empty','Rank-Zero','Lookup-High','Lookup-Low')) {
+        Native-Menu 120 1 '加入筆記…'
+        Choose-CollectionRow "$title  ("
+        Collection-Prompt '加入集合'
+    }
+    foreach ($pair in @(@('Rank-A','Lookup-High'),@('Rank-B','Lookup-Low'))) {
+        Native-Menu 120 19 '編輯資料列關聯…'
+        Choose-CollectionRow "待處理　$($pair[0])  (#"
+        Native-Menu 120 1 '新增同集合關聯…' -MenuOpen
+        Choose-CollectionRow "同集合　待處理　$($pair[1])  (#"
+        Collection-Prompt '新增集合關聯' '明細'
+    }
+    Native-Menu 120 4 '新增公式…'
+    Collection-Prompt '新增公式' '審閱順位'
+    Collection-Prompt '新增公式' 'typed("工時")'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 1 '儲存新檢視…' -MenuOpen
+    Collection-Prompt '儲存新檢視' 'Ranked'
+    Native-Menu 120 2 '表格' -MenuOpen
+    Collection-Prompt '集合檢視'
+    Collection-Prompt '集合檢視' 'Rank-'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    Set-SortColumn 'formula'
+    Set-SortColumn 'rollup'
+    Native-Menu 120 5 '儲存變更' -MenuOpen
+    Assert-RankedRows @('Rank-B','Rank-A','Rank-Zero','Rank-Bad','Rank-Empty')
+    Open-SortCollection
+    Open-SortNamedView 1 'Ranked'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    Native-Menu 120 9 '查看衍生欄位的篩選或排序錯誤…' -MenuOpen
+    $problems = Wait-For 'native rule problem report' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','衍生欄位的篩選與排序錯誤',1)
+    }
+    $details = [PaperroomHighlightGui]::Read((Control $problems 101))
+    if ([regex]::Matches($details,'排序　公式「審閱順位」').Count -ne 2 -or !$details.Contains('工時')) {
+        throw "Expected two legacy invalid fields in the sorting diagnostics."
+    }
+    Finish-Revision $problems 1
+    Native-Menu 120 6 '取消所有未儲存變更' -MenuOpen
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 3 '顯示全部資料列（看板）' -MenuOpen
+    Native-Menu 120 18 '編輯資料列的型別欄位…'
+    Choose-CollectionRow '待處理　Lookup-High  ('
+    Native-Menu 120 1 '工時　8' -MenuOpen -CaptionPrefix
+    Collection-Prompt '工時' '1'
+    Open-SortNamedView 1 'Ranked'
+    Assert-RankedRows @('Rank-A','Rank-B','Rank-Zero','Rank-Bad','Rank-Empty')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $sortFolder
+    $window = $process.MainWindowHandle
+    Open-SortCollection
+    Open-SortNamedView 1 'Ranked'
+    Assert-RankedRows @('Rank-A','Rank-B','Rank-Zero','Rank-Bad','Rank-Empty')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from pathlib import Path
+from contextlib import closing
+import json,sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    spec,keyword=db.execute("SELECT rules_json,keyword FROM collection_views WHERE name='Ranked'").fetchone()
+    assert keyword=="Rank-" and json.loads(spec)==[False,[],[["\u5be9\u95b1\u9806\u4f4d","formula-number",True],["\u660e\u7d30","rollup-sum",False,"\u5de5\u6642"]]]
+    vals=dict(db.execute("SELECT n.title,p.value FROM notes n JOIN note_properties p ON n.id=p.note_id WHERE p.key=?",
+                         ("\u5de5\u6642",)))
+    assert vals["Rank-Bad"]=="\u58de\u503c" and vals["Rank-Empty"]=="" and vals["Rank-Zero"]=="0" and vals["Lookup-High"]=="1"
+    assert db.execute("SELECT count(*) FROM note_relations").fetchone()==(2,)
+print("Verified exact saved view rules, invalid and empty values, live target edit, stable links and SQLite integrity.")
+'@ | python - $sortDb
+    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $sortCsv).Hash -cne $csvHash) {
+        throw 'Saved ordering proof or original CSV bytes changed.'
+    }
+    Write-Host 'PASS: native named collection view uses live numeric formula and rollup sorts with deterministic ties, zero before invalid and empty, native diagnostics, an edited related value, and identical order after restart.'
+
+    $reviewHome = Join-Path $root 'folder-review-workspace'
+    $reviewFolder = Join-Path $root 'ReviewFixture'
+    $reviewNotes = Join-Path $reviewFolder '場'
+    $reviewMedia = Join-Path $reviewFolder '素材'
+    foreach ($dir in @($reviewHome,$reviewNotes,$reviewMedia)) { [void][IO.Directory]::CreateDirectory($dir) }
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $reviewHome 'Paperroom.exe')
+    $reviewA = Join-Path $reviewNotes 'ReviewA.md'
+    $reviewB = Join-Path $reviewNotes 'ReviewB.md'
+    $otherB = Join-Path $reviewFolder 'ReviewB.md'
+    $reviewAsset = Join-Path $reviewMedia '卡.txt'
+    $enc = [Text.UTF8Encoding]::new($false)
+    $reviewMarkdown = "[相對頁](./ReviewB.md#review)" + [Environment]::NewLine + "[雙義頁](ReviewB.md#review)" +
+        [Environment]::NewLine + "[附件](../素材/卡.txt)" + [Environment]::NewLine + "[缺檔](../素材/缺.txt)"
+    [IO.File]::WriteAllText($reviewA,$reviewMarkdown,$enc)
+    [IO.File]::WriteAllText($reviewB,"# Review" + [Environment]::NewLine + "場內的精確內容",$enc)
+    [IO.File]::WriteAllText($otherB,"# Review" + [Environment]::NewLine + "根目錄同名頁",$enc)
+    [IO.File]::WriteAllText($reviewAsset,'asset one',$enc)
+    $checks = @{}
+    foreach ($file in @($reviewA,$reviewB,$otherB,$reviewAsset)) { $checks[$file]=(Get-FileHash -LiteralPath $file).Hash }
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    $reviewDb = Join-Path $reviewHome 'paperroom-data/notes.sqlite3'
+    $before = Get-VaultReviewStamp $reviewDb
+    $review = Open-VaultFolderReview $reviewFolder
+    $preview = [PaperroomHighlightGui]::Read((Control $review 101))
+    foreach ($expected in @('附件綁定 1 筆，未解析 1 筆','相符 1 筆，未解析 1 筆',
+                            '相對於筆記與相對於 Vault 根目錄時指向不同筆記','找不到可匯入的來源檔案')) {
+        if (!$preview.Contains($expected)) { throw "Expected warning '$expected' in the real preview." }
+    }
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'The preview changed persisted tables.' }
+    Finish-Revision $review 2
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'Cancel wrote to the workspace.' }
+    $review = Open-VaultFolderReview $reviewFolder
+    [IO.File]::WriteAllText($reviewAsset,'asset two',$enc)
+    Finish-Revision $review 1
+    $errorDialog = Wait-For 'changed attachment refused after consent' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'預覽後 Vault 來源已有變更')) {
+        throw 'The changed-file error did not explain how to re-open the preview.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'changed-file alert closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'A stale preview changed the workspace.' }
+    [IO.File]::WriteAllText($reviewAsset,'asset one',$enc)
+    Native-VaultFolder $reviewFolder '附件綁定 1 筆，未解析 1 筆'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 'ReviewA'
+    Type-SearchFilter $dialog 103 '場'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'opened the imported source note after restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewA'
+    }
+    Native-Menu 120 2 '前往　相對頁' -CaptionPrefix
+    $heading = Wait-For 'native relative heading preview' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#review',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $heading 101)).Contains('場內的精確內容')) {
+        throw 'The relative heading preview opened the wrong same-name note.'
+    }
+    Finish-Revision $heading 1
+    $null = Wait-For 'relative link opened the exact target by body, not title alone' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewB' -and
+        ([PaperroomHighlightGui]::Read((Control $window 104))).Contains('場內的精確內容') -and
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('標題連結：第 1 行，Review',[StringComparison]::Ordinal)
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from contextlib import closing
+from pathlib import Path
+import sqlite3,sys
+folder=Path(sys.argv[2])
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    rows=db.execute("SELECT n.body,p.relative_path,p.import_root FROM notes n JOIN vault_paths p ON p.note_id=n.id").fetchall()
+    assert len(rows)==3 and len({root for _,_,root in rows})==1
+    for body,path,_ in rows:
+        assert body.encode("utf-8")== (folder/path).read_bytes(), path
+    path,data,source=db.execute("SELECT o.relative_path,a.content,p.relative_path FROM attachments a "
+                                "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id").fetchone()
+    assert path=="\u7d20\u6750/\u5361.txt" and source=="\u5834/ReviewA.md"
+    assert data== (folder/path).read_bytes()
+    assert db.execute("SELECT count(*) FROM attachments").fetchone()==(1,)
+print("Verified original Markdown paths and bytes, one fresh import root, exact attachment binding and integrity after restart.")
+'@ | python - $reviewDb $reviewFolder
+    if ($LASTEXITCODE -ne 0) { throw 'The real import failed its original-byte and SQLite checks.' }
+    foreach ($file in $checks.Keys) {
+        if ((Get-FileHash -LiteralPath $file).Hash -cne $checks[$file]) { throw 'A Vault source file was changed by the application.' }
+    }
+    Write-Host 'PASS: native read-only Vault import preview, missing attachment and ambiguous path report, cancellation and changed-file refusal without writes, successful fresh batch, exact attachment and relative-note navigation after reopening.'
+
+
+    # Continue the same real Vault sample from preview and refusal through every feature.
+    $jointCanvas = Join-Path $root 'IntegratedResearch.canvas'
+    [IO.File]::WriteAllText($jointCanvas,'{"nodes":[{"id":"first","type":"file","file":"場/ReviewA.md","label":"同一張卡","x":-28000,"y":800,"width":120,"height":75,"color":"#ed217d"},{"id":"second","type":"file","file":"場/ReviewA.md","label":"同一張卡","x":28000,"y":-800,"width":120,"height":75,"color":"#12a474"}],"edges":[{"id":"follow","fromNode":"first","toNode":"second"}]}',$enc)
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'ReviewA' '場'
+    Find-LinkTarget '場/ReviewB.md'
+    Native-Menu 120 1 'ReviewB　匯入：ReviewFixture' -MenuOpen -CaptionPrefix
+    $null = Wait-For 'ReviewA saved an identity link alongside its relative heading link' {
+        [PaperroomHighlightGui]::Read((Control $window 104)) -cmatch '\[\[paperroom:note:\d+:[0-9a-f]{32}\|ReviewB\]\]' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+    }
+    Native-Menu 120 3 '前往　ReviewB　｜ ReviewB' -CaptionPrefix
+    $null = Wait-For 'the stable link selected the nested source rather than its namesake' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewB' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('場內的精確內容')
+    }
+    Click-WorkspaceButton 110
+    $null = Wait-For 'target note editor visible for title-only rename' { [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) }
+    Replace-EditorText (Control $window 103) 'ReviewedB'
+    $null = Wait-For 'same note saved with new display title' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewedB' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+    }
+    Native-File 11 '匯入 JSON Canvas…' $jointCanvas '中鍵拖曳平移'
+    Native-Menu 120 4 '綁定匯入的 Vault…'
+    Native-Menu 120 1 '匯入：ReviewFixture  (' -MenuOpen -CaptionPrefix
+    $null = Wait-For 'integrated Canvas bound to the exact previewed batch' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將畫布連到這個匯入的 Vault。'
+    }
+    Open-LinkedFixture 'ReviewA' '場'
+    Locate-NoteOnCanvas 1 'IntegratedResearch' 1 2 1 'first' @(237,33,125)
+    Open-LocationSource 'ReviewA' '相對頁'
+    Locate-NoteOnCanvas 1 'IntegratedResearch' 1 2 2 'second' @(18,164,116)
+    Open-LocationSource 'ReviewA' '相對頁'
+
+    Native-Menu 109 14 '屬性型別…'
+    Native-Menu 109 1 '設定屬性型別…' -MenuOpen
+    Collection-Prompt '設定工作區屬性型別' '工時'
+    Native-Menu 109 1 '數字' -MenuOpen
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 2 '新增集合…' -MenuOpen
+    Collection-Prompt '新增集合' 'IntegratedReview'
+    $null = Wait-For 'integrated collection opened' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+    foreach ($pair in @(@('ReviewA','3'),@('ReviewedB','7'))) {
+        Native-Menu 120 1 '加入筆記…'
+        Choose-CollectionRow "$($pair[0])  ("
+        Collection-Prompt '加入集合'
+        Native-Menu 120 18 '編輯資料列的型別欄位…'
+        Choose-CollectionRow "待處理　$($pair[0])  ("
+        Native-Menu 120 1 '工時　' -MenuOpen -CaptionPrefix
+        Collection-Prompt '工時' $pair[1]
+    }
+    Native-Menu 120 4 '新增公式…'
+    Collection-Prompt '新增公式' '審閱順位'
+    Collection-Prompt '新增公式' 'typed("工時")'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 1 '儲存新檢視…' -MenuOpen
+    Collection-Prompt '儲存新檢視' 'IntegratedOrder'
+    Native-Menu 120 2 '表格' -MenuOpen
+    Collection-Prompt '集合檢視'
+    Collection-Prompt '集合檢視'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    Set-SortColumn 'formula'
+    Native-Menu 120 5 '儲存變更' -MenuOpen
+    Assert-RankedRows @('ReviewedB','ReviewA')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    Open-SortCollection 'IntegratedReview'
+    Open-SortNamedView 1 'IntegratedOrder'
+    Assert-RankedRows @('ReviewedB','ReviewA')
+    Open-LinkedFixture 'ReviewA' '場'
+    Locate-NoteOnCanvas 1 'IntegratedResearch' 1 2 2 'second' @(18,164,116)
+    Open-LocationSource 'ReviewA' '相對頁'
+
+    $jointZip = Join-Path $root 'integrated-vault.zip'
+    $brokenZip = Join-Path $root 'integrated-bad-checksum.zip'
+    $jointNew = Join-Path $root 'integrated-import'
+    [void][IO.Directory]::CreateDirectory($jointNew)
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $jointNew 'Paperroom.exe')
+    Native-Menu 109 36 'Vault ZIP 可攜連結…'
+    Native-Menu 109 1 '匯出可攜 Vault ZIP…' -MenuOpen
+    Native-Menu 109 1 '匯入：ReviewFixture  (#' -MenuOpen -CaptionPrefix
+    Native-File 36 '匯出可攜 Vault ZIP…' $jointZip '已匯出 3 篇 Markdown 與 1 個來源附件。已加入可攜連結清單。' -AlreadyOpened
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    $archiveHash = (Get-FileHash -LiteralPath $jointZip).Hash
+    @'
+from pathlib import Path
+from zipfile import ZipFile
+import json, sys
+archive, bad, folder = map(Path, sys.argv[1:])
+a, b, other, media = "\u5834/ReviewA.md", "\u5834/ReviewB.md", "ReviewB.md", "\u7d20\u6750/\u5361.txt"
+manifest = "Paperroom-Vault-Links.json"
+with ZipFile(archive) as z, ZipFile(bad, "w") as changed:
+    assert z.testzip() is None and set(z.namelist()) == {a, b, other, media, manifest}
+    notes = {n["path"]: n for n in json.loads(z.read(manifest))["notes"]}
+    assert set(notes) == {a, b, other}
+    assert notes[b]["title"] == "ReviewedB" and notes[b]["identity"].encode() in z.read(a)
+    assert b"./ReviewB.md#review" in z.read(a)
+    for path in (b, other, media):
+        assert z.read(path) == (folder / path).read_bytes(), path
+    for name in z.namelist():
+        changed.writestr(name, z.read(name) + (b" changed" if name == b else b""))
+print("Integrated ZIP: exact source paths, unchanged nested and decoy notes and attachment, saved title, and scoped identity.")
+'@ | python - $jointZip $brokenZip $reviewFolder
+    if ($LASTEXITCODE -ne 0) { throw 'Integrated Vault archive did not match the reviewed sample.' }
+
+    $process = Start-Notebook $jointNew
+    $window = $process.MainWindowHandle
+    $jointDb = Join-Path $jointNew 'paperroom-data/notes.sqlite3'
+    $empty = Get-VaultReviewStamp $jointDb
+    Native-Menu 109 36 'Vault ZIP 可攜連結…'
+    Native-Menu 109 2 '匯入可攜 Vault ZIP…' -MenuOpen
+    Native-File 37 '匯入可攜 Vault ZIP…' $brokenZip '拒絕錯誤校驗' -AlreadyOpened -ExpectedError '筆記路徑、身分、標題或校驗不符'
+    if ((Get-VaultReviewStamp $jointDb) -cne $empty) { throw 'Rejected checksum changed the clean workspace.' }
+    Native-Menu 109 36 'Vault ZIP 可攜連結…'
+    Native-Menu 109 2 '匯入可攜 Vault ZIP…' -MenuOpen
+    Native-File 37 '匯入可攜 Vault ZIP…' $jointZip '已匯入 3 篇筆記，重綁 1 個紙間連結。' -AlreadyOpened
+    $dialog = Wait-For 'integrated portable ZIP import report' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','可攜 Vault 匯入報告',1)
+    }
+    Finish-Revision $dialog 1
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $jointNew
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'ReviewA' '場'
+    Native-Menu 120 2 '前往　相對頁' -CaptionPrefix
+    $heading = Wait-For 'imported relative heading after re-opening destination' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#review',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $heading 101)).Contains('場內的精確內容')) {
+        throw 'The reimported relative heading reached the wrong same-name document.'
+    }
+    Finish-Revision $heading 1
+    $null = Wait-For 'reimported relative heading selected the exact original body' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewedB' -and
+        [PaperroomHighlightGui]::Read((Control $window 104)).Contains('場內的精確內容') -and
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('標題連結：第 1 行，Review',[StringComparison]::Ordinal)
+    }
+    Open-LinkedFixture 'ReviewA' '場'
+    Native-Menu 120 3 '前往　ReviewB　｜ ReviewedB' -CaptionPrefix
+    $null = Wait-For 'rebound scoped identity after destination restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewedB' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('場內的精確內容')
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from contextlib import closing
+from pathlib import Path
+from zipfile import ZipFile
+import json, sqlite3, sys
+archive, destination, origin, canvas = map(Path, sys.argv[1:])
+a, b, other, media = "\u5834/ReviewA.md", "\u5834/ReviewB.md", "ReviewB.md", "\u7d20\u6750/\u5361.txt"
+with ZipFile(archive) as z, closing(sqlite3.connect(destination.as_uri() + "?mode=ro", uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    rows = db.execute("SELECT p.relative_path,n.id,n.title,n.body,t.token FROM vault_paths p "
+                      "JOIN notes n ON n.id=p.note_id JOIN note_link_identities t ON t.note_id=n.id").fetchall()
+    notes = {row[0]: row[1:] for row in rows}
+    assert len(rows) == 3 and set(notes) == {a, b, other} and notes[b][1] == "ReviewedB"
+    old = {n["path"]: n for n in json.loads(z.read("Paperroom-Vault-Links.json"))["notes"]}[b]["identity"].encode()
+    new = f"paperroom:note:{notes[b][0]}:{notes[b][3]}".encode()
+    assert old != new and notes[a][2].encode() == z.read(a).replace(old, new, 1)
+    for path in (b, other):
+        assert notes[path][2].encode() == z.read(path)
+    assert db.execute("SELECT o.relative_path,a.content,p.relative_path FROM attachments a "
+                      "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id").fetchall() == [(media, z.read(media), a)]
+    assert db.execute("SELECT COUNT(*) FROM saved_canvases").fetchone() == (0,)
+    assert db.execute("SELECT COUNT(*) FROM collection_views").fetchone() == (0,)
+with closing(sqlite3.connect(origin.as_uri() + "?mode=ro", uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert db.execute("SELECT source FROM saved_canvases WHERE title='IntegratedResearch'").fetchone()[0].encode() == canvas.read_bytes()
+    assert db.execute("SELECT COUNT(*) FROM canvas_cameras").fetchone() == (0,)
+    assert db.execute("SELECT COUNT(*) FROM collection_views WHERE name='IntegratedOrder'").fetchone() == (1,)
+print("Integrated workspace: ZIP rebinds only the stable identity, includes the exact attachment, and leaves the source Canvas and collection intact.")
+'@ | python - $jointZip $jointDb $reviewDb $jointCanvas
+    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $jointZip).Hash -cne $archiveHash) {
+        throw 'Integrated readback changed data or the input ZIP.'
+    }
+    foreach ($file in $checks.Keys) {
+        if ((Get-FileHash -LiteralPath $file).Hash -cne $checks[$file]) { throw 'Integrated workflow wrote into the source Vault.' }
+    }
+    Write-Host 'PASS: same real Vault sample across preview refusal, note links, repeated Canvas locations, saved formula sorting, checksum refusal and portable ZIP re-import after restart.'
+
+    $locationHome = Join-Path $root 'canvas-locations-workspace'
+    $vaultA = Join-Path $root 'LocationVaultA'
+    $vaultB = Join-Path $root 'LocationVaultB'
+    $locationFolderA = Join-Path $vaultA '資料'
+    $locationFolderB = Join-Path $vaultB '資料'
+    foreach ($dir in @($locationHome,$locationFolderA,$locationFolderB)) { [void][IO.Directory]::CreateDirectory($dir) }
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $locationHome 'Paperroom.exe')
+    $encoding = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText((Join-Path $locationFolderA '鏡頭.md'),'場景原本的獨特引文',$encoding)
+    [IO.File]::WriteAllText((Join-Path $locationFolderB '鏡頭.md'),'另一本 Vault 的同名正文',$encoding)
+    $north = Join-Path $root 'CanvasNorth.canvas'
+    $south = Join-Path $root 'CanvasSouth.canvas'
+    $other = Join-Path $root 'CanvasOther.canvas'
+    [IO.File]::WriteAllText($north,'{"nodes":[{"id":"west","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":-28000,"y":800,"width":120,"height":75,"color":"#ed217d"},{"id":"east","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":28000,"y":-800,"width":120,"height":75,"color":"#12a474"}],"edges":[{"id":"line","fromNode":"west","toNode":"east","custom":true}],"vendor":{"keep":true}}',$encoding)
+    [IO.File]::WriteAllText($south,'{"nodes":[{"id":"only","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":37000,"y":800,"width":120,"height":75,"color":"#047bea"}]}',$encoding)
+    [IO.File]::WriteAllText($other,'{"nodes":[{"id":"unrelated","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":1000,"y":800,"width":120,"height":75,"color":"#6f5092"}]}',$encoding)
+    $locationDb = Join-Path $locationHome 'paperroom-data/notes.sqlite3'
+    $process = Start-Notebook $locationHome
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $vaultA '附件綁定 0 筆，未解析 0 筆'
+    Native-VaultFolder $vaultB '附件綁定 0 筆，未解析 0 筆'
+    foreach ($spec in @(@($north,1,'LocationVaultA'),@($south,1,'LocationVaultA'),@($other,2,'LocationVaultB'))) {
+        Native-File 11 '匯入 JSON Canvas…' $spec[0] '中鍵拖曳平移'
+        Native-Menu 120 4 '綁定匯入的 Vault…'
+        Native-Menu 120 $spec[1] "匯入：$($spec[2])  (" -MenuOpen -CaptionPrefix
+        $null = Wait-For 'explicit Canvas vault binding was saved' {
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將畫布連到這個匯入的 Vault。'
+        }
+    }
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 '場景原本的獨特引文'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'selected the only original card by unique body' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭'
+    }
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125)
+    Open-LocationSource
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Open-LocationSource
+    Locate-NoteOnCanvas 2 'CanvasSouth' 2 1 1 'only' @(4,123,234)
+    Open-LocationSource
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $locationHome
+    $window = $process.MainWindowHandle
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 '場景原本的獨特引文'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'reopened the original note' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' }
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $refusal = Wait-For 'selected node cannot open an unbound file' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'請先綁定含有這個精確路徑的 Vault')) {
+        throw 'The unbound selected occurrence did not explain why it cannot resolve.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'dismissed the native stale binding alert' { ![PaperroomHighlightGui]::IsWindowVisible($refusal) }
+    Native-Menu 120 4 '綁定匯入的 Vault…'
+    Native-Menu 120 2 '匯入：LocationVaultB  (' -MenuOpen -CaptionPrefix
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $refusal = Wait-For 'rebinding cannot redirect this selected occurrence to a namesake' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'此節點已不再指向原筆記')) {
+        throw 'Rebinding unexpectedly redirected the current visit.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'dismissed the native redirected-target alert' { ![PaperroomHighlightGui]::IsWindowVisible($refusal) }
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Return-FromCanvasLocation
+    Locate-NoteOnCanvas 1 'CanvasSouth' 2 1 1 'only' @(4,123,234)
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Return-FromCanvasLocation
+    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    $null = Wait-For 'unbound and same-name other Vault occurrences are excluded' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '這篇筆記未出現在已綁定的 Canvas。'
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from contextlib import closing
+from pathlib import Path
+import sqlite3,sys
+db_path,north,south,other=map(Path,sys.argv[1:])
+with closing(sqlite3.connect(db_path.as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    canvas=db.execute("SELECT title, source FROM saved_canvases ORDER BY id").fetchall()
+    assert len(canvas)==3
+    for (title,data),path in zip(canvas,(north,south,other)):
+        assert title==path.stem and data.encode("utf-8")==path.read_bytes()
+    assert db.execute("SELECT count(*) FROM canvas_cameras").fetchone()==(0,)
+    binding=db.execute("SELECT c.title,n.title FROM canvas_vault_bindings b "
+                       "JOIN saved_canvases c ON c.id=b.canvas_id JOIN notes n ON n.id=b.import_root").fetchall()
+    assert binding==[("CanvasOther","\u532f\u5165\uff1aLocationVaultB")]
+    assert db.execute("SELECT count(*) FROM vault_paths").fetchone()==(2,)
+print("Verified all original Canvas bytes, no saved camera edits, and only the expected second-vault binding after native navigation.")
+'@ | python - $locationDb $north $south $other
+    if ($LASTEXITCODE -ne 0) { throw 'The exact Canvas and workspace round-trip verification failed.' }
+    Write-Host 'PASS: native note-to-Canvas locations find repeated nodes in separate canvases, center each painted occurrence, reopen the exact note and persist across restart, refuse an unbound selected node, and keep Canvas content and camera settings unchanged.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

@@ -48,6 +48,7 @@ pub(super) struct Canvas {
     projection: Cell<Option<Projection>>,
     drag: Option<canvas_view_ui::Drag>,
     selection: std::collections::HashSet<String>,
+    focused_source: Option<(String, i64)>,
     camera: Option<crate::canvas_projection::Camera>,
     pan: Option<canvas_view_ui::Pan>,
 }
@@ -205,20 +206,69 @@ impl App {
                 let (id, title) = &choices[index];
                 (*id, title.clone(), self.notebook.read_canvas(*id)?)
             };
-            self.activate_canvas(id, title, doc)
+            self.activate_canvas(id, title, doc, None)
         }
     }
 
-    unsafe fn activate_canvas(&mut self, id: i64, title: String, doc: crate::canvas::Document) -> Result<()> {
+    unsafe fn activate_canvas(
+        &mut self, id: i64, title: String, doc: crate::canvas::Document,
+        focus: Option<(String, crate::canvas_projection::Geometry, i64)>,
+    ) -> Result<()> {
         let bundle = self.notebook.canvas_bundle_view(id)?;
-        let camera = self.notebook.canvas_camera(id)?;
         unsafe {
+            let (selection, camera, focused_source) = if let Some((node, geometry, note)) = focus {
+                let rect = self.board_area();
+                let camera = Projection::focus_camera(
+                    [rect.left, rect.top, rect.right, rect.bottom], self.scaled(12), self.dpi, geometry,
+                ).ok_or("目前視窗或座標無法定位此 Canvas 節點。")?;
+                (HashSet::from([node.clone()]), Some(camera), Some((node, note)))
+            } else {
+                (HashSet::new(), self.notebook.canvas_camera(id)?, None)
+            };
             self.activate_workspace(WorkspaceView::Canvas(Canvas {
                 id, title, doc, bundle, projection: Cell::new(None), drag: None,
-                selection: Default::default(), camera, pan: None,
+                selection, focused_source, camera, pan: None,
             }));
         }
         Ok(())
+    }
+
+    pub(super) unsafe fn show_note_canvas_locations(&mut self, note: i64) -> Result<()> {
+        unsafe {
+            use super::navigation_ui::choose_navigation_page;
+            let placements = self.notebook.canvas_note_placements(note)?;
+            if placements.is_empty() {
+                label(self.widgets.status, "這篇筆記未出現在已綁定的 Canvas。");
+                return Ok(());
+            }
+            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, placements.len(), |i| {
+                let entry = &placements[i];
+                format!("{}  (#{}，{} 處)", entry.title, entry.canvas_id, entry.occurrences)
+            }) else { return Ok(()); };
+            let chosen = &placements[index];
+            let occurrences = self.notebook.canvas_note_occurrences(note, chosen)?;
+            if occurrences.is_empty() {
+                label(self.widgets.status, "Canvas 連結已變更，請重新查看出現位置。");
+                return Ok(());
+            }
+            let compact = |value: &str| -> String {
+                value.chars().take(64).map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
+            };
+            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, occurrences.len(), |i| {
+                let entry = &occurrences[i];
+                let link = &entry.link;
+                let name = link.label.as_deref().unwrap_or(&link.file);
+                let fragment = link.subpath.as_deref().unwrap_or("");
+                let limit = if entry.can_focus { "" } else { "（超出繪製範圍）" };
+                format!("{}　{} 〔{}〕 {}{limit}", i + 1, compact(name), compact(&link.node_id), compact(fragment))
+            }) else { return Ok(()); };
+            let selected = &occurrences[index];
+            let (doc, geometry) = self.notebook.locate_canvas_note(note, chosen, selected)?;
+            let node = selected.link.node_id.clone();
+            self.activate_canvas(chosen.canvas_id, chosen.title.clone(), doc, Some((node.clone(), geometry, note)))?;
+            label(self.widgets.status, &format!("已定位 Canvas 節點「{}」。", compact(&node)));
+            Ok(())
+        }
     }
 
     pub(super) unsafe fn import_canvas_bundle_ui(&mut self) -> Result<()> {
@@ -228,7 +278,7 @@ impl App {
             };
             let imported = self.notebook.import_canvas_bundle(&path)?;
             let doc = self.notebook.read_canvas(imported.id)?;
-            self.activate_canvas(imported.id, imported.title, doc)?;
+            self.activate_canvas(imported.id, imported.title, doc, None)?;
             crate::dialog::show_text(self.hwnd, "Canvas ZIP 匯入報告", &imported.report.summary())?;
             Ok(())
         }
@@ -350,8 +400,28 @@ impl App {
                     choices.splice(3..3, [
                         (4, "綁定匯入的 Vault…"), (5, "開啟畫布來源筆記…"), (6, "解除 Vault 綁定"),
                     ]);
+                    let selected_file = if view.selection.len() == 1 {
+                        view.doc.json()["nodes"].as_array().into_iter().flatten().find(|node|
+                            node["type"].as_str() == Some("file")
+                            && node["id"].as_str().is_some_and(|id| view.selection.contains(id)))
+                    } else { None };
+                    if selected_file.is_some() { choices.push((13, "開啟已選節點的來源筆記")); }
                     let action = popup(hwnd, anchor, None, &choices);
-                    if action == 1 && let Some(path) =
+                    if action == 13 {
+                        let node = selected_file.ok_or("請先選取一個 Canvas 檔案節點。")?;
+                        let node_id = node["id"].as_str().ok_or("Canvas 檔案節點缺少 ID。")?;
+                        let link = self.notebook.resolve_canvas_file_link(id, initial_binding, node_id)?;
+                        if Some(link.file.as_str()) != node["file"].as_str()
+                            || link.subpath.as_deref() != node["subpath"].as_str()
+                        {
+                            return Err("Canvas 節點已更改，請重新開啟畫布。".into());
+                        }
+                        let target = link.note_id.ok_or("請先綁定含有這個精確路徑的 Vault。")?;
+                        if view.focused_source.as_ref().is_some_and(|(id, source)| id == node_id && *source != target) {
+                            return Err("此節點已不再指向原筆記，請重新查看出現位置。".into());
+                        }
+                        self.open_anchored_note(target, link.subpath.as_deref())?;
+                    } else if action == 1 && let Some(path) =
                         file_dialog(hwnd, "JSON Canvas\0*.canvas\0\0", "canvas", Some("canvas.canvas"))?
                     {
                         crate::canvas::export(&path, &self.notebook.read_canvas(id)?)?;

@@ -55,6 +55,9 @@ pub(crate) mod vault_search;
 pub(crate) mod workspace_search;
 #[path = "migration_media.rs"]
 pub(crate) mod migration_media;
+#[cfg(any(windows, test))]
+#[path = "vault_import_review.rs"]
+pub(crate) mod vault_import_review;
 #[path = "notion_handoff.rs"]
 pub(crate) mod notion_handoff;
 #[path = "notion_preview.rs"]

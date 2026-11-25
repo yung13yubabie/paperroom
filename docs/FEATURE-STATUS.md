@@ -76,7 +76,7 @@
 | 分組 | 部分 | 集合表格與看板可依單一欄位分組並保存設定。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
 | 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可從同一視圖編輯已宣告的型別欄位。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
 | 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期使用週、月及前後日數條件，條件和群組可在同層複製、前後移。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
-| 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用。空值和無效值置後，關聯與公式等衍生欄位排序待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |
+| 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用，支援屬性、公式結果、具名關聯的彙總筆數及加總。空值和無效值置後，關聯目標清單與自訂選項排序仍待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |
 | 資料庫範本 | 部分 | 可從現有列或空白建立範本，修改型別預設並撰寫多層 Markdown 子頁。可選根頁的關聯和附件。嵌入、子頁專屬資源與從現有筆記整棵擷取待做。 | [規格與文件](https://www.notion.com/help/database-templates) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 重複範本 | 未實作 | 未實作範本引擎。 | [官方](https://www.notion.com/help/database-templates) · [window.rs](../src/window.rs) |
 | 連結資料庫 | 未實作 | 集合與雙向連結不提供此行為。 | [官方](https://www.notion.com/help/data-sources-and-linked-databases) · [collections.rs](../src/collections.rs) |
@@ -141,7 +141,7 @@
 | 檔案總管 | 部分 | 可按匯入批次逐層瀏覽保存的 Vault 原始相對路徑，選到檔案後從工作區開啟，來源磁碟離線也可使用。手動核對的外部搬移可更新原始相對路徑。自動偵測及原地檔案管理仍待做。 | [官方](https://obsidian.md/help/plugins/file-explorer) · [vault_search_ui.rs](../src/vault_search_ui.rs) |
 | 資料夾 | 部分 | 匯入與 ZIP 匯出保存中文巢狀路徑。含來源附件的 ZIP 解壓後可回匯為獨立批次。未保存的空資料夾不在匯出範圍。 | [官方](https://obsidian.md/help/manage-vaults) · [資料夾與附件往返](UI-ACCEPTANCE.md#vault-資料夾與附件往返) |
 | 原地編輯 Markdown | 已驗證 | 明確選取本機 UTF-8 檔、編輯並寫回同檔。外部改檔拒寫，保留草稿；正常存檔先留舊版。 | [官方](https://obsidian.md/help/manage-vaults) · [介面驗收](UI-ACCEPTANCE.md#型別公式vault-原檔與白板標註來源) |
-| 附件 | 部分 | 匯入保留可解析附件的相對來源及內容。可隨 Vault ZIP 移轉具有明確路徑的來源附件，匯出前核對回匯配對。另有同一路徑的新內容更新功能；缺檔、衝突或會影響既有 PDF 標註時會拒絕更新。 | [官方](https://obsidian.md/help/attachments) · [資料夾與附件往返](UI-ACCEPTANCE.md#vault-資料夾與附件往返) |
+| 附件 | 部分 | 匯入保留可解析附件的相對來源及內容。資料夾匯入前可檢視配對及歧義，確認時會重新核對來源，已變動則停止。可隨 Vault ZIP 移轉具有明確路徑的來源附件，匯出前核對回匯配對。另有同一路徑的新內容更新功能；缺檔、衝突或會影響既有 PDF 標註時會拒絕更新。 | [官方](https://obsidian.md/help/attachments) · [資料夾與附件往返](UI-ACCEPTANCE.md#vault-資料夾與附件往返) |
 | Markdown | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |
 | 閱讀檢視 | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |
 | 原始碼編輯 | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |
@@ -169,7 +169,7 @@
 | 快速切換器 | 部分 | F7 依標題、來源路徑或完整別名打開指定筆記，也可用 tag:#父層 找含子標籤的匯入筆記。模糊排序、快速新建及新分頁待做。 | [官方](https://obsidian.md/help/plugins/quick-switcher) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 大綱 | 部分 | F8 依標題層級與行號列出已保存內容或目前草稿，可跳到同名標題的精確位置。拖曳重新排序段落待做。 | [官方](https://obsidian.md/help/plugins/outline) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 懸浮頁面預覽 | 未實作 | 沒有上述獨立入口。 | [官方](https://obsidian.md/help/plugins/page-preview) · [window.rs](../src/window.rs) |
-| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可框選節點整批移動、新增或刪除連線，並在重開後復原最近一步。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出。畫布可保存各自的平移與縮放。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [Canvas 操作](UI-ACCEPTANCE.md#canvas-框選復原與搬移) |
+| JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可框選節點整批移動、新增或刪除連線，並在重開後復原最近一步。可從框選建立具名群組，拖群組時一起移動框內節點，並以標準 `group` 節點匯入與匯出。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出。畫布可保存各自的平移與縮放。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [Canvas 操作](UI-ACCEPTANCE.md#canvas-框選復原與搬移) |
 | 文字節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 檔案節點 | 部分 | 核對 Vault 搬移時，可在同一交易更新綁定該批次的檔案節點。保留原節點 ID、子路徑和未知欄位。原磁碟檔由外部工具管理。自動監聽待做。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
 | 連結節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |
@@ -246,7 +246,7 @@
 | 卡片內嵌 | 未實作 | 本機筆記白板不提供這些物件，JSON Canvas 為獨立視圖。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [boards.rs](../src/boards.rs) |
 | 自由文字物件 | 已驗證 | 白板可新增、移動、編輯及移除獨立文字方塊。重開後可復原最近移除的一個，原位有重疊時改放空位。每個物件限 4,096 字。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |
 | 內部連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
-| 反向連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
+| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。原生筆記白板的跨板定位與其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [Canvas 位置](UI-ACCEPTANCE.md#從筆記定位-canvas-節點) |
 | 快捷鍵 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/keyboard-shortcuts) · [note_links.rs](../src/note_links.rs) |
 | 全域搜尋 | 部分 | 可跨工作區搜尋 PDF 引文、註解、來源名稱與頁碼，也可依摘錄卡名稱、原引文或原註解開啟卡片，或將同一張卡加入目前白板。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [pdf_search_ui.rs](../src/pdf_search_ui.rs) |
 | 側欄工具 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |

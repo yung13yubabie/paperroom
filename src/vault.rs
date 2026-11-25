@@ -326,6 +326,12 @@ impl<'a> WikiIndex<'a> {
     }
 }
 
+pub(crate) enum MarkdownTarget {
+    Found(i64),
+    Missing,
+    Ambiguous,
+}
+
 pub(crate) struct NoteLinkPaths<'a> {
     pub(crate) wiki: WikiIndex<'a>,
     markdown: HashMap<&'a str, i64>,
@@ -340,6 +346,13 @@ impl<'a> NoteLinkPaths<'a> {
     }
 
     pub(crate) fn markdown_target(&self, source: &[String], path: &str) -> Option<i64> {
+        match self.markdown_resolution(source, path) {
+            MarkdownTarget::Found(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn markdown_resolution(&self, source: &[String], path: &str) -> MarkdownTarget {
         let resolve = |resolved: String| {
             self.markdown.get(resolved.as_str()).copied().or_else(|| {
                 let leaf = resolved.rsplit('/').next().unwrap_or("");
@@ -349,15 +362,17 @@ impl<'a> NoteLinkPaths<'a> {
             })
         };
         let relative = crate::store::migration_media::source_relative(source, path).and_then(resolve);
-        if path.starts_with("./") || path.starts_with("../") {
-            return relative;
-        }
         let root = [String::new()];
-        let absolute = crate::store::migration_media::source_relative(&root, path).and_then(resolve);
-        if relative.is_some() && absolute.is_some() && relative != absolute {
-            return None;
+        let absolute = if path.starts_with("./") || path.starts_with("../") {
+            None
+        } else {
+            crate::store::migration_media::source_relative(&root, path).and_then(resolve)
+        };
+        match (relative, absolute) {
+            (Some(a), Some(b)) if a != b => MarkdownTarget::Ambiguous,
+            (Some(id), _) | (_, Some(id)) => MarkdownTarget::Found(id),
+            _ => MarkdownTarget::Missing,
         }
-        relative.or(absolute)
     }
 }
 

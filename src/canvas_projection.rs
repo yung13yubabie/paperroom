@@ -5,6 +5,7 @@ pub(crate) const MAX_COORDINATE: i64 = 1_000_000_000_000_000;
 const MAX_VIEW_ORIGIN: f64 = 4e15;
 const MIN_VIEW_SCALE: f64 = 1e-16;
 const MAX_VIEW_SCALE: f64 = 12.0;
+pub(crate) const MAX_DRAWN_NODES: usize = 500;
 pub type Rect = [i32; 4];
 pub type Geometry = [i64; 4];
 
@@ -29,11 +30,40 @@ pub struct Projection {
     scale: f64,
 }
 
+fn geometry(node: &Value) -> Option<Geometry> {
+    let (x, y, width, height) = canvas::geometry_for_preview(node)?;
+    Some([x as i64, y as i64, width as i64, height as i64])
+}
+
 pub fn nodes(doc: &Document) -> impl Iterator<Item = (&Value, Geometry)> {
-    doc.json()["nodes"].as_array().into_iter().flatten().take(500).filter_map(|node| {
-        let (x, y, width, height) = canvas::geometry_for_preview(node)?;
-        Some((node, [x as i64, y as i64, width as i64, height as i64]))
-    })
+    doc.json()["nodes"].as_array().into_iter().flatten().take(MAX_DRAWN_NODES)
+        .filter_map(|node| Some((node, geometry(node)?)))
+}
+
+pub(crate) fn all_geometry(doc: &Document) -> impl Iterator<Item = (&Value, Geometry)> {
+    doc.json()["nodes"].as_array().into_iter().flatten()
+        .filter_map(|node| Some((node, geometry(node)?)))
+}
+
+pub(crate) fn encloses_geometry([x, y, w, h]: Geometry, [nx, ny, nw, nh]: Geometry) -> bool {
+    x <= nx && y <= ny && nx + nw <= x + w && ny + nh <= y + h
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn move_nodes(
+    doc: &Document, selection: &std::collections::HashSet<String>,
+) -> (std::collections::HashSet<String>, Vec<Geometry>) {
+    let mut nodes = all_geometry(doc).filter_map(|(node, rect)| {
+        Some((node["id"].as_str()?, node["type"].as_str() == Some("group"), rect))
+    }).collect::<Vec<_>>();
+    let groups = nodes.iter().filter_map(|(id, group, rect)| {
+        (selection.contains(*id) && *group).then_some(*rect)
+    }).collect::<Vec<_>>();
+    nodes.retain(|(id, group, rect)| selection.contains(*id) || groups.iter().any(|frame| {
+        // Coincident group frames are peers, not nested groups.
+        (!group || frame != rect) && encloses_geometry(*frame, *rect)
+    }));
+    nodes.into_iter().map(|(id, _, rect)| (id.to_owned(), rect)).unzip()
 }
 
 impl Projection {
@@ -56,6 +86,24 @@ impl Projection {
         let scale_x = f64::from((area[2] - area[0] - 2 * inset).max(1)) / (right - left) as f64;
         let scale_y = f64::from((area[3] - area[1] - 2 * inset).max(1)) / (bottom - top) as f64;
         Some(Self { area, inset, origin: [left as f64, top as f64], scale: scale_x.min(scale_y).min(1.5) })
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn focus_camera(
+        area: Rect, inset: i32, dpi: u32, [x, y, width, height]: Geometry,
+    ) -> Option<Camera> {
+        let available = [area[2] - area[0] - 2 * inset, area[3] - area[1] - 2 * inset];
+        if available.iter().any(|size| *size < 4) || width <= 0 || height <= 0 { return None; }
+        let dpi_factor = f64::from(dpi.max(1)) / 96.0;
+        let physical = (0.8 * f64::from(available[0]) / width as f64)
+            .min(0.8 * f64::from(available[1]) / height as f64)
+            .min(1.5 * dpi_factor);
+        let center = [x as f64 + width as f64 / 2.0, y as f64 + height as f64 / 2.0];
+        let camera = Camera {
+            origin: std::array::from_fn(|axis| center[axis] - f64::from(available[axis]) / (2.0 * physical)),
+            scale: physical / dpi_factor,
+        };
+        camera.valid().then_some(camera)
     }
 
     pub(crate) fn camera(area: Rect, inset: i32, dpi: u32, camera: Camera) -> Self {
@@ -121,6 +169,20 @@ impl Projection {
 #[cfg(test)]
 mod camera_tests {
     use super::*;
+
+    #[test]
+    fn focus_centers_and_fits_a_distant_occurrence_across_dpi() {
+        for (area, inset, dpi) in [([303,100,950,680],12,96), ([495,150,1425,1020],18,144)] {
+            for geometry in [[8_000_000,-9_000_000,112,80],[-3_000,2_000,80_000,450_000]] {
+                let camera = Projection::focus_camera(area, inset, dpi, geometry).unwrap();
+                let projected = Projection::camera(area, inset, dpi, camera).rectangle(geometry);
+                assert!(encloses(area, projected));
+                assert!((projected[0]+projected[2]-area[0]-area[2]).abs() <= 3);
+                assert!((projected[1]+projected[3]-area[1]-area[3]).abs() <= 3);
+            }
+        }
+        assert!(Projection::focus_camera([0,0,40,40],24,96,[0,0,1,1]).is_none());
+    }
 
     #[test]
     fn camera_pan_zoom_and_dpi_preserve_the_world_anchor() {

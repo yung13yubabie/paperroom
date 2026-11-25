@@ -112,6 +112,7 @@ impl App {
                 (8, "移到最上層…"), (9, "移到最下層…"), (10, "刪除節點及相連線段…"),
                 (11, "新增連線…"), (12, "修改連線標籤…"), (13, "刪除連線…"),
                 (14, "修改連線端點與顏色…"),
+                (15, "從選取建立群組…"),
             ]);
             let entered: String;
             let edit = match action {
@@ -121,6 +122,12 @@ impl App {
                     let Some(rect) = geometry(hwnd, "0 0 320 180")? else { return Ok(()); };
                     entered = value;
                     CanvasEdit::AddNode { kind, content: &entered, geometry: rect }
+                }
+                15 => {
+                    if view.selection.is_empty() { return Err("請先框選要放入群組的節點。".into()); }
+                    let Some(name) = prompt(hwnd, "建立 Canvas 群組", "群組名稱", "", 8192)? else { return Ok(()); };
+                    entered = name;
+                    CanvasEdit::GroupSelection { ids: &view.selection, label: &entered }
                 }
                 5..=10 => {
                     let Some(node) = pick_item(hwnd, anchor, &view.doc, "nodes", "選取節點")? else { return Ok(()); };

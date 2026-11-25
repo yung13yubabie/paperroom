@@ -949,15 +949,22 @@ function Rule-Prompt([string]$Caption, [string]$Expected, [string]$Value, [switc
         throw "Unexpected initial text in collection prompt '$Caption', expected '$Expected'."
     }
     if ($Value -cne $Expected) {
-        $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
-        [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
-        $null = Wait-For "focused field $Caption" {
-            [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)
+        try {
+            if ($Value.Length -gt 0) {
+                Type-SearchFilter $dialog 101 $Value
+            } else {
+                $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
+                [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+                $null = Wait-For "focused field $Caption" {
+                    [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)
+                }
+                [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+                [PaperroomHighlightGui]::TapKey($window,$process.Id,0x2E)
+                $null = Wait-For "cleared field $Caption" { [PaperroomHighlightGui]::Read($edit) -ceq '' }
+            }
+        } catch {
+            throw "Native test field '$Caption' contained '$([PaperroomHighlightGui]::Read($edit))' after entering '$Value'. $($_.Exception.Message)"
         }
-        [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
-        [PaperroomHighlightGui]::TapKey($window,$process.Id,0x08)
-        if ($Value.Length) { [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$Value) }
-        $null = Wait-For "corrected text in $Caption" { [PaperroomHighlightGui]::Read($edit) -ceq $Value }
     }
     if ($Cancel) { Finish-Revision $dialog 2 } else { Finish-Revision $dialog 1 }
 }

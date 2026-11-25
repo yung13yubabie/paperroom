@@ -1452,6 +1452,7 @@ impl App {
             items.extend([(20, "尋找／取代…"), (21, "字數統計…"), (22, "檢視與還原版本…")]);
             if is_excerpt { items.push((23, "復原已移除的 PDF 標註…")); }
             items.push((24, "複製筆記與內容…"));
+            items.push((27, "查看此筆記的 Canvas 位置…"));
             if self.editing && self.editor_ready && !self.extras.board {
                 items.extend([
                     (25, "切換選取文字的螢光標記"),
@@ -1504,6 +1505,7 @@ impl App {
                     21 => app.note_word_count_ui()?,
                     23 => app.restore_pdf_excerpt_ui(id)?,
                     24 => app.duplicate_note_ui(id)?,
+                    27 => app.show_note_canvas_locations(id)?,
                     _ => {}
                 }
                 Ok(())

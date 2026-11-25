@@ -246,7 +246,7 @@
 | 卡片內嵌 | 未實作 | 本機筆記白板不提供這些物件，JSON Canvas 為獨立視圖。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [boards.rs](../src/boards.rs) |
 | 自由文字物件 | 已驗證 | 白板可新增、移動、編輯及移除獨立文字方塊。重開後可復原最近移除的一個，原位有重疊時改放空位。每個物件限 4,096 字。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |
 | 內部連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
-| 反向連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
+| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。原生筆記白板的跨板定位與其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [Canvas 位置](UI-ACCEPTANCE.md#從筆記定位-canvas-節點) |
 | 快捷鍵 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/keyboard-shortcuts) · [note_links.rs](../src/note_links.rs) |
 | 全域搜尋 | 部分 | 可跨工作區搜尋 PDF 引文、註解、來源名稱與頁碼，也可依摘錄卡名稱、原引文或原註解開啟卡片，或將同一張卡加入目前白板。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [pdf_search_ui.rs](../src/pdf_search_ui.rs) |
 | 側欄工具 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |

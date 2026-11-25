@@ -750,6 +750,39 @@ function Read-CanvasInk([int]$Red = 237, [int]$Green = 33, [int]$Blue = 125) {
         } finally { $bitmap.UnlockBits($pixels) }
     } finally { $bitmap.Dispose() }
 }
+function Locate-NoteOnCanvas([int]$CanvasIndex, [string]$CanvasName, [int]$CanvasId, [int]$Count,
+                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb) {
+    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    Native-Menu 113 $CanvasIndex ("$CanvasName  (#${CanvasId}，$Count 處)") -MenuOpen
+    Native-Menu 113 $NodeIndex "${NodeIndex}　同一張卡 〔$NodeId〕" -MenuOpen -CaptionPrefix
+    $null = Wait-For 'exact Canvas and occurrence are active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)) -ceq $CanvasName -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq "已定位 Canvas 節點「$NodeId」。"
+    }
+    $ink = Wait-For 'painted the chosen occurrence using its unique native border' { Read-CanvasInk $Rgb[0] $Rgb[1] $Rgb[2] }
+    $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+    if ([Math]::Abs($ink.L+$ink.R-($area.Right-$area.Left-1)) -gt 5 -or
+        [Math]::Abs($ink.T+$ink.B-($area.Bottom-$area.Top-1)) -gt 5) {
+        throw "The painted node '$NodeId' was not centered."
+    }
+    Write-Host "Verified painted centered occurrence by border bounds: $CanvasName / $NodeId."
+}
+function Open-LocationSource {
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $null = Wait-For 'the selected Canvas occurrence opens the exact note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('場景原本的獨特引文')
+    }
+}
+function Return-FromCanvasLocation {
+    $button = Control $window 119
+    $point = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,$button)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$button,$point,0)
+    $null = Wait-For 'returned to the original note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
+}
 function Read-CanvasStamp([string]$Database, [string]$Source) {
     $stamp = @'
 from pathlib import Path
@@ -1516,6 +1549,111 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+    $locationHome = Join-Path $root 'canvas-locations-workspace'
+    $vaultA = Join-Path $root 'LocationVaultA'
+    $vaultB = Join-Path $root 'LocationVaultB'
+    $locationFolderA = Join-Path $vaultA '資料'
+    $locationFolderB = Join-Path $vaultB '資料'
+    foreach ($dir in @($locationHome,$locationFolderA,$locationFolderB)) { [void][IO.Directory]::CreateDirectory($dir) }
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $locationHome 'Paperroom.exe')
+    $encoding = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText((Join-Path $locationFolderA '鏡頭.md'),'場景原本的獨特引文',$encoding)
+    [IO.File]::WriteAllText((Join-Path $locationFolderB '鏡頭.md'),'另一本 Vault 的同名正文',$encoding)
+    $north = Join-Path $root 'CanvasNorth.canvas'
+    $south = Join-Path $root 'CanvasSouth.canvas'
+    $other = Join-Path $root 'CanvasOther.canvas'
+    [IO.File]::WriteAllText($north,'{"nodes":[{"id":"west","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":-28000,"y":800,"width":120,"height":75,"color":"#ed217d"},{"id":"east","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":28000,"y":-800,"width":120,"height":75,"color":"#12a474"}],"edges":[{"id":"line","fromNode":"west","toNode":"east","custom":true}],"vendor":{"keep":true}}',$encoding)
+    [IO.File]::WriteAllText($south,'{"nodes":[{"id":"only","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":37000,"y":800,"width":120,"height":75,"color":"#047bea"}]}',$encoding)
+    [IO.File]::WriteAllText($other,'{"nodes":[{"id":"unrelated","type":"file","file":"資料/鏡頭.md","label":"同一張卡","x":1000,"y":800,"width":120,"height":75,"color":"#6f5092"}]}',$encoding)
+    $locationDb = Join-Path $locationHome 'paperroom-data/notes.sqlite3'
+    $process = Start-Notebook $locationHome
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $vaultA '附件綁定 0 筆，未解析 0 筆'
+    Native-VaultFolder $vaultB '附件綁定 0 筆，未解析 0 筆'
+    foreach ($spec in @(@($north,1,'LocationVaultA'),@($south,1,'LocationVaultA'),@($other,2,'LocationVaultB'))) {
+        Native-File 11 '匯入 JSON Canvas…' $spec[0] '中鍵拖曳平移'
+        Native-Menu 120 4 '綁定匯入的 Vault…'
+        Native-Menu 120 $spec[1] "匯入：$($spec[2])  (" -MenuOpen -CaptionPrefix
+        $null = Wait-For 'explicit Canvas vault binding was saved' {
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將畫布連到這個匯入的 Vault。'
+        }
+    }
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 '場景原本的獨特引文'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'selected the only original card by unique body' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭'
+    }
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125)
+    Open-LocationSource
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Open-LocationSource
+    Locate-NoteOnCanvas 2 'CanvasSouth' 2 1 1 'only' @(4,123,234)
+    Open-LocationSource
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $locationHome
+    $window = $process.MainWindowHandle
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 '場景原本的獨特引文'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'reopened the original note' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' }
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $refusal = Wait-For 'selected node cannot open an unbound file' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'請先綁定含有這個精確路徑的 Vault')) {
+        throw 'The unbound selected occurrence did not explain why it cannot resolve.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'dismissed the native stale binding alert' { ![PaperroomHighlightGui]::IsWindowVisible($refusal) }
+    Native-Menu 120 4 '綁定匯入的 Vault…'
+    Native-Menu 120 2 '匯入：LocationVaultB  (' -MenuOpen -CaptionPrefix
+    Native-Menu 120 13 '開啟已選節點的來源筆記'
+    $refusal = Wait-For 'rebinding cannot redirect this selected occurrence to a namesake' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'此節點已不再指向原筆記')) {
+        throw 'Rebinding unexpectedly redirected the current visit.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'dismissed the native redirected-target alert' { ![PaperroomHighlightGui]::IsWindowVisible($refusal) }
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Return-FromCanvasLocation
+    Locate-NoteOnCanvas 1 'CanvasSouth' 2 1 1 'only' @(4,123,234)
+    Native-Menu 120 6 '解除 Vault 綁定'
+    Return-FromCanvasLocation
+    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    $null = Wait-For 'unbound and same-name other Vault occurrences are excluded' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '這篇筆記未出現在已綁定的 Canvas。'
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from contextlib import closing
+from pathlib import Path
+import sqlite3,sys
+db_path,north,south,other=map(Path,sys.argv[1:])
+with closing(sqlite3.connect(db_path.as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    canvas=db.execute("SELECT title, source FROM saved_canvases ORDER BY id").fetchall()
+    assert len(canvas)==3
+    for (title,data),path in zip(canvas,(north,south,other)):
+        assert title==path.stem and data.encode("utf-8")==path.read_bytes()
+    assert db.execute("SELECT count(*) FROM canvas_cameras").fetchone()==(0,)
+    binding=db.execute("SELECT c.title,n.title FROM canvas_vault_bindings b "
+                       "JOIN saved_canvases c ON c.id=b.canvas_id JOIN notes n ON n.id=b.import_root").fetchall()
+    assert binding==[("CanvasOther","\u532f\u5165\uff1aLocationVaultB")]
+    assert db.execute("SELECT count(*) FROM vault_paths").fetchone()==(2,)
+print("Verified all original Canvas bytes, no saved camera edits, and only the expected second-vault binding after native navigation.")
+'@ | python - $locationDb $north $south $other
+    if ($LASTEXITCODE -ne 0) { throw 'The exact Canvas and workspace round-trip verification failed.' }
+    Write-Host 'PASS: native note-to-Canvas locations find repeated nodes in separate canvases, center each painted occurrence, reopen the exact note and persist across restart, refuse an unbound selected node, and keep Canvas content and camera settings unchanged.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

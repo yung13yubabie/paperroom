@@ -373,12 +373,6 @@ impl App {
                 let accent = canvas_color(&node["color"], TEAL);
                 if kind != "group" { fill(dc, &rect, PAPER); }
                 frame(dc, rect, accent);
-                if node["id"].as_str().is_some_and(|id| view.selection.contains(id)) {
-                    let border = self.scaled(2);
-                    let inset = RECT { left: rect.left + border, top: rect.top + border,
-                                       right: rect.right - border, bottom: rect.bottom - border };
-                    if inset.left < inset.right && inset.top < inset.bottom { frame(dc, inset, INK); }
-                }
                 if let Some(grip) = grip { fill(dc, &rectangle(grip), accent); }
                 let field = match kind { "text" => "text", "file" => "file", "link" => "url", _ => "label" };
                 let caption = node[field].as_str().unwrap_or(kind).chars().take(140)
@@ -417,6 +411,15 @@ impl App {
                     if body.bottom > body.top {
                         draw_text(dc, self.fonts[4], SOFT, badge, &mut body, DT_SINGLELINE | DT_END_ELLIPSIS);
                     }
+                }
+            }
+            // Keep the selection visible even if a later node overlaps it.
+            for id in &view.selection {
+                if let Some(&[left, top, right, bottom]) = places.get(id.as_str()) {
+                    let border = self.scaled(2);
+                    let inset = RECT { left: left + border, top: top + border,
+                                       right: right - border, bottom: bottom - border };
+                    if inset.left < inset.right && inset.top < inset.bottom { frame(dc, inset, INK); }
                 }
             }
             if let Some(drag) = drag.filter(|drag| matches!(drag.action, DragAction::Marquee))

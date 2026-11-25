@@ -44,7 +44,9 @@ pub(crate) mod canvas_bundle;
 #[path = "canvas_links.rs"]
 mod canvas_links;
 #[path = "vault_export.rs"]
-mod vault_export;
+pub(crate) mod vault_export;
+#[path = "vault_zip_links.rs"]
+pub(crate) mod vault_zip_links;
 #[path = "vault_sync.rs"]
 pub(crate) mod vault_sync;
 #[path = "vault_search.rs"]
@@ -548,7 +550,7 @@ impl Notebook {
         folder: &str,
         files: Vec<crate::archive::ImportedPage>,
     ) -> Result<i64> {
-        self.import_pages(folder, files, false, migration_media::MediaPlan::default(), None)
+        self.import_pages(folder, files, false, migration_media::MediaPlan::default(), None, None)
     }
 
     pub fn import_vault(
@@ -556,21 +558,21 @@ impl Notebook {
         folder: &str,
         files: Vec<crate::archive::ImportedPage>,
     ) -> Result<i64> {
-        self.import_pages(folder, files, true, migration_media::MediaPlan::default(), None)
+        self.import_pages(folder, files, true, migration_media::MediaPlan::default(), None, None)
     }
 
     pub fn import_vault_with_media(
         &mut self, folder: &str, files: Vec<crate::archive::ImportedPage>,
         media: migration_media::MediaPlan,
     ) -> Result<i64> {
-        self.import_pages(folder, files, true, media, None)
+        self.import_pages(folder, files, true, media, None, None)
     }
 
     pub fn import_markdown_with_media(
         &mut self, folder: &str, files: Vec<crate::archive::ImportedPage>,
         media: migration_media::MediaPlan,
     ) -> Result<i64> {
-        self.import_pages(folder, files, false, media, None)
+        self.import_pages(folder, files, false, media, None, None)
     }
 
     pub(crate) fn import_notion_with_media(
@@ -580,7 +582,13 @@ impl Notebook {
         media: migration_media::MediaPlan,
         csv: notion_handoff::CsvSources,
     ) -> Result<i64> {
-        self.import_pages(folder, files, false, media, Some(csv))
+        self.import_pages(folder, files, false, media, Some(csv), None)
+    }
+
+    pub(crate) fn import_portable_vault(
+        &mut self, folder: &str, import: vault_zip_links::PortableVault,
+    ) -> Result<i64> {
+        self.import_pages(folder, import.pages, true, import.media, None, Some(import.links))
     }
 
     fn import_pages(
@@ -590,6 +598,7 @@ impl Notebook {
         vault: bool,
         media: migration_media::MediaPlan,
         csv: Option<notion_handoff::CsvSources>,
+        portable_links: Option<vault_zip_links::LinkPlan>,
     ) -> Result<i64> {
         use std::collections::HashMap;
 
@@ -637,12 +646,17 @@ impl Notebook {
                     "INSERT INTO vault_sync_base(note_id,body) VALUES(?1,?2)",
                     params![parent, page.body],
                 )?;
-                tx.execute("INSERT INTO vault_push_verified(note_id) VALUES(?1)", [parent])?;
+                if portable_links.is_none() {
+                    tx.execute("INSERT INTO vault_push_verified(note_id) VALUES(?1)", [parent])?;
+                }
             }
             media.attach(&tx, parent, &path)?;
         }
         if let Some(csv) = csv {
             csv.attach(&tx, root)?;
+        }
+        if let Some(links) = portable_links {
+            links.rebind(&tx, root)?;
         }
         tx.commit()?;
         Ok(root)

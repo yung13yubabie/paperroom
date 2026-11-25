@@ -132,7 +132,8 @@ impl App {
         }
     }
 
-    pub(super) unsafe fn export_vault_zip_ui(&mut self, include_media: bool) -> Result<()> {
+    pub(super) unsafe fn export_vault_zip_ui(&mut self, mode: crate::store::vault_export::VaultZipMode) -> Result<()> {
+        use crate::store::vault_export::VaultZipMode;
         unsafe {
             let vaults = self.notebook.imported_vaults()?;
             if vaults.is_empty() {
@@ -145,9 +146,14 @@ impl App {
             let Some(path) = file_dialog(self.hwnd, "Markdown ZIP\0*.zip\0\0", "zip", Some("vault.zip"))?
             else { return Ok(()); };
             let id = vaults[index].0;
-            let status = if include_media {
-                let report = self.notebook.export_vault_with_media(id, &path)?;
+            let status = if mode != VaultZipMode::Markdown {
+                let report = if mode == VaultZipMode::PortableLinks {
+                    self.notebook.export_vault_links(id, &path)?
+                } else {
+                    self.notebook.export_vault_with_media(id, &path)?
+                };
                 let mut status = format!("已匯出 {} 篇 Markdown 與 {} 個來源附件。", report.pages, report.files);
+                if mode == VaultZipMode::PortableLinks { status.push_str("已加入可攜連結清單。"); }
                 if report.unbound > 0 {
                     status.push_str(&format!("另有 {} 筆未綁來源路徑的附件保存在工作區。", report.unbound));
                 }
@@ -158,6 +164,28 @@ impl App {
             };
             label(self.widgets.status, &status);
             Ok(())
+        }
+    }
+
+    pub(super) unsafe fn portable_vault_menu(&mut self) -> Result<()> {
+        unsafe {
+            match popup(self.hwnd, self.widgets.files, None, &[
+                (1, "匯出可攜 Vault ZIP…"), (2, "匯入可攜 Vault ZIP…"),
+            ]) {
+                1 => self.export_vault_zip_ui(crate::store::vault_export::VaultZipMode::PortableLinks),
+                2 => {
+                    let Some(path) = file_dialog(self.hwnd, "可攜 Vault ZIP\0*.zip\0\0", "zip", None)?
+                    else { return Ok(()); };
+                    let import = crate::store::vault_zip_links::read(&path)?;
+                    let (notes, rebound) = import.counts();
+                    let report = import.report();
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Vault ZIP");
+                    let root = self.notebook.import_portable_vault(&format!("匯入：{name}"), import)?;
+                    self.open_import(root, &format!("已匯入 {notes} 篇筆記，重綁 {rebound} 個紙間連結。"));
+                    crate::dialog::show_text(self.hwnd, "可攜 Vault 匯入報告", &report)
+                }
+                _ => Ok(()),
+            }
         }
     }
 

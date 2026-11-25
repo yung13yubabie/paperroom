@@ -1138,6 +1138,7 @@ impl App {
             let items = [
                 (35, "全域搜尋筆記…"),
                 (33, "關於紙間／第三方補充通知…"),
+                (36, "Vault ZIP 可攜連結…"),
                 (1, "匯入 Markdown…"),
                 (2, "匯入 Notion Markdown ZIP…"),
                 (3, "匯出目前筆記為 Markdown…"),
@@ -1213,7 +1214,9 @@ impl App {
                     12 => return app.open_canvas(None),
                     13 => return app.search_pdf_annotations_ui(),
                     14 => return app.typed_property_menu(),
-                    15 | 34 => return app.export_vault_zip_ui(action == 34),
+                    15 => return app.export_vault_zip_ui(crate::store::vault_export::VaultZipMode::Markdown),
+                    34 => return app.export_vault_zip_ui(crate::store::vault_export::VaultZipMode::Attachments),
+                    36 => return app.portable_vault_menu(),
                     16 => return app.edit_vault_markdown(),
                     17 | 18 => return app.note_bundle_dialog(action == 17),
                     19 => return app.sync_vault_incoming(),

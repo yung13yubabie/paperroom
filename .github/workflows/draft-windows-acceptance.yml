@@ -153,9 +153,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: 900115351e09158b275b6d0c23c509ef2a249e3a
-      PINNED_EXE_SHA: 8849c2f745322e9b42265fcdef826a99f18c4d901fae81de4185fd4e590ba804
-      PINNED_ZIP_SHA: 5c89aec94dbfa6779dbbba3117416dac15c69645bcb3889f041d97780fac94fe
+      PINNED_SOURCE: f936a18ccc836f0906d3b924114781b212bd1afb
+      PINNED_EXE_SHA: 94e681f82e86168cf0550e6cc2a5d735bf843a3f6baecb83a698949624c5abf5
+      PINNED_ZIP_SHA: f14e9f456bf4b5bf730ced433650a1e39388fee9164d80e420f4b0dffd4bb4e2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -180,11 +180,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15017793333"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15023184534"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45605590055 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45618960695 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'

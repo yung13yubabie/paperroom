@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Exe,
-    [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256
+    [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
+    [switch]$ProvePortableLinkGap
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -287,6 +288,22 @@ public static class PaperroomHighlightGui {
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
         return thread != 0 && actual == pid && GetGUIThreadInfo(thread, ref gui) && gui.Capture == owner;
     }
+    public static int[] InspectMenuSelection(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+        int target = MenuPosition(menu, itemId, caption, false);
+        int count = GetMenuItemCount(menu);
+        int highlighted = -1;
+        for (int i = 0; i < count; ++i) {
+            uint state = GetMenuState(menu, (uint)i, 0x400); // MF_BYPOSITION
+            if (state == uint.MaxValue) throw new InvalidOperationException("The menu item state is unavailable.");
+            if ((state & 0x80) == 0) continue; // MF_HILITE
+            if (highlighted >= 0) throw new InvalidOperationException("More than one native menu item is highlighted.");
+            highlighted = i;
+        }
+        return new[] {target, highlighted, count};
+    }
     public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
@@ -563,6 +580,30 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
 }
+function Native-MenuFromKeyboard([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
+    Click-WorkspaceButton $OwnerControl
+    $menu = Wait-For "keyboard navigation of $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0)
+    }
+    for ($attempt = 0; $attempt -lt 64; $attempt++) {
+        $target, $highlighted, $count = [PaperroomHighlightGui]::InspectMenuSelection($window, $process.Id, $menu, $Item, $Caption)
+        if ($highlighted -eq $target) {
+            [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
+            $null = Wait-For "native menu closed after $Caption" { ![PaperroomHighlightGui]::IsWindowVisible($menu) }
+            Write-Host "Verified and selected native menu command $Item by keyboard: $Caption."
+            return
+        }
+        $forward = ($target - $highlighted + $count) % $count
+        $left = if ($highlighted -lt 0) { $count - $target } else { $count - $forward }
+        $key = if ($left -lt $forward) { 0x26 } else { 0x28 }
+        [PaperroomHighlightGui]::TapKey($window, $process.Id, $key)
+        $null = Wait-For 'menu highlight changed after a physical arrow key' {
+            $state = [PaperroomHighlightGui]::InspectMenuSelection($window, $process.Id, $menu, $Item, $Caption)
+            $state[1] -ne $highlighted
+        }
+    }
+    throw "Did not reach the verified keyboard menu command $Caption."
+}
 function Replace-EditorText([IntPtr]$Field, [string]$Text) {
     $point = [PaperroomHighlightGui]::ControlPoint($window, $process.Id, $Field, 'Edit')
     [PaperroomHighlightGui]::MouseAction($window, $process.Id, $Field, $point, 0)
@@ -608,11 +649,12 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         4 { 'paperroom-backup.sqlite3' }
         30 { 'paperroom-html.zip' }
         34 { 'vault.zip' }
+        36 { 'vault.zip' }
         default { '' }
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $CanvasSave -or $Item -notin 1, 11
+    $saving = $CanvasSave -or $Item -notin 1, 11, 37
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -648,7 +690,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
                 [PaperroomHighlightGui]::ForegroundAlert($window, $process.Id, '紙間')
             }
             if (![PaperroomHighlightGui]::DialogContains($errorDialog, $process.Id, $ExpectedError) -or
-                (Test-Path -LiteralPath $Path)) { throw 'The export refusal or its file state differs from the expected result.' }
+                ($saving -and (Test-Path -LiteralPath $Path))) { throw 'The refusal or its file state differs from the expected result.' }
             [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
             $null = Wait-For 'native refusal dialog closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
             return
@@ -1123,7 +1165,9 @@ try {
     $window = $process.MainWindowHandle
     Select-Note $title
     Read-PreviewMark $true 'restored backup'
-    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 '
+    # The Windows CI desktop can clip this row under the popup's scroll arrow.
+    Native-MenuFromKeyboard 109 30 '匯出工作區 HTML ZIP…'
+    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 ' -AlreadyOpened
     $null = Open-Editor
     Native-Menu 113 26 '清除本篇螢光標記…'
     $cancel = Wait-For 'clear-highlight confirmation' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '清除螢光標記', 7) }
@@ -1655,6 +1699,184 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native Markdown note and heading links, precise backlinks with source path, no result, stable same-name insertion, rename and reopen, trash without retargeting, restoration and preserved source file.'
+
+    $portableSource = Join-Path $root 'PortableFixture'
+    $portableFiles = Join-Path $portableSource '場'
+    $portableLive = Join-Path $root 'portable-origin'
+    $portableNew = Join-Path $root 'portable-destination'
+    foreach ($folder in $portableFiles,$portableLive,$portableNew) {
+        [void][IO.Directory]::CreateDirectory($folder)
+    }
+    foreach ($folder in $portableLive,$portableNew) { Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe') }
+    $plain = "[相對引用](./PortableB.md)`r`n"
+    $originalA = Join-Path $portableFiles 'PortableA.md'
+    [IO.File]::WriteAllText($originalA,$plain,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $portableFiles 'PortableB.md'),'精確的 B 內容',[Text.UTF8Encoding]::new($false))
+    $portableZip = Join-Path $root 'PortableFixture.zip'
+    $process = Start-Notebook $portableLive
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $portableSource '附件綁定 0 筆，未解析 0 筆'
+    Open-LinkedFixture 'PortableA' '場'
+    Find-LinkTarget '場/PortableB.md'
+    Native-Menu 120 1 'PortableB　匯入：PortableFixture' -MenuOpen -CaptionPrefix
+    $null = Wait-For 'selector created the scoped note link' {
+        [PaperroomHighlightGui]::Read((Control $window 104)) -cmatch '\[\[paperroom:note:\d+:[0-9a-f]{32}\|PortableB\]\]' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+    }
+    Native-Menu 120 3 '前往　PortableB　｜ PortableB' -CaptionPrefix
+    $null = Wait-For 'scope link opens B before rename' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableB' }
+    Click-WorkspaceButton 110
+    $null = Wait-For 'B editor visible' { [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) }
+    Replace-EditorText (Control $window 103) 'PortableRenamed'
+    $null = Wait-For 'B rename persisted' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $portableLive
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'PortableA' '場'
+    Native-Menu 120 2 '前往　相對引用　｜ PortableRenamed' -CaptionPrefix
+    $null = Wait-For 'relative link opens B after a title-only change and restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed'
+    }
+    Native-Menu 120 2 '反向連結　PortableA' -CaptionPrefix
+    $null = Wait-For 'returned to A' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableA' }
+    Native-Menu 120 3 '前往　PortableB　｜ PortableRenamed' -CaptionPrefix
+    $null = Wait-For 'scoped link opens the same B after rename and restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed'
+    }
+    if ($ProvePortableLinkGap) {
+        Native-Menu 109 34 '匯出 Vault ZIP（含來源附件）…'
+        Native-Menu 109 1 '匯入：PortableFixture  (#' -MenuOpen -CaptionPrefix
+        Native-File 34 '匯出 Vault ZIP（含來源附件）…' $portableZip '已匯出 2 篇 Markdown 與 0 個來源附件。' -AlreadyOpened
+    } else {
+        Native-Menu 109 36 'Vault ZIP 可攜連結…'
+        Native-Menu 109 1 '匯出可攜 Vault ZIP…' -MenuOpen
+        Native-Menu 109 1 '匯入：PortableFixture  (#' -MenuOpen -CaptionPrefix
+        Native-File 36 '匯出可攜 Vault ZIP…' $portableZip '已匯出 2 篇 Markdown 與 0 個來源附件。已加入可攜連結清單。' -AlreadyOpened
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    if ($ProvePortableLinkGap) {
+        $portableUnpacked = Join-Path $root 'PortableReadback'
+        @'
+from pathlib import Path
+from zipfile import ZipFile
+import re,sys
+parent="\u5834"
+with ZipFile(sys.argv[1]) as z:
+    assert set(z.namelist()) == {f"{parent}/PortableA.md",f"{parent}/PortableB.md"}
+    assert z.testzip() is None
+    a=z.read(f"{parent}/PortableA.md")
+    assert b"./PortableB.md" in a and re.search(rb'paperroom:note:\d+:[0-9a-f]{32}\|PortableB',a)
+    z.extractall(sys.argv[2])
+print("Baseline export contains both reference types and exactly two Markdown members.")
+'@ | python - $portableZip $portableUnpacked
+        if ($LASTEXITCODE -ne 0) { throw 'Actual baseline Vault ZIP failed its two-note check.' }
+        $process = Start-Notebook $portableNew
+        $window = $process.MainWindowHandle
+        Native-VaultFolder $portableUnpacked '附件綁定 0 筆，未解析 0 筆'
+        Open-LinkedFixture 'PortableA' '場'
+        Native-Menu 120 2 '前往　相對引用　｜ PortableB' -CaptionPrefix
+        $null = Wait-For 'relative link works in the fresh workspace' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableB' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains('精確的 B 內容')
+        }
+        Native-Menu 120 2 '反向連結　PortableA' -CaptionPrefix
+        $null = Wait-For 'returned to A in the fresh workspace' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableA' }
+        Native-Menu 120 3 '開啟筆記關聯圖…'
+        $null = Wait-For 'scoped link absent in the fresh workspace' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '關聯圖操作' }
+        if ([IO.File]::ReadAllText($originalA) -cne $plain) { throw 'The baseline altered original A.' }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        Write-Host 'REPRODUCED on the pinned EXE: both links survive a same-workspace rename and restart; after actual Vault ZIP export, extraction and fresh workspace import, only the relative Markdown link opens B.'
+    } else {
+        $badZip = Join-Path $root 'PortableChanged.zip'
+        $initialZipHash = (Get-FileHash -LiteralPath $portableZip).Hash
+        @'
+from hashlib import sha256
+from zipfile import ZipFile
+import json,re,sys
+parent="\u5834"
+a,b=(f"{parent}/Portable{name}.md" for name in ("A","B"))
+manifest="Paperroom-Vault-Links.json"
+with ZipFile(sys.argv[1]) as z:
+    assert set(z.namelist()) == {a,b,manifest}
+    notes={n["path"]:n for n in json.loads(z.read(manifest))["notes"]}
+    assert all(sha256(z.read(name)).hexdigest()==notes[name]["sha256"] for name in (a,b))
+    assert notes[b]["title"]=="PortableRenamed"
+    assert b"./PortableB.md" in z.read(a) and notes[b]["identity"].encode() in z.read(a)
+    with ZipFile(sys.argv[2],"w") as changed:
+        for member in z.namelist():
+            payload=z.read(member)
+            changed.writestr(member, payload+b" changed" if member==b else payload)
+print("Confirmed exact source and target archive members. Prepared a synthetic target checksum mismatch.")
+'@ | python - $portableZip $badZip
+        if ($LASTEXITCODE -ne 0) { throw 'Actual portable ZIP failed its two-note and manifest check.' }
+        $process = Start-Notebook $portableNew
+        $window = $process.MainWindowHandle
+        Native-Menu 109 36 'Vault ZIP 可攜連結…'
+        Native-Menu 109 2 '匯入可攜 Vault ZIP…' -MenuOpen
+        Native-File 37 '匯入可攜 Vault ZIP…' $badZip '拒絕錯誤校驗' -AlreadyOpened -ExpectedError '筆記路徑、身分、標題或校驗不符'
+        Native-Menu 109 36 'Vault ZIP 可攜連結…'
+        Native-Menu 109 2 '匯入可攜 Vault ZIP…' -MenuOpen
+        Native-File 37 '匯入可攜 Vault ZIP…' $portableZip '已匯入 2 篇筆記，重綁 1 個紙間連結。' -AlreadyOpened
+        $dialog = Wait-For 'native portable Vault import report' {
+            [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','可攜 Vault 匯入報告',1)
+        }
+        if (![PaperroomHighlightGui]::Read((Control $dialog 101)).Contains('重綁 1 個紙間連結。')) {
+            throw 'The import report did not account for the one verified link.'
+        }
+        Finish-Revision $dialog 1
+        Close-Notebook $process
+        $process.Dispose()
+        $process = Start-Notebook $portableNew
+        $window = $process.MainWindowHandle
+        Open-LinkedFixture 'PortableA' '場'
+        Native-Menu 120 2 '前往　相對引用　｜ PortableRenamed' -CaptionPrefix
+        $null = Wait-For 'relative link opens the exact imported B after restart' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains('精確的 B 內容')
+        }
+        Native-Menu 120 2 '反向連結　PortableA' -CaptionPrefix
+        $null = Wait-For 'relative backlink returned to imported A' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableA' }
+        Native-Menu 120 3 '前往　PortableB　｜ PortableRenamed' -CaptionPrefix
+        $null = Wait-For 'rebound identity link opens the exact imported B after restart' {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'PortableRenamed' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains('精確的 B 內容')
+        }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        $destinationDb = Join-Path $portableNew 'paperroom-data/notes.sqlite3'
+        @'
+from contextlib import closing
+from pathlib import Path
+from zipfile import ZipFile
+import json,sqlite3,sys
+parent="\u5834"
+a,b=(f"{parent}/Portable{name}.md" for name in ("A","B"))
+with ZipFile(sys.argv[1]) as z, closing(sqlite3.connect(Path(sys.argv[2]).as_uri()+"?mode=ro",uri=True)) as db:
+    notes={n["path"]:n for n in json.loads(z.read("Paperroom-Vault-Links.json"))["notes"]}
+    raw=z.read(a)
+    assert not db.execute("SELECT 1 FROM notes WHERE title=?", ("\u532f\u5165\uff1aPortableChanged",)).fetchone()
+    rows=db.execute("SELECT p.relative_path,n.id,n.title,n.body,t.token FROM vault_paths p "
+                    "JOIN notes n ON n.id=p.note_id JOIN note_link_identities t ON t.note_id=n.id").fetchall()
+    assert len(rows)==2
+    saved={row[0]:row[1:] for row in rows}
+    assert saved[b][1]=="PortableRenamed" and saved[b][2].encode()==z.read(b)
+    prior=notes[b]["identity"].encode()
+    after=f"paperroom:note:{saved[b][0]}:{saved[b][3]}".encode()
+    assert after!=prior and saved[a][2].encode()==raw.replace(prior,after,1)
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+print("Verified exact B content and identity separately from its display title; A differs from the archived bytes only at the scoped identity.")
+'@ | python - $portableZip $destinationDb
+        if ($LASTEXITCODE -ne 0) { throw 'Actual reopened workspace failed its archived link and raw byte checks.' }
+        if ((Get-FileHash -LiteralPath $portableZip).Hash -cne $initialZipHash -or
+            [IO.File]::ReadAllText($originalA) -cne $plain) { throw 'Import changed the original ZIP or Vault Markdown.' }
+        Write-Host 'PASS: native two-note portable Vault ZIP, verified rebinding, both link types after restart, independent title and content checks, checksum refusal without partial import, and untouched sources.'
+    }
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

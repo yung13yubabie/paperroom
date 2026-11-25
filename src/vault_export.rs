@@ -1,6 +1,7 @@
 use super::{MAX_NOTE_BYTES, Notebook, Result};
 use super::attachments::{MAX_FILE_BYTES, file_kind, has_expected_signature};
 use super::migration_media::{self, MediaPaths};
+use super::vault_zip_links::{Manifest, MANIFEST_PATH};
 use crate::archive::MAX_ENTRIES;
 use crate::output::{publish_new, windows_output_name};
 use rusqlite::{Connection, params};
@@ -10,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 use zip::write::SimpleFileOptions;
 
-const MAX_TOTAL_BYTES: usize = 80 * 1024 * 1024;
+pub(super) const MAX_TOTAL_BYTES: usize = 80 * 1024 * 1024;
 const MAX_PATH_DEPTH: usize = 64;
 
 struct Entry {
@@ -20,10 +21,10 @@ struct Entry {
 }
 
 #[derive(Default)]
-struct PortablePaths(HashMap<(usize, String), Entry>);
+pub(super) struct PortablePaths(HashMap<(usize, String), Entry>);
 
 impl PortablePaths {
-    fn add_file(&mut self, path: &str) -> Result<()> {
+    pub(super) fn add_file(&mut self, path: &str) -> Result<()> {
         let mut components = path.split('/').peekable();
         let mut parent = 0;
         let mut depth = 0;
@@ -56,6 +57,9 @@ impl PortablePaths {
         Ok(())
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VaultZipMode { Markdown, Attachments, PortableLinks }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct VaultExport {
@@ -143,14 +147,18 @@ impl SourceAssets {
 
 impl Notebook {
     pub fn export_vault_markdown(&self, import_root: i64, destination: &Path) -> Result<usize> {
-        Ok(self.export_vault(import_root, destination, false)?.pages)
+        Ok(self.export_vault(import_root, destination, VaultZipMode::Markdown)?.pages)
     }
 
     pub(crate) fn export_vault_with_media(&self, root: i64, destination: &Path) -> Result<VaultExport> {
-        self.export_vault(root, destination, true)
+        self.export_vault(root, destination, VaultZipMode::Attachments)
     }
 
-    fn export_vault(&self, import_root: i64, destination: &Path, include_media: bool) -> Result<VaultExport> {
+    pub(crate) fn export_vault_links(&self, root: i64, destination: &Path) -> Result<VaultExport> {
+        self.export_vault(root, destination, VaultZipMode::PortableLinks)
+    }
+
+    fn export_vault(&self, import_root: i64, destination: &Path, mode: VaultZipMode) -> Result<VaultExport> {
         // Paths and text come from one SQLite snapshot. Only the explicitly
         // selected import contributes files to the new archive.
         let tx = self.connection.unchecked_transaction()?;
@@ -158,17 +166,19 @@ impl Notebook {
         publish_new(destination, |file, _| {
             {
                 let mut statement = tx.prepare(
-                    "SELECT p.relative_path,n.body,n.id FROM vault_paths p
+                    "SELECT p.relative_path,n.body,n.id,n.title,i.token FROM vault_paths p
                      JOIN notes n ON n.id=p.note_id
                      JOIN notes root ON root.id=p.import_root
+                     LEFT JOIN note_link_identities i ON i.note_id=n.id
                      WHERE p.import_root=?1 AND root.trash_root IS NULL AND n.trash_root IS NULL
                      ORDER BY p.relative_path COLLATE BINARY",
                 )?;
                 let mut rows = statement.query([import_root])?;
-                let mut zip = zip::ZipWriter::new(file);
+                let mut zip = zip::ZipWriter::new(&mut *file);
                 let mut paths = PortablePaths::default();
-                let assets = if include_media { Some(SourceAssets::collect(&tx, import_root, &mut paths)?) }
+                let assets = if mode != VaultZipMode::Markdown { Some(SourceAssets::collect(&tx, import_root, &mut paths)?) }
                     else { None };
+                let mut manifest = (mode == VaultZipMode::PortableLinks).then(Manifest::new);
                 let resolver = assets.as_ref().map(|a| MediaPaths::from_paths(a.files.keys().map(String::as_str)));
                 let mut bytes = 0;
 
@@ -184,6 +194,10 @@ impl Notebook {
                     }
                     if let Some((assets, resolver)) = assets.as_ref().zip(resolver.as_ref()) {
                         assets.verify_links(resolver, row.get(2)?, path, body)?;
+                    }
+                    if let Some(manifest) = &mut manifest {
+                        manifest.record(path, row.get_ref(3)?.as_str()?, row.get(2)?,
+                            row.get_ref(4)?.as_str()?, body)?;
                     }
                     bytes += body.len();
                     zip.start_file(path, SimpleFileOptions::default())?;
@@ -203,7 +217,15 @@ impl Notebook {
                     }
                     report.unbound = assets.unbound;
                 }
+                if let Some(manifest) = manifest {
+                    paths.add_file(MANIFEST_PATH)?;
+                    zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())?;
+                    zip.write_all(&manifest.bytes()?)?;
+                }
                 zip.finish()?;
+                if mode == VaultZipMode::PortableLinks && file.metadata()?.len() > crate::archive::MAX_ZIP_BYTES {
+                    return Err("可攜 Vault ZIP 超過 120 MiB，請分批匯出。".into());
+                }
             }
             tx.commit()?;
             Ok(())

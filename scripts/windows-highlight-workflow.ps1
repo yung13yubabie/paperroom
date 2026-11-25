@@ -227,6 +227,26 @@ public static class PaperroomHighlightGui {
     public static Point ButtonPoint(IntPtr owner, uint pid, IntPtr button) {
         return ControlPoint(owner, pid, button, "Button");
     }
+    public static IntPtr FolderEdit(IntPtr dialog, uint pid) {
+        var found = new List<IntPtr>();
+        EnumChildWindows(dialog, (hwnd, ignored) => {
+            if (GetWindowThreadProcessId(hwnd, out uint actual) != 0 && actual == pid &&
+                IsWindowVisible(hwnd) && String.Equals(Kind(hwnd), "Edit", StringComparison.OrdinalIgnoreCase))
+                found.Add(hwnd);
+            return true;
+        }, IntPtr.Zero);
+        if (found.Count > 1) throw new InvalidOperationException("Expected a unique native folder path field.");
+        return found.Count == 1 ? found[0] : IntPtr.Zero;
+    }
+    public static bool DialogContains(IntPtr dialog, uint pid, string text) {
+        bool found = false;
+        EnumChildWindows(dialog, (hwnd, ignored) => {
+            if (GetWindowThreadProcessId(hwnd, out uint actual) != 0 && actual == pid &&
+                IsWindowVisible(hwnd) && Caption(hwnd).Contains(text)) found = true;
+            return !found;
+        }, IntPtr.Zero);
+        return found;
+    }
     public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
@@ -515,13 +535,15 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, 
     if ($LASTEXITCODE -ne 0 -or $result -notmatch '^\d+:\d+$') { throw 'Could not read the draft history stamp.' }
     return $result
 }
-function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status) {
-    Native-Menu 109 $Item $Caption
+function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status,
+                     [switch]$AlreadyOpened, [string]$ExpectedError = '') {
+    if (!$AlreadyOpened) { Native-Menu 109 $Item $Caption }
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
     $defaultName = switch ($Item) {
         3 { 'note.md' }
         4 { 'paperroom-backup.sqlite3' }
         30 { 'paperroom-html.zip' }
+        34 { 'vault.zip' }
         default { '' }
     }
     try {
@@ -551,6 +573,15 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         $submit = Control $dialog 1
         $point = [PaperroomHighlightGui]::ButtonPoint($dialog, $process.Id, $submit)
         [PaperroomHighlightGui]::MouseAction($window, $process.Id, $submit, $point, 0)
+        if ($ExpectedError) {
+            $errorDialog = Wait-For 'native export refusal' {
+                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '紙間', 1)
+            }
+            if (![PaperroomHighlightGui]::DialogContains($errorDialog, $process.Id, $ExpectedError) -or
+                (Test-Path -LiteralPath $Path)) { throw 'The export refusal or its file state differs from the expected result.' }
+            Finish-Revision $errorDialog 1
+            return
+        }
         $null = Wait-For "$Caption completed" {
             ![PaperroomHighlightGui]::IsWindowVisible($dialog) -and
                 [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith($Status, [StringComparison]::Ordinal)
@@ -570,6 +601,48 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } finally {
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
+}
+function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
+    Native-Menu 109 6 '匯入 Obsidian Markdown 資料夾…'
+    $picker = Wait-For 'native Vault folder picker' {
+        [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1)
+    }
+    $edit = Wait-For 'Vault folder path field' { [PaperroomHighlightGui]::FolderEdit($picker, $process.Id) }
+    $point = [PaperroomHighlightGui]::FilenamePoint($picker, $process.Id, $edit)
+    [PaperroomHighlightGui]::MouseAction($window, $process.Id, $edit, $point, 0)
+    $null = Wait-For 'folder path focus' { [PaperroomHighlightGui]::FilenameHasFocus($window, $process.Id, $picker, $edit) }
+    [PaperroomHighlightGui]::TypeFilename($window, $process.Id, $picker, $edit, $Folder)
+    $null = Wait-For 'exact entered folder path' { [PaperroomHighlightGui]::Read($edit) -ceq $Folder }
+    $ok = Control $picker 1
+    $point = [PaperroomHighlightGui]::ButtonPoint($picker, $process.Id, $ok)
+    [PaperroomHighlightGui]::MouseAction($window, $process.Id, $ok, $point, 0)
+    $report = Wait-For 'Vault import report' {
+        [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '匯入報告', 1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $report 101)).Contains($ReportLine)) {
+        throw 'The native folder import report has an unexpected attachment count.'
+    }
+    Finish-Revision $report 1
+    Write-Host "Native folder picker and import report verified: $ReportLine"
+}
+function Vault-ChoiceIndex([string]$Database, [string]$Title) {
+    $number = @'
+from pathlib import Path
+from contextlib import closing
+import sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
+    roots=db.execute("SELECT n.title FROM notes n WHERE n.trash_root IS NULL AND EXISTS "
+                     "(SELECT 1 FROM vault_paths p WHERE p.import_root=n.id) ORDER BY n.title,n.id").fetchall()
+    print(roots.index((sys.argv[2],))+1)
+'@ | python - $Database $Title
+    if ($LASTEXITCODE -ne 0 -or $number -notmatch '^[1-9]\d*$') { throw 'Could not identify the exact Vault menu choice.' }
+    return [int]$number
+}
+function Native-VaultExport([string]$Title, [string]$Path, [string]$ExpectedError = '') {
+    $choice = Vault-ChoiceIndex $liveDb $Title
+    Native-Menu 109 34 '匯出 Vault ZIP（含來源附件）…'
+    Native-Menu 109 $choice "$Title  (#" -MenuOpen -CaptionPrefix
+    Native-File 34 '匯出 Vault ZIP（含來源附件）…' $Path '已匯出 2 篇 Markdown 與 2 個來源附件。' -AlreadyOpened -ExpectedError $ExpectedError
 }
 function Start-Notebook([string]$Folder) {
     $binary = Join-Path $Folder 'Paperroom.exe'
@@ -895,6 +968,90 @@ try {
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native history preview protected the unsaved title, made repeated content a no-op, canceled and restored an empty version, reopened, and recovered the replaced version.'
+    $vault = Join-Path $root 'VaultFixture'
+    $vaultOutput = Join-Path $root 'vault-portable.zip'
+    $readback = Join-Path $root 'VaultReadback'
+    $badVault = Join-Path $root 'VaultAmbiguous'
+    $badOutput = Join-Path $root 'vault-ambiguous-must-not-exist.zip'
+    @'
+from pathlib import Path
+import struct,sys,zlib
+v,b=map(Path,sys.argv[1:])
+(v/'\u6bb5\u843d').mkdir(parents=True)
+(v/'\u9644\u4ef6').mkdir()
+(v/'\u6bb5\u843d'/'\u93e1\u982d.md').write_bytes(('\ufeff# \u93e1\u982d\r\n\r\n'
+    '![\u5c01\u9762](../\u9644\u4ef6/\u5c01\u9762.png)\r\n[\u5f15\u7528](../\u9644\u4ef6/\u5f15\u7528.txt)\r\n').encode())
+(v/'\u7d22\u5f15.md').write_bytes('[\u5f15\u7528](\u9644\u4ef6/\u5f15\u7528.txt)\n'.encode())
+(v/'\u9644\u4ef6'/'\u5f15\u7528.txt').write_bytes('\u539f\u6587\r\n'.encode())
+def chunk(kind,data):
+    return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
+(v/'\u9644\u4ef6'/'\u5c01\u9762.png').write_bytes(
+    b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1,1,8,2,0,0,0))+
+    chunk(b'IDAT',zlib.compress(b'\x00\xaa\x50\x28'))+chunk(b'IEND',b''))
+(b/'assets').mkdir(parents=True)
+(b/'one.md').write_bytes(b'![[only.txt]]\n')
+(b/'assets'/'only.txt').write_bytes(b'an archived local reference\n')
+'@ | python - $vault $badVault
+    if ($LASTEXITCODE -ne 0) { throw 'Synthetic Vault setup failed.' }
+
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $vault '附件綁定 3 筆，未解析 0 筆'
+    Native-VaultFolder $vault '附件綁定 3 筆，未解析 0 筆'
+    Native-VaultExport '匯入：VaultFixture' $vaultOutput
+    @'
+from pathlib import Path
+from zipfile import ZipFile
+import sys
+original, archive, extracted=map(Path,sys.argv[1:])
+expected={p.relative_to(original).as_posix():p.read_bytes() for p in original.rglob('*') if p.is_file()}
+with ZipFile(archive) as z:
+    assert z.testzip() is None and len(z.namelist())==len(expected)
+    assert {name:z.read(name) for name in z.namelist()}==expected
+    z.extractall(extracted)
+print('Vault ZIP preserved every synthetic source path and byte, including PNG and BOM/CRLF.')
+'@ | python - $vault $vaultOutput $readback
+    if ($LASTEXITCODE -ne 0) { throw 'Vault ZIP verification or extraction failed.' }
+    Native-VaultFolder $readback '附件綁定 3 筆，未解析 0 筆'
+    Native-VaultFolder $badVault '附件綁定 1 筆，未解析 0 筆'
+    Native-VaultExport '匯入：VaultAmbiguous' $badOutput '以檔名搜尋'
+    if ((Test-Path -LiteralPath $badOutput) -or @(Get-ChildItem $root -Force -Filter '.paperroom-*.partial').Count) {
+        throw 'The export refusal left an output or staging file.'
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Select-Note '匯入：VaultReadback'
+    @'
+from pathlib import Path
+from contextlib import closing
+import sqlite3,sys
+dbfile,v=map(Path,sys.argv[1:])
+notes={p.relative_to(v).as_posix():p.read_bytes() for p in v.rglob('*.md')}
+attachment_paths={p.relative_to(v).as_posix():p.read_bytes() for p in v.rglob('*')
+                  if p.is_file() and p.suffix in ('.png','.txt')}
+expected={(note,path,data) for note in notes for path,data in attachment_paths.items()
+          if path.endswith('.txt') or '/' in note}
+with closing(sqlite3.connect(dbfile.as_uri()+'?mode=ro',uri=True)) as db:
+    assert db.execute('PRAGMA integrity_check').fetchone()==('ok',)
+    roots=db.execute("SELECT id FROM notes WHERE title IN ('\u532f\u5165\uff1aVaultFixture','\u532f\u5165\uff1aVaultReadback')"
+                     " AND trash_root IS NULL ORDER BY id").fetchall()
+    assert len(set(roots))==3
+    for root, in roots:
+        assert dict(db.execute("SELECT relative_path,CAST(body AS BLOB) FROM vault_paths p JOIN notes n "
+                               "ON n.id=p.note_id WHERE p.import_root=?", (root,)))==notes
+        actual=db.execute("SELECT p.relative_path,o.relative_path,a.content FROM vault_paths p "
+                          "JOIN attachments a ON a.note_id=p.note_id JOIN attachment_origins o "
+                          "ON o.attachment_id=a.id WHERE p.import_root=?", (root,)).fetchall()
+        assert len(actual)==len(expected) and set(actual)==expected
+print('Reopened SQLite preserves the two original imports and the independent readback, with 3 exact attachment bindings apiece.')
+'@ | python - $liveDb $vault
+    if ($LASTEXITCODE -ne 0) { throw 'The actual reopened workspace did not preserve the three Vault snapshots.' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native Vault folder import, duplicate snapshots, portable image and text attachment export, extraction, reimport and reopen, and safe refusal.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

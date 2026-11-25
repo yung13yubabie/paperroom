@@ -139,9 +139,9 @@
 |---|---|---|---|
 | Vault | 部分 | 匯入為本機筆記樹，已配對的 Markdown 可手動批次讀入或寫回。具差異預覽、備份及衝突保留兩份。已配對的附件可手動更新同一路徑的磁碟內容。外部已完成搬移時，可核對精確來源路徑並在備份後更新已驗證的連結。自動監看、新檔處理、磁碟檔案操作及已標註 PDF 更新待做。 | [官方](https://obsidian.md/help/manage-vaults) · [vault.rs](../src/vault.rs) |
 | 檔案總管 | 部分 | 可按匯入批次逐層瀏覽保存的 Vault 原始相對路徑，選到檔案後從工作區開啟，來源磁碟離線也可使用。手動核對的外部搬移可更新原始相對路徑。自動偵測及原地檔案管理仍待做。 | [官方](https://obsidian.md/help/plugins/file-explorer) · [vault_search_ui.rs](../src/vault_search_ui.rs) |
-| 資料夾 | 部分 | 匯入與 ZIP 匯出保存中文巢狀路徑；未保存的空資料夾不在匯出範圍。 | [官方](https://obsidian.md/help/manage-vaults) · [vault.rs](../src/vault.rs) |
+| 資料夾 | 部分 | 匯入與 ZIP 匯出保存中文巢狀路徑。含來源附件的 ZIP 解壓後可回匯為獨立批次。未保存的空資料夾不在匯出範圍。 | [官方](https://obsidian.md/help/manage-vaults) · [資料夾與附件往返](UI-ACCEPTANCE.md#vault-資料夾與附件往返) |
 | 原地編輯 Markdown | 已驗證 | 明確選取本機 UTF-8 檔、編輯並寫回同檔。外部改檔拒寫，保留草稿；正常存檔先留舊版。 | [官方](https://obsidian.md/help/manage-vaults) · [介面驗收](UI-ACCEPTANCE.md#型別公式vault-原檔與白板標註來源) |
-| 附件 | 部分 | 匯入保留可解析附件的相對來源及內容。確認同一路徑的新內容後可更新所選批次的共用副本，更新前須另存工作區備份。遇到改名、缺檔、衝突或會影響既有 PDF 標註時會拒絕。 | [官方](https://obsidian.md/help/attachments) · [pdf_view_ui.rs](../src/pdf_view_ui.rs) |
+| 附件 | 部分 | 匯入保留可解析附件的相對來源及內容。可隨 Vault ZIP 移轉具有明確路徑的來源附件，匯出前核對回匯配對。另有同一路徑的新內容更新功能；缺檔、衝突或會影響既有 PDF 標註時會拒絕更新。 | [官方](https://obsidian.md/help/attachments) · [資料夾與附件往返](UI-ACCEPTANCE.md#vault-資料夾與附件往返) |
 | Markdown | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |
 | 閱讀檢視 | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |
 | 原始碼編輯 | 部分 | 支援基本標題、粗體、引用、清單與程式碼等語法。 | [官方](https://obsidian.md/help/syntax) · [markdown.rs](../src/markdown.rs) |

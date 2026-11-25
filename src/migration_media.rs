@@ -126,14 +126,18 @@ fn read_bytes(root:&Path, relative:&str, remaining:usize) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-struct MediaPaths<'a> {
+pub(crate) struct MediaPaths<'a> {
     paths: HashSet<&'a str>,
     names: HashMap<&'a str, Option<&'a str>>,
 }
 
 impl<'a> MediaPaths<'a> {
     fn new(vault: &'a Vault) -> Self {
-        let paths: HashSet<_> = vault.media_paths.iter().map(String::as_str).collect();
+        Self::from_paths(vault.media_paths.iter().map(String::as_str))
+    }
+
+    pub(crate) fn from_paths(entries: impl IntoIterator<Item = &'a str>) -> Self {
+        let paths: HashSet<_> = entries.into_iter().collect();
         let mut names = HashMap::new();
         for &path in &paths {
             if let Some(name) = path.rsplit('/').next() {
@@ -142,20 +146,24 @@ impl<'a> MediaPaths<'a> {
         }
         Self { paths, names }
     }
+
+    pub(crate) fn resolve(&self, source: &[String], raw: &str, wiki: bool) -> Option<String> {
+        resolve(source, raw, wiki, &self.paths, &self.names)
+    }
 }
 
 pub(crate) fn plan(root:&Path,vault:&Vault) -> Result<MediaPlan> {
-    let MediaPaths { paths, names } = MediaPaths::new(vault);
+    let paths = MediaPaths::new(vault);
     let mut result=MediaPlan::default();
     let mut total=0usize;
     for page in &vault.pages {
         let mut found=BTreeSet::new();
         let mut missing=HashSet::new();
         for (raw,wiki) in referenced_paths(&page.body) {
-            if let Some(path)=resolve(&page.parts,&raw,wiki,&paths,&names) { found.insert(path); }
+            if let Some(path)=paths.resolve(&page.parts,&raw,wiki) { found.insert(path); }
             else if missing.insert(raw.clone()) {
                 let why = if normalized(&page.parts,&raw,wiki).is_none() { "無效或超出來源範圍的路徑" }
-                    else if wiki && !raw.contains('/') && names.get(raw.as_str()) == Some(&None) { "多個附件同名" }
+                    else if wiki && !raw.contains('/') && paths.names.get(raw.as_str()) == Some(&None) { "多個附件同名" }
                     else { "找不到可匯入的來源檔案" };
                 result.issue(&page.parts.join("/"),&raw,"附件",why);
             }

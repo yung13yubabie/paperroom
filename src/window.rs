@@ -57,7 +57,7 @@ use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::{
-    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW,
+    BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW,
     SHGetPathFromIDListEx, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -1149,6 +1149,7 @@ impl App {
                 (13, "搜尋 PDF 標註…"),
                 (14, "屬性型別…"),
                 (15, "匯出 Obsidian Markdown ZIP…"),
+                (34, "匯出 Vault ZIP（含來源附件）…"),
                 (16, "編輯 Vault Markdown 原檔…"),
                 (17, "匯出筆記與附件 ZIP…"),
                 (18, "匯入紙間筆記與附件 ZIP…"),
@@ -1209,7 +1210,7 @@ impl App {
                     12 => return app.open_canvas(None),
                     13 => return app.search_pdf_annotations_ui(),
                     14 => return app.typed_property_menu(),
-                    15 => return app.export_vault_zip_ui(),
+                    15 | 34 => return app.export_vault_zip_ui(action == 34),
                     16 => return app.edit_vault_markdown(),
                     17 | 18 => return app.note_bundle_dialog(action == 17),
                     19 => return app.sync_vault_incoming(),
@@ -1839,7 +1840,7 @@ unsafe fn folder_dialog(owner: HWND) -> Result<Option<PathBuf>> {
             pidlRoot: null_mut(),
             pszDisplayName: display.as_mut_ptr(),
             lpszTitle: title.as_ptr(),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
             lpfn: None,
             lParam: 0,
             iImage: 0,

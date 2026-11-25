@@ -129,7 +129,7 @@ impl App {
         }
     }
 
-    pub(super) unsafe fn export_vault_zip_ui(&mut self) -> Result<()> {
+    pub(super) unsafe fn export_vault_zip_ui(&mut self, include_media: bool) -> Result<()> {
         unsafe {
             let vaults = self.notebook.imported_vaults()?;
             if vaults.is_empty() {
@@ -141,8 +141,19 @@ impl App {
             }) else { return Ok(()); };
             let Some(path) = file_dialog(self.hwnd, "Markdown ZIP\0*.zip\0\0", "zip", Some("vault.zip"))?
             else { return Ok(()); };
-            let count = self.notebook.export_vault_markdown(vaults[index].0, &path)?;
-            label(self.widgets.status, &format!("已匯出 {count} 篇 Markdown，保留原筆記庫路徑。"));
+            let id = vaults[index].0;
+            let status = if include_media {
+                let report = self.notebook.export_vault_with_media(id, &path)?;
+                let mut status = format!("已匯出 {} 篇 Markdown 與 {} 個來源附件。", report.pages, report.files);
+                if report.unbound > 0 {
+                    status.push_str(&format!("另有 {} 筆未綁來源路徑的附件保存在工作區。", report.unbound));
+                }
+                status
+            } else {
+                let count = self.notebook.export_vault_markdown(id, &path)?;
+                format!("已匯出 {count} 篇 Markdown，保留原筆記庫路徑。")
+            };
+            label(self.widgets.status, &status);
             Ok(())
         }
     }

@@ -1,6 +1,6 @@
 //! Bounded CSV-to-notes import. No network or schema inference.
 use super::{Notebook, Result, insert, MAX_TITLE_CHARS};
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, Transaction, TransactionBehavior};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
@@ -83,6 +83,15 @@ fn parse_csv_with_purpose(bytes: &[u8], preview: bool) -> Result<Vec<Vec<String>
     Ok(rows)
 }
 
+pub(super) fn insert_row(tx: &Transaction<'_>, parent: i64, headers: &[String], row: &[String]) -> Result<i64> {
+    let id = insert(tx, Some(parent), &row[0], "")?;
+    for (key, value) in headers.iter().zip(row) {
+        super::typed_properties::validate_write(tx, key, value)?;
+        tx.execute("INSERT INTO note_properties(note_id,key,value) VALUES (?1,?2,?3)", params![id,key,value])?;
+    }
+    Ok(id)
+}
+
 impl Notebook {
     pub fn import_csv_file(&mut self, name: &str, path: &Path) -> Result<(i64, usize)> {
         let f = std::fs::File::open(path)?;
@@ -100,11 +109,7 @@ impl Notebook {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let root = insert(&tx, None, name, "")?;
         for row in &rows[1..] {
-            let id = insert(&tx, Some(root), &row[0], "")?;
-            for (key, value) in rows[0].iter().zip(row) {
-                super::typed_properties::validate_write(&tx, key, value)?;
-                tx.execute("INSERT INTO note_properties(note_id,key,value) VALUES (?1,?2,?3)", params![id,key,value])?;
-            }
+            insert_row(&tx, root, &rows[0], row)?;
         }
         tx.commit()?;
         Ok((root, count))

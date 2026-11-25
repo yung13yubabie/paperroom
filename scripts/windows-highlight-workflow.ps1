@@ -612,7 +612,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $CanvasSave -or $Item -notin 1, 11
+    $saving = $CanvasSave -or $Item -notin 1, 2, 11
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -1516,6 +1516,8 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+
+    . (Join-Path $PSScriptRoot 'windows-notion-csv-workflow.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

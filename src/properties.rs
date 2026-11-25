@@ -14,7 +14,7 @@ CREATE INDEX note_properties_by_key_value ON note_properties(key, value, note_id
 
 pub const MAX_KEY_BYTES: usize = 256;
 pub const MAX_VALUE_BYTES: usize = 4096;
-const MAX_PROPERTIES: i64 = 128;
+pub(super) const MAX_PROPERTIES: i64 = 128;
 const MAX_QUERY_BYTES: usize = 4096;
 const MAX_ROWS: i64 = 1000;
 
@@ -30,6 +30,9 @@ pub fn key_checked(key: &str) -> Result<&str> {
 }
 
 pub(super) fn write_value(tx: &Transaction<'_>, id: i64, key: &str, value: &str, new: bool) -> Result<()> {
+    if value.trim().is_empty() {
+        super::collection_field_rules::ensure_clear_allowed(tx, id, key)?;
+    }
     if new {
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM note_properties WHERE note_id=?1", [id], |row| row.get(0),
@@ -41,6 +44,12 @@ pub(super) fn write_value(tx: &Transaction<'_>, id: i64, key: &str, value: &str,
          ON CONFLICT(note_id,key) DO UPDATE SET value=excluded.value",
         params![id,key,value],
     )?;
+    Ok(())
+}
+
+pub(super) fn delete_value(tx: &Transaction<'_>, id: i64, key: &str) -> Result<()> {
+    super::collection_field_rules::ensure_clear_allowed(tx, id, key)?;
+    tx.execute("DELETE FROM note_properties WHERE note_id=?1 AND key=?2", params![id,key])?;
     Ok(())
 }
 
@@ -81,7 +90,7 @@ impl Notebook {
             if current.as_deref() != Some(value) { super::typed_properties::validate_write(&tx,key,value)?; }
             write_value(&tx,id,key,value,current.is_none())?;
         } else {
-            tx.execute("DELETE FROM note_properties WHERE note_id=?1 AND key=?2", params![id,key])?;
+            if current.is_some() { delete_value(&tx, id, key)?; }
         }
         tx.commit()?;
         Ok(())

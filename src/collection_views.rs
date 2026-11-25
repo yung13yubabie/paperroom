@@ -986,7 +986,7 @@ impl Notebook {
         if let Some(value) = edit.value {
             write_value(&tx, note_id, key, value, previous.is_none())?;
         } else {
-            tx.execute("DELETE FROM note_properties WHERE note_id=?1 AND key=?2", params![note_id, key])?;
+            super::properties::delete_value(&tx, note_id, key)?;
         }
         tx.commit()?;
         Ok(())
@@ -1076,7 +1076,7 @@ impl Notebook {
         validate_collection_field_dates(&tx, note_id, updates)?;
         for (key, value) in updates {
             if !key.is_empty() && value.is_none() {
-                tx.execute("DELETE FROM note_properties WHERE note_id=?1 AND key=?2", params![note_id, key])?;
+                super::properties::delete_value(&tx, note_id, key)?;
             }
         }
         for (index, (key, value)) in updates.into_iter().enumerate() {
@@ -1386,7 +1386,7 @@ fn require_available_name(db: &Connection, collection: i64, name: &str, except: 
     Ok(())
 }
 
-fn validate_collection_field_dates(
+pub(super) fn validate_collection_field_dates(
     db: &Connection, note: i64, updates: [(&str, Option<CalendarDay>); 2],
 ) -> Result<()> {
     if updates.iter().all(|(key, _)| key.is_empty()) { return Ok(()); }

@@ -96,6 +96,9 @@ impl Notebook {
         let key = key_checked(key)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         if lookup(&tx,key)? != expected { return Err("其他視窗已更改這項屬性定義，請重新開啟。".into()); }
+        if next != expected && tx.prepare("SELECT 1 FROM collection_field_rules WHERE key=?1")?.exists([key])? {
+            return Err("仍有集合使用這個欄位的規則。請先移除規則，再更改或移除欄位型別。".into());
+        }
         if let Some(kind) = next {
             if expected.is_none() && tx.query_row("SELECT count(*) FROM property_definitions",[],|r|r.get::<_,i64>(0))? >= 256 {
                 return Err("工作區最多可設定 256 項屬性型別。".into());

@@ -439,9 +439,13 @@ impl App {
                     let Some(title) = crate::dialog::prompt(hwnd, "由範本新增資料列", "輸入新筆記標題。",
                         &template.default_title, crate::store::MAX_TITLE_CHARS)?
                     else { return Ok(()); };
-                    let note = self.notebook.instantiate_collection_template(id, &template, &title,
-                        TemplateApply { resources: include_resources, children: include_children })?;
-                    self.open_import(note, "已由範本新增資料列。");
+                    match self.notebook.instantiate_collection_template(id, &template, &title,
+                        TemplateApply { resources: include_resources, children: include_children })
+                    {
+                        Ok(note) => self.open_import(note, "已由範本新增資料列。"),
+                        Err(error) => crate::dialog::show_text(hwnd,"範本資料列未儲存（可複製）",
+                            &format!("{error}\r\n\r\n{title}"))?,
+                    }
                 }
                 3 => self.edit_collection_template_ui(id, Some(&template), template.clone())?,
                 4 => {
@@ -713,20 +717,32 @@ impl App {
         }) }) else { return Ok(()) };
         let (key, kind) = &fields[index];
         let previous = raw(key);
-        let next = if *kind == PropertyType::Checkbox {
-            match unsafe { popup(hwnd, anchor, None, &[(1,"勾選"),(2,"取消勾選"),(3,"清除欄位"),(4,"取消編輯")]) } {
-                1 => Some("true".to_owned()),
-                2 => Some("false".to_owned()),
-                3 => None,
-                _ => return Ok(()),
+        let mut draft = previous.unwrap_or_default().to_owned();
+        loop {
+            let next = if *kind == PropertyType::Checkbox {
+                match unsafe { popup(hwnd, anchor, None, &[(1,"勾選"),(2,"取消勾選"),(3,"清除欄位"),(4,"取消編輯")]) } {
+                    1 => Some("true".to_owned()), 2 => Some("false".to_owned()), 3 => None,
+                    _ => return Ok(()),
+                }
+            } else {
+                let hint = format!("{}。留白會清除這一欄。", kind.hint());
+                let Some(value) = (unsafe { crate::dialog::prompt(hwnd,key,&hint,&draft,MAX_VALUE_BYTES)? })
+                else { return Ok(()); };
+                draft = value;
+                (!draft.trim().is_empty()).then(|| draft.clone())
+            };
+            match self.notebook.edit_collection_field(id, row.id, status,
+                FieldEdit { key, kind: *kind, previous, value: next.as_deref() })
+            {
+                Ok(()) => break,
+                Err(error) => unsafe {
+                    let text = if *kind == PropertyType::Checkbox {
+                        next.as_deref().unwrap_or("（清除欄位）")
+                    } else { &draft };
+                    crate::dialog::show_text(hwnd,"欄位未儲存",&format!("{error}\r\n\r\n{text}"))?;
+                },
             }
-        } else {
-            let hint = format!("{}。留白會清除這一欄。", kind.hint());
-            let Some(value) = (unsafe { crate::dialog::prompt(hwnd, key, &hint, previous.unwrap_or(""), MAX_VALUE_BYTES)? })
-            else { return Ok(()) };
-            if value.trim().is_empty() { None } else { Some(value) }
-        };
-        self.notebook.edit_collection_field(id, row.id, status, FieldEdit { key, kind: *kind, previous, value: next.as_deref() })?;
+        }
         unsafe {
             if let Some(view) = self.active_collection_view(id) {
                 self.reopen_collection_view(id, title, view.id)?;
@@ -1176,7 +1192,12 @@ impl App {
             let Some(last) = input(end, was_end, "結束日 YYYY-MM-DD（含當日），留白為單日")? else { return Ok(()) };
             last
         } else { String::new() };
-        self.notebook.set_collection_row_dates(id, &view, note, [was_start, was_end], [parse_day(&first)?, parse_day(&last)?])?;
+        let save = || self.notebook.set_collection_row_dates(id, &view, note,
+            [was_start, was_end], [parse_day(&first)?, parse_day(&last)?]);
+        if let Err(error) = save() {
+            return unsafe { crate::dialog::show_text(self.hwnd,"日期欄位未儲存（可複製）",
+                &format!("{error}\r\n\r\n起始日：{first}\r\n結束日：{last}")) };
+        }
         unsafe { self.reopen_collection_view(id, title, view.id) }
     }
 

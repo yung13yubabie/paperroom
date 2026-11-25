@@ -25,6 +25,8 @@ pub(crate) mod journal;
 mod duplicate_note;
 #[path = "note_history.rs"]
 pub(crate) mod note_history;
+#[path = "note_history_state.rs"]
+mod note_history_state;
 #[path = "note_highlights.rs"]
 pub(crate) mod note_highlights;
 #[path = "board_shapes.rs"]
@@ -123,7 +125,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 31;
+const SCHEMA_VERSION: i32 = 32;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -377,6 +379,9 @@ impl Notebook {
         }
         if version < 31 {
             tx.execute_batch(notion_page_links::SCHEMA)?;
+        }
+        if version < 32 {
+            tx.execute_batch(note_history_state::SCHEMA)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -767,7 +772,21 @@ mod tests {
         Ok(())
     }
 
+    pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
+        connection.execute_batch(
+            "DROP TRIGGER record_prior_note_revision;
+             DROP TRIGGER write_note_history;
+             DROP VIEW capture_note_history;
+             DROP TABLE note_revision_attachments;
+             DROP TABLE note_revision_state;",
+        )?;
+        let trigger = note_history::SCHEMA.find("CREATE TRIGGER").unwrap();
+        connection.execute_batch(&note_history::SCHEMA[trigger..])?;
+        Ok(())
+    }
+
     pub(super) fn remove_v30_schema(connection: &Connection) -> Result<()> {
+        remove_v31_schema(connection)?;
         connection.execute_batch("DROP TABLE notion_page_paths;")?;
         Ok(())
     }

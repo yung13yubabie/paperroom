@@ -94,6 +94,7 @@ impl Notebook {
             use super::collection_views::{CalendarDay, validate_collection_field_dates};
             validate_collection_field_dates(&tx, id, [(key, value.and_then(CalendarDay::parse)), ("", None)])?;
         }
+        super::note_history_state::checkpoint(&tx, id)?;
         if let Some(value) = value {
             write_value(&tx,id,key,value,current.is_none())?;
         } else {
@@ -159,6 +160,7 @@ impl Notebook {
                 _ => return Err("這個值是舊文字。請先由筆記的屬性編輯器確認或修正。".into()),
             },
         };
+        super::note_history_state::checkpoint(&tx, id)?;
         write_value(&tx,id,key,if checked { "true" } else { "false" }, current.is_none())?;
         tx.commit()?;
         Ok(checked)

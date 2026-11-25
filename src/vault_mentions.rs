@@ -341,7 +341,7 @@ mod tests {
         let revisions = db.note_revisions(entry)?;
         assert_eq!(revisions.len(), 1);
         assert_eq!(db.note_revision(entry, revisions[0].id)?.1, entry_body);
-        db.restore_note_revision(entry, saved.version, revisions[0].id)?;
+        db.restore_note_revision(entry, saved.version, revisions[0].id, None)?;
         assert_eq!(db.note(entry)?.unwrap().body, entry_body);
         assert_eq!(fs::read(offline.join(entry_path))?, entry_body.as_bytes());
         assert_eq!(fs::read(offline.join(target_path))?, target_body.as_bytes());

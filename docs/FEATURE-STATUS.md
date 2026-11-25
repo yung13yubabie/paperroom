@@ -25,7 +25,7 @@
 
 ## 尚待落地的主要範圍
 
-- **資料庫**：集合專屬欄位、日期相對區間的篩選、相依排程、多層分組、進階公式相容、範本、附件與屬性的版本歷史。
+- **資料庫**：集合專屬欄位、日期相對區間的篩選、相依排程、多層分組、進階公式相容及範本。
 - **Vault**：變更監看、新檔／改名／附件的增量協調、外掛相容，以及帶設定與索引中繼資料的完整 Vault 往返。
 - **白板及閱讀**：自由分區幾何、跨板巢狀結構、PDF 多欄或複雜排版文字、摘錄嵌入。
 
@@ -40,7 +40,7 @@
 | 垃圾桶 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 還原筆記 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 整頁複製 | 部分 | 可複製單篇或使用中的子頁，保留正文、屬性和附件。關聯、白板、PDF 標註及版本歷史仍留在原筆記。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [duplicate_note.rs](../src/duplicate_note.rs) |
-| 頁面歷史版本還原 | 部分 | 每篇可比較目前草稿或保存內容與選取的舊版，逐行預覽標題及正文差異，再還原已保存的版本。屬性、附件及頁面配置的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
+| 頁面歷史版本還原 | 部分 | 可逐行比較標題／正文，也可預覽及還原新版快照的屬性值、附件清單與原始檔。頁面配置、關聯及 PDF 標註的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
 | 區塊編輯 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 斜線選單 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 文字樣式 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
@@ -280,7 +280,7 @@
 | 網頁擷取 | 未實作 | 目前無相容入口。 | [官方](https://wiki.heptabase.com/the-best-way-to-acquire-knowledge-from-readings) · [QUICKSTART.md](../docs/QUICKSTART.md) |
 | Zotero 匯入 | 部分 | 支援 Zotero CSL JSON 書目元資料，包括同名項目、作者、日期與 DOI。原始檔可逐位元匯出。Zotero 收藏庫、PDF、標註及服務同步仍待支援。 | [Zotero](https://www.zotero.org/support/dev/data_formats) · [zotero.rs](../src/zotero.rs) |
 | Heptabase 備份格式還原 | 未實作 | 目前無相容入口。 | [官方](https://wiki.heptabase.com/the-best-way-to-acquire-knowledge-from-readings) · [QUICKSTART.md](../docs/QUICKSTART.md) |
-| 逐卡版本歷史 | 部分 | 筆記卡可查看本機標題與正文的舊版本。其他物件或附件歷史待做。 | [官方](https://support.heptabase.com/en/articles/10448124-restore-from-version-history) · [note_history.rs](../src/note_history.rs) |
+| 逐卡版本歷史 | 部分 | 筆記卡可查看、還原本機標題、正文、屬性及附件的新版快照。白板配置及 PDF 標註的版本歷史待做。 | [官方](https://support.heptabase.com/en/articles/10448124-restore-from-version-history) · [note_history.rs](../src/note_history.rs) |
 | 即時協作 | 外部服務 | 需線上服務。 | [官方](https://wiki.heptabase.com/collaborate-and-discuss-with-others) · [LOCAL-OPTIONS.md](../docs/LOCAL-OPTIONS.md) |
 | 評論通知 | 外部服務 | 需線上服務。 | [官方](https://wiki.heptabase.com/collaborate-and-discuss-with-others) · [LOCAL-OPTIONS.md](../docs/LOCAL-OPTIONS.md) |
 | 分享白板 | 外部服務 | 需線上服務。 | [官方](https://wiki.heptabase.com/collaborate-and-discuss-with-others) · [LOCAL-OPTIONS.md](../docs/LOCAL-OPTIONS.md) |

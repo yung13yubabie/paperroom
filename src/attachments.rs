@@ -1,5 +1,5 @@
 use super::{Notebook, Result};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 #[path = "attachment_bundle.rs"]
 mod attachment_bundle;
@@ -250,6 +250,7 @@ impl Notebook {
         if count >= MAX_PER_NOTE || used > MAX_STORAGE_BYTES - content.len() as i64 {
             return Err("每篇筆記最多可放 16 個附件，工作區合計上限為 128 MiB。".into());
         }
+        super::note_history_state::checkpoint(&tx, note)?;
         tx.execute(
             "INSERT INTO attachments(note_id,name,kind,content) VALUES(?1,?2,?3,?4)",
             params![note, name, kind, content],
@@ -291,15 +292,15 @@ impl Notebook {
     }
 
     pub fn remove_attachment(&self, attachment: i64) -> Result<()> {
-        let changed = self.connection.execute(
-            "DELETE FROM attachments WHERE id=?1 AND EXISTS(
-                SELECT 1 FROM notes WHERE id=attachments.note_id AND trash_root IS NULL
-             )",
-            [attachment],
-        )?;
-        if changed == 0 {
-            return Err("找不到附件，或所屬筆記已移到垃圾桶。".into());
-        }
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let note: i64 = tx.query_row(
+            "SELECT a.note_id FROM attachments a JOIN notes n ON n.id=a.note_id
+             WHERE a.id=?1 AND n.trash_root IS NULL",
+            [attachment], |row| row.get(0),
+        ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
+        super::note_history_state::checkpoint(&tx, note)?;
+        tx.execute("DELETE FROM attachments WHERE id=?1", [attachment])?;
+        tx.commit()?;
         Ok(())
     }
 

@@ -106,6 +106,7 @@ impl Notebook {
 
 pub(super) fn apply_on_admission(
     tx: &Transaction<'_>, collection: i64, note: i64, input: Option<CollectionRuleInput<'_>>,
+    mut track_history: bool,
 ) -> Result<()> {
     let rules = rules(tx, collection)?;
     if input.as_ref().is_some_and(|form| form.rules != rules || form.values.len() != rules.len()) {
@@ -130,6 +131,10 @@ pub(super) fn apply_on_admission(
             validate_rule_input(rule, value)?;
         }
         if previous.is_none() && !value.trim().is_empty() {
+            if track_history {
+                super::note_history_state::checkpoint(tx, note)?;
+                track_history = false;
+            }
             write_value(tx, note, key, value, true)?;
         }
         if rule.kind == PropertyType::Date {

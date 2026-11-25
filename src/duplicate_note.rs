@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(db.collection_rows(collection)?[0].0.id, original);
         assert!(db.relations(copied)?.is_empty());
         assert!(db.note_revisions(copied)?.is_empty());
-        assert_eq!(db.note_revisions(original)?.len(), 1);
+        assert_eq!(db.note_revisions(original)?.len(), 3);
         assert_eq!(note_links::native_note_target(&db.connection, &target)?, Some(child));
         let rows = db.rows(View::All, "")?;
         let children: Vec<_> = rows.iter().filter(|row| row.parent == Some(copied)).collect();

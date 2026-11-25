@@ -5,22 +5,30 @@ pub(crate) mod block_anchors;
 
 use pulldown_cmark::{BlockQuoteKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use std::fmt::Write;
+use std::ops::Range;
 
 pub fn preview(body: &str) -> String {
+    preview_marked(body, &[])
+}
+
+pub(crate) fn preview_marked(body: &str, marks: &[Range<usize>]) -> String {
     let mut out = String::from(concat!(
         r"{\rtf1\ansi\uc1\deff0",
         r"{\fonttbl{\f0 Microsoft JhengHei UI;}{\f1 Consolas;}}",
         r"{\colortbl;\red24\green43\blue38;\red27\green103\blue86;",
-        r"\red94\green109\blue101;\red132\green90\blue56;}",
-        r"\viewkind4\pard\sl342\slmult1\sa170\f0\fs25\cf1 ",
+        r"\red94\green109\blue101;\red132\green90\blue56;",
     ));
+    if !marks.is_empty() {
+        out.push_str(r"\red255\green232\blue131;");
+    }
+    out.push_str(r"}\viewkind4\pard\sl342\slmult1\sa170\f0\fs25\cf1 ");
     let parser = Parser::new_ext(
         body,
         Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_WIKILINKS
             | Options::ENABLE_GFM,
     );
     let mut list = Vec::<Option<u64>>::new();
-    for event in parser {
+    for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let size = match level {
@@ -76,9 +84,18 @@ pub fn preview(body: &str) -> String {
                 | TagEnd::Image,
             ) => out.push('}'),
             Event::End(TagEnd::Paragraph) if list.is_empty() => out.push_str(r"\par "),
-            Event::Text(text) | Event::InlineHtml(text) | Event::Html(text) => {
-                rtf_text(&mut out, &text)
+            Event::Text(text) => {
+                if let Some(parts) = highlight_parts(body, &text, range, marks) {
+                    for (highlighted, part) in parts {
+                        if highlighted { out.push_str(r"{\highlight5 "); }
+                        rtf_text(&mut out, part);
+                        if highlighted { out.push('}'); }
+                    }
+                } else {
+                    rtf_text(&mut out, &text);
+                }
             }
+            Event::InlineHtml(text) | Event::Html(text) => rtf_text(&mut out, &text),
             Event::Code(text) => {
                 out.push_str(r"{\f1\cf4 ");
                 rtf_text(&mut out, &text);
@@ -94,6 +111,32 @@ pub fn preview(body: &str) -> String {
     }
     out.push('}');
     out
+}
+
+pub(crate) fn highlight_parts<'a>(
+    body: &str, text: &'a str, raw: Range<usize>, marks: &[Range<usize>],
+) -> Option<Vec<(bool, &'a str)>> {
+    let first = marks.partition_point(|mark| mark.end <= raw.start);
+    if marks.get(first)?.start >= raw.end || body.get(raw.clone()) != Some(text) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    for mark in marks[first..].iter().take_while(|mark| mark.start < raw.end) {
+        if mark.start < raw.start || mark.end > raw.end || mark.end <= mark.start {
+            continue;
+        }
+        let start = mark.start - raw.start;
+        let end = mark.end - raw.start;
+        if let (Some(prefix), Some(selected)) = (text.get(offset..start), text.get(start..end)) {
+            parts.push((false, prefix));
+            parts.push((true, selected));
+            offset = end;
+        }
+    }
+    if parts.is_empty() { return None; }
+    parts.push((false, &text[offset..]));
+    Some(parts)
 }
 
 pub fn wiki_targets(body: &str) -> Vec<String> {

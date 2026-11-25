@@ -13,6 +13,7 @@ const MAX_DEPTH: usize = 4;
 const MAX_PLACEMENTS: usize = 128;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXCERPT_BYTES: usize = 512 * 1024;
+const MAX_PROJECTED_MARKS: usize = 128;
 
 pub(crate) struct EmbedReference {
     pub range: Range<usize>,
@@ -185,6 +186,31 @@ fn preview_label(text: &str) -> String {
     output
 }
 
+fn valid_mark(body: &str, mark: &Range<usize>) -> bool {
+    mark.start < mark.end && body.is_char_boundary(mark.start) && body.is_char_boundary(mark.end)
+}
+
+fn append_literal(
+    body: &str,
+    source: Range<usize>,
+    projected: &mut String,
+    marks: &mut &[Range<usize>],
+    projected_marks: &mut Vec<Range<usize>>,
+) {
+    let offset = projected.len();
+    projected.push_str(&body[source.clone()]);
+    while let Some((mark, remaining)) = marks.split_first() {
+        if mark.start >= source.end {
+            break;
+        }
+        *marks = remaining;
+        if mark.start >= source.start && mark.end <= source.end && valid_mark(body, mark) {
+            let start = offset + (mark.start - source.start);
+            projected_marks.push(start..start + mark.len());
+        }
+    }
+}
+
 struct Projection<'a> {
     db: &'a Connection,
     vaults: HashMap<i64, Vec<(i64, String)>>,
@@ -249,14 +275,14 @@ impl Projection<'_> {
         };
         self.remaining_excerpt = remaining;
         self.stack.push((target, section.clone()));
-        let rendered = self.render(target, target_note, &target_note.body[section]);
+        let rendered = self.render(target, target_note, &target_note.body[section], &[]);
         self.stack.pop();
         let label = target_note.location.as_ref().map_or(target_note.title.as_str(), |(_, path)| path.as_str());
         let label = preview_label(&format!("{label}{}", anchor.unwrap_or("")));
         let mut output = format!("\n\n> **嵌入來源：{label}**\n>\n");
         // Keep an excerpt's Markdown delimiters inside its own block. An
         // unfinished fence in an embedded note cannot turn host prose into code.
-        for line in rendered?.trim_end().lines() {
+        for line in rendered?.0.trim_end().lines() {
             output.push_str("> ");
             output.push_str(line);
             output.push('\n');
@@ -265,11 +291,14 @@ impl Projection<'_> {
         Ok(Ok(output))
     }
 
-    fn render(&mut self, host: i64, note: &SavedNote, body: &str) -> Result<String> {
+    fn render(
+        &mut self, host: i64, note: &SavedNote, body: &str, mut marks: &[Range<usize>],
+    ) -> Result<(String, Vec<Range<usize>>)> {
         let mut projected = String::with_capacity(body.len());
+        let mut projected_marks = Vec::new();
         let mut previous = 0;
         for reference in embed_references(body) {
-            projected.push_str(&body[previous..reference.range.start]);
+            append_literal(body, previous..reference.range.start, &mut projected, &mut marks, &mut projected_marks);
             if self.remaining_placements == 0 {
                 projected.push_str("\n\n**已達嵌入預覽上限。**\n\n");
                 previous = reference.range.start;
@@ -283,19 +312,29 @@ impl Projection<'_> {
             }
             previous = reference.range.end;
         }
-        projected.push_str(&body[previous..]);
-        Ok(projected)
+        append_literal(body, previous..body.len(), &mut projected, &mut marks, &mut projected_marks);
+        Ok((projected, projected_marks))
     }
 }
 
 impl Notebook {
     pub(crate) fn project_embeds(&self, host: i64, saved_body: &str) -> Result<String> {
+        Ok(self.project_embeds_marked(host, saved_body, &[])?.0)
+    }
+
+    /// Translate sorted byte ranges from the saved host body into the preview.
+    /// Only ranges wholly inside one literal host segment remain eligible.
+    pub(crate) fn project_embeds_marked(
+        &self, host: i64, saved_body: &str, marks: &[Range<usize>],
+    ) -> Result<(String, Vec<Range<usize>>)> {
+        let marks = &marks[..marks.len().min(MAX_PROJECTED_MARKS)];
+        let literal_marks = || marks.iter().filter(|mark| valid_mark(saved_body, mark)).cloned().collect();
         if embed_references(saved_body).next().is_none() {
-            return Ok(saved_body.to_owned());
+            return Ok((saved_body.to_owned(), literal_marks()));
         }
         let snapshot = self.connection.unchecked_transaction()?;
         let Some(saved) = read_active_note(&snapshot, host)?.filter(|saved| saved.body == saved_body) else {
-            return Ok(format!("{saved_body}\n\n**請重新開啟這篇筆記以載入嵌入。**"));
+            return Ok((format!("{saved_body}\n\n**請重新開啟這篇筆記以載入嵌入。**"), literal_marks()));
         };
         let mut projection = Projection {
             db: &snapshot,
@@ -305,7 +344,7 @@ impl Notebook {
             remaining_excerpt: MAX_EXCERPT_BYTES,
             stack: vec![(host, prose_range(saved_body))],
         };
-        let result = projection.render(host, &saved, saved_body)?;
+        let result = projection.render(host, &saved, saved_body, marks)?;
         snapshot.commit()?;
         Ok(result)
     }
@@ -328,6 +367,39 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn marked_projection_retains_only_literal_host_ranges_in_order() -> Result<()> {
+        let mut db = Notebook::open(Path::new(":memory:"), false)?;
+        let source = db.add(None, "來源", "與主筆記重複的末段")?;
+        let link = db.authored_embed_destination(source, None)?;
+        let body = format!("首段\n\n{link}\n\n末段");
+        let host = db.add(None, "主筆記", &body)?;
+        let first = 0.."首段".len();
+        let embed_start = body.find(&link).unwrap();
+        let last = body.rfind("末段").unwrap()..body.len();
+        let marks = [
+            first.clone(),
+            0..last.end,
+            1..3,
+            embed_start..embed_start + link.len(),
+            last.clone(),
+            last.end..last.start,
+            usize::MAX..usize::MAX,
+        ];
+        let (projected, mapped) = db.project_embeds_marked(host, &body, &marks)?;
+        assert_eq!(projected, db.project_embeds(host, &body)?);
+        assert_eq!(mapped, [first.clone(), projected.rfind("末段").unwrap()..projected.len()]);
+        assert!(mapped[1].start > last.start);
+
+        let note = db.note(host)?.unwrap();
+        db.save(host, note.version, &note.row.title, "已儲存新版")?;
+        let (stale, mapped) = db.project_embeds_marked(host, &body, &[first.clone(), last.clone()])?;
+        assert_eq!(stale, db.project_embeds(host, &body)?);
+        assert!(stale.contains("請重新開啟這篇筆記"));
+        assert_eq!(mapped, [first, last]);
+        Ok(())
+    }
 
     #[test]
     fn vault_live_embeds_render_unique_fragments_and_exact_paths_after_reopen_and_backup() -> Result<()> {

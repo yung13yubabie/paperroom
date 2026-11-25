@@ -26,6 +26,8 @@ mod note_tools_ui;
 mod duplicate_note_ui;
 #[path = "note_history_ui.rs"]
 mod note_history_ui;
+#[path = "note_highlight_ui.rs"]
+mod note_highlight_ui;
 #[path = "board_objects_ui.rs"]
 mod board_objects_ui;
 #[path = "board_image_ui.rs"]
@@ -874,19 +876,14 @@ impl App {
                 let title_loaded = load_editor_text(w.title, &note.row.title);
                 SendMessageW(w.title, EM_SETREADONLY, usize::from(!editing), 0);
                 if editing {
-                    let body = note.body.replace("\r\n", "\n")
-                        .replace('\r', "\n").replace('\n', "\r\n");
+                    let body = note_highlight_ui::editor_projection(&note.body);
                     self.editor_ready = load_editor_text(w.body, &body) && title_loaded;
                     EnableWindow(w.title, i32::from(self.editor_ready));
                     EnableWindow(w.body, i32::from(self.editor_ready));
                     SendMessageW(w.body, EM_EMPTYUNDOBUFFER, 0, 0);
                 } else {
                     SendMessageW(w.preview, EM_SETREADONLY, 0, 0);
-                    let projection = (active && note.body.contains("![[")).then(|| {
-                        self.notebook.project_embeds(note.row.id, &note.body)
-                            .unwrap_or_else(|_| format!("{}\n\n無法更新嵌入。請重開這篇筆記。", note.body))
-                    });
-                    set_rtf(w.preview, &crate::markdown::preview(projection.as_deref().unwrap_or(&note.body)));
+                    set_rtf(w.preview, &self.render_reading_note(note, active));
                     SendMessageW(w.preview, EM_SETREADONLY, 1, 0);
                 }
                 label(w.crumb, &self.breadcrumb(note));
@@ -1422,37 +1419,49 @@ impl App {
 
     unsafe fn more_menu(&mut self) {
         unsafe {
-            self.mutate(|app| {
-                let Some(note) = &app.current else {
-                    return Ok(());
-                };
-                let id = note.row.id;
-                if note.row.trash_root.is_some() {
+            let Some(note) = &self.current else { return; };
+            let id = note.row.id;
+            if note.row.trash_root.is_some() {
+                self.mutate(|app| {
                     let restored = app.notebook.restore(id)?;
                     app.change_view(View::All);
                     app.select(restored);
-                    return Ok(());
+                    Ok(())
+                });
+                return;
+            }
+            let star = if note.row.pinned { "取消標星" } else { "標星" };
+            let mut items = vec![
+                (1, star), (2, "移到…"), (3, "移到垃圾桶"),
+                (4, "設定文字屬性…"), (5, "移除文字屬性…"), (6, "檢視文字屬性…"),
+                (7, "筆記關聯…"), (8, "附件與 PDF 摘錄…"),
+            ];
+            let is_excerpt = match self.notebook.is_pdf_excerpt(id) {
+                Ok(found) => found,
+                Err(error) => { self.show_error(error); return; }
+            };
+            if is_excerpt { items.push((9, "開啟 PDF 摘錄來源")); }
+            items.extend([(20, "尋找／取代…"), (21, "字數統計…"), (22, "檢視與還原版本…")]);
+            if is_excerpt { items.push((23, "復原已移除的 PDF 標註…")); }
+            items.push((24, "複製筆記與內容…"));
+            if self.editing && self.editor_ready && !self.extras.board {
+                items.extend([
+                    (25, "切換選取文字的螢光標記"),
+                    (26, "清除本篇螢光標記…"),
+                ]);
+            }
+            let action = popup(self.hwnd, self.widgets.more, None, &items);
+            if matches!(action, 25 | 26) {
+                // These commands must see the saved revision and the editor as
+                // they were selected. The generic action wrapper would flush.
+                if let Err(error) = self.edit_note_highlights(id, action == 26) {
+                    self.show_error(error);
                 }
-                let star = if note.row.pinned {
-                    "取消標星"
-                } else {
-                    "標星"
-                };
-                let mut items = vec![
-                    (1, star), (2, "移到…"), (3, "移到垃圾桶"),
-                    (4, "設定文字屬性…"), (5, "移除文字屬性…"), (6, "檢視文字屬性…"),
-                    (7, "筆記關聯…"), (8, "附件與 PDF 摘錄…"),
-                ];
-                let is_excerpt = app.notebook.is_pdf_excerpt(id)?;
-                if is_excerpt {
-                    items.push((9, "開啟 PDF 摘錄來源"));
-                }
-                items.extend([(20, "尋找／取代…"), (21, "字數統計…"), (22, "檢視與還原版本…")]);
-                if is_excerpt {
-                    items.push((23, "復原已移除的 PDF 標註…"));
-                }
-                items.push((24, "複製筆記與內容…"));
-                match popup(app.hwnd, app.widgets.more, None, &items) {
+                return;
+            }
+            if action == 0 { return; }
+            self.mutate(|app| {
+                match action {
                     1 => {
                         app.notebook.pin(id)?;
                         app.current = app.notebook.note(id)?;

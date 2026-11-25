@@ -115,7 +115,8 @@ impl Notebook {
                 write!(zip, " · <a href=\"../markdown/{id}.md\" download>Markdown 原文</a></nav><h1>")?;
                 escape(&mut zip, &page.title)?;
                 zip.write_all(b"</h1><article>")?;
-                render_markdown(&mut zip, &snapshot, &pages, &body)?;
+                let marks = super::note_highlights::read_marks(&snapshot, id, &body)?;
+                render_markdown(&mut zip, &snapshot, &pages, &body, &marks)?;
                 zip.write_all(b"</article>")?;
                 page_list(&mut zip, &pages, children.get(&Some(id)), "", "子筆記")?;
                 if !links.is_empty() {
@@ -190,11 +191,12 @@ fn page_list(
 
 fn render_markdown(
     output: &mut impl Write, db: &Connection, pages: &BTreeMap<i64, Page>, body: &str,
+    marks: &[std::ops::Range<usize>],
 ) -> Result<()> {
     let options = Options::ENABLE_GFM | Options::ENABLE_WIKILINKS |
         Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let mut links = Vec::new();
-    for event in Parser::new_ext(body, options) {
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => write!(output, "<{level}>")?,
             Event::End(TagEnd::Heading(level)) => write!(output, "</{level}>")?,
@@ -234,7 +236,18 @@ fn render_markdown(
             Event::End(TagEnd::TableHead | TagEnd::TableRow) => output.write_all(b"</tr>")?,
             Event::Start(Tag::TableCell) => output.write_all(b"<td>")?,
             Event::End(TagEnd::TableCell) => output.write_all(b"</td>")?,
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => escape(output, &text)?,
+            Event::Text(text) => {
+                if let Some(parts) = crate::markdown::highlight_parts(body, &text, range, marks) {
+                    for (highlighted, part) in parts {
+                        if highlighted { output.write_all(b"<mark>")?; }
+                        escape(output, part)?;
+                        if highlighted { output.write_all(b"</mark>")?; }
+                    }
+                } else {
+                    escape(output, &text)?;
+                }
+            }
+            Event::Html(text) | Event::InlineHtml(text) => escape(output, &text)?,
             Event::Code(text) => {
                 output.write_all(b"<code>")?;
                 escape(output, &text)?;

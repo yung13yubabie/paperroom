@@ -1,9 +1,11 @@
 //! Local collections, status lanes and explicit directed note relations.
-use super::{Notebook, Result, Row, read_row};
+use super::{Notebook, Result, Row, insert, read_row};
+use super::collection_field_rules::{CollectionRuleInput, apply_on_admission};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 #[path = "collection_templates.rs"]
 mod collection_templates;
+use collection_templates::checked_title;
 pub(super) use collection_templates::{TEMPLATE_SCHEMA, TEMPLATE_RESOURCE_SCHEMA, TEMPLATE_CHILD_SCHEMA, TEMPLATE_NESTED_SCHEMA};
 #[cfg(windows)]
 pub(crate) use collection_templates::{ChildDraft, CollectionTemplate, TemplateApply, TemplateChild, TemplateField, TemplateSelection, validate_template_body};
@@ -113,6 +115,11 @@ fn require_inspected_link(
     Ok(())
 }
 
+pub(crate) enum CollectionEntry<'a> {
+    Existing(i64),
+    New(&'a str),
+}
+
 impl Notebook {
     pub fn create_collection(&self, name: &str) -> Result<i64> {
         let name = checked_label(name)?;
@@ -129,21 +136,41 @@ impl Notebook {
         Ok(s.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
     }
     pub fn add_to_collection(&self, collection_id: i64, note_id: i64, status: &str) -> Result<()> {
+        self.add_collection_entry(collection_id, CollectionEntry::Existing(note_id), status, None)?;
+        Ok(())
+    }
+
+    pub(crate) fn add_collection_entry(
+        &self, collection: i64, entry: CollectionEntry<'_>, status: &str,
+        input: Option<CollectionRuleInput<'_>>,
+    ) -> Result<i64> {
         let status = checked_label(status)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let (collection, note, exists, count): (bool,bool,bool,i64) = tx.query_row(
+        let (exists, count): (bool, i64) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1),
-                    EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL),
-                    EXISTS(SELECT 1 FROM collection_notes WHERE collection_id=?1 AND note_id=?2),
                     (SELECT count(*) FROM collection_notes WHERE collection_id=?1)",
-            params![collection_id,note_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            [collection], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if !collection || !note { return Err("找不到集合或可使用的筆記。".into()); }
-        if exists { return Err("筆記已在此集合，請重新載入。".into()); }
+        if !exists { return Err("找不到集合。".into()); }
         if count >= MAX_ITEMS { return Err("集合最多 1000 篇筆記，含垃圾桶中的筆記。".into()); }
-        tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,?3)", params![collection_id,note_id,status])?;
+        let note = match entry {
+            CollectionEntry::Existing(note) => {
+                let (active, member): (bool, bool) = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL),
+                            EXISTS(SELECT 1 FROM collection_notes WHERE collection_id=?1 AND note_id=?2)",
+                    params![collection,note], |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if !active { return Err("找不到可使用的筆記。".into()); }
+                if member { return Err("筆記已在此集合，請重新載入。".into()); }
+                note
+            }
+            CollectionEntry::New(title) => insert(&tx, None, checked_title(title)?, "")?,
+        };
+        tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,?3)",
+                   params![collection,note,status])?;
+        apply_on_admission(&tx, collection, note, input)?;
         tx.commit()?;
-        Ok(())
+        Ok(note)
     }
     /// Update only if the active member still has the displayed status.
     pub fn move_collection_note(&self, collection_id: i64, note_id: i64, expected_status: &str, new_status: &str) -> Result<()> {

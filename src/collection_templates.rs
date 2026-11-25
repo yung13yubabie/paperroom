@@ -90,7 +90,7 @@ impl CollectionTemplate {
 
 }
 
-fn checked_title(value: &str) -> Result<&str> {
+pub(super) fn checked_title(value: &str) -> Result<&str> {
     let title = value.trim();
     if title.is_empty() || title.chars().any(char::is_control)
         || title.chars().count() > super::super::MAX_TITLE_CHARS
@@ -340,6 +340,7 @@ impl Notebook {
         let note = insert(&tx, None, title, &saved.body)?;
         for field in &saved.fields { write_value(&tx, note, &field.key, &field.value, true)?; }
         tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,?3)", params![collection, note, status])?;
+        super::super::collection_field_rules::apply_on_admission(&tx, collection, note, None)?;
         if options.resources {
             resources::apply(&tx, collection, note, &saved.resources)?;
         }

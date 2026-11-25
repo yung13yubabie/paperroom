@@ -398,6 +398,22 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("SendInput delivered " + actual + "/" + input.Length +
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
+    public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+        int count = GetMenuItemCount(menu);
+        if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
+        var labels = new string[count];
+        for (int i = 0; i < count; ++i) {
+            var label = new StringBuilder(256);
+            if (GetMenuItemID(menu, i) != (uint)(i + 1) ||
+                GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+                throw new InvalidOperationException("Expected a sequential Paperroom list.");
+            labels[i] = label.ToString();
+        }
+        return labels;
+    }
     private static int MenuPosition(IntPtr menu, uint itemId, string caption, bool prefix) {
         int count = GetMenuItemCount(menu);
         if (count < 1 || count > 64) throw new InvalidOperationException("Unexpected native menu.");
@@ -924,6 +940,107 @@ function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
         [PaperroomHighlightGui]::Read($edit) -ceq $ExactText
     }
 }
+function Rule-Prompt([string]$Caption, [string]$Expected, [string]$Value, [switch]$Cancel) {
+    $dialog = Wait-For "native collection prompt $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    $edit = Control $dialog 101
+    if ([PaperroomHighlightGui]::Read($edit) -cne $Expected) {
+        throw "Unexpected initial text in collection prompt '$Caption', expected '$Expected'."
+    }
+    if ($Value -cne $Expected) {
+        try {
+            if ($Value.Length -gt 0) {
+                Type-SearchFilter $dialog 101 $Value
+            } else {
+                $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
+                [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+                $null = Wait-For "focused field $Caption" {
+                    [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)
+                }
+                [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+                [PaperroomHighlightGui]::TapKey($window,$process.Id,0x2E)
+                $null = Wait-For "cleared field $Caption" { [PaperroomHighlightGui]::Read($edit) -ceq '' }
+            }
+        } catch {
+            throw "Native test field '$Caption' contained '$([PaperroomHighlightGui]::Read($edit))' after entering '$Value'. $($_.Exception.Message)"
+        }
+    }
+    if ($Cancel) { Finish-Revision $dialog 2 } else { Finish-Revision $dialog 1 }
+}
+function Rule-Error([string]$Caption, [string]$Contains) {
+    $dialog = Wait-For "native rule rejection $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    $reason = [PaperroomHighlightGui]::Read((Control $dialog 101))
+    if (!$reason.Contains($Contains)) { throw "Unexpected rule rejection: $reason" }
+    Finish-Revision $dialog 1
+}
+function Rule-Pick([string]$Prefix) {
+    $menu = Wait-For "collection list for $Prefix" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
+    }
+    $labels = @([PaperroomHighlightGui]::CurrentMenuLabels($window,$process.Id,$menu))
+    $choices = @(for ($i=0; $i -lt $labels.Count; $i++) {
+        if ($labels[$i].StartsWith($Prefix,[StringComparison]::Ordinal)) { $i+1 }
+    })
+    if ($choices.Count -ne 1) { throw "No unique choice for $Prefix in $($labels -join ' | ')" }
+    Native-Menu 120 $choices[0] $Prefix -MenuOpen -CaptionPrefix
+}
+function Open-RuleBoard {
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 1 '開啟集合看板…' -MenuOpen
+    Native-Menu 109 1 'Rule Fixture' -MenuOpen
+    $null = Wait-For 'visible collection operations' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+}
+function Set-Rule([string]$Key, [string]$Default) {
+    Native-Menu 120 23 '集合欄位規則…'
+    Rule-Pick "${Key}　"
+    Native-Menu 120 2 '必填' -MenuOpen
+    Rule-Prompt '欄位預設值' '' $Default
+    $null = Wait-For "rule saved for $Key" { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存集合欄位規則。' }
+}
+function Start-RuleRow([string]$Name) {
+    Native-Menu 120 22 '新增資料列…'
+    Rule-Prompt '新增資料列' '' $Name
+    Rule-Prompt '加入集合' '待處理' '待處理'
+}
+function Check-RuleRows([string]$Database, [string]$Phase) {
+    @'
+import sqlite3, sys
+from pathlib import Path
+db = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True)
+phase = sys.argv[2]
+def note(name):
+    return db.execute("SELECT id, body FROM notes WHERE title=?", (name,)).fetchall()
+def props(name):
+    return dict(db.execute("SELECT key,value FROM note_properties JOIN notes ON notes.id=note_id WHERE title=?", (name,)))
+members = dict(db.execute("SELECT title,status FROM collection_notes JOIN notes ON notes.id=note_id JOIN collections ON collections.id=collection_id WHERE name='Rule Fixture'"))
+assert len(note('Legacy')) == 1 and note('Legacy')[0][1] == 'preserved body' and props('Legacy') == {}
+assert members.pop('Legacy') == '\u5f85\u8655\u7406'
+assert not note('Cancelled')
+expected = {}
+if phase not in ('before', 'reject-new'):
+    expected['New row'] = {'A-check':'true', 'B-hours':('9' if phase in ('edited','restored','new-restored') else '7')}
+if phase in ('edited','restored','new-restored'):
+    expected['External'] = {'A-check':'true', 'B-hours':'0'}
+else:
+    assert props('External') == {'A-check':'true'}
+if phase == 'new-restored':
+    expected['Restored row'] = {'A-check':'false', 'B-hours':'0'}
+for name in ('New row', 'Restored row'):
+    assert len(note(name)) == int(name in expected), (phase,name)
+assert members == {name:'\u5f85\u8655\u7406' for name in expected}, (phase, members)
+for name, values in expected.items():
+    assert props(name) == values, (phase,name,props(name),values)
+assert note('External')[0][1] == 'keep this prior body'
+assert db.execute('PRAGMA integrity_check').fetchall() == [('ok',)]
+assert not db.execute('PRAGMA foreign_key_check').fetchall()
+print("Read-only collection checks passed:", phase)
+'@ | python - $Database $Phase
+    if ($LASTEXITCODE -ne 0) { throw "Collection state differs at $Phase." }
+}
+
 function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {
     $go = Control $Dialog 1
     $point = [PaperroomHighlightGui]::ButtonPoint($Dialog,$process.Id,$go)
@@ -1516,6 +1633,104 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+    $ruleHome = Join-Path $root 'collection-rules'
+    $ruleRestore = Join-Path $root 'restored-collection-rules'
+    $ruleDb = Join-Path $ruleHome 'paperroom-data\notes.sqlite3'
+    $ruleRestoreDb = Join-Path $ruleRestore 'paperroom-data\notes.sqlite3'
+    $ruleBackup = Join-Path $root 'rule-backup.sqlite3'
+    foreach ($folder in $ruleHome,$ruleRestore) {
+        [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
+        Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
+    }
+    $process = Start-Notebook $ruleHome
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    # A synthetic existing collection, a member without properties and an outside note
+    # with an explicit true. All rule and row changes below go through Paperroom.exe.
+    @'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('PRAGMA foreign_keys=ON')
+    cid = db.execute("INSERT INTO collections(name) VALUES('Rule Fixture')").lastrowid
+    legacy = db.execute("INSERT INTO notes(title,body) VALUES('Legacy','preserved body')").lastrowid
+    ext = db.execute("INSERT INTO notes(title,body) VALUES('External','keep this prior body')").lastrowid
+    db.execute("INSERT INTO collection_notes VALUES(?,?,?)",(cid,legacy,'\u5f85\u8655\u7406'))
+    db.executemany("INSERT INTO property_definitions VALUES(?,?)",[('A-check','checkbox'),('B-hours','number')])
+    db.execute("INSERT INTO note_properties VALUES(?,'A-check','true')",(ext,))
+'@ | python - $ruleDb
+    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the synthetic pre-rule workspace.' }
+    $process = Start-Notebook $ruleHome
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Set-Rule 'A-check' 'false'
+    Set-Rule 'B-hours' '0'
+    Check-RuleRows $ruleDb before
+
+    Start-RuleRow 'Cancelled'
+    Rule-Prompt 'A-check' 'false' 'true'
+    Rule-Prompt 'B-hours' '0' '0' -Cancel
+    Check-RuleRows $ruleDb before
+
+    Start-RuleRow 'New row'
+    Rule-Prompt 'A-check' 'false' 'true'
+    Rule-Prompt 'B-hours' '0' ''
+    Rule-Error '欄位值無效' '必填'
+    Check-RuleRows $ruleDb reject-new
+    Rule-Prompt 'B-hours' '' '7'
+    $null = Wait-For 'new row saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已新增集合資料列。' }
+    Check-RuleRows $ruleDb created
+
+    Native-Menu 120 18 '編輯資料列的型別欄位…'
+    Rule-Pick '待處理　New row  ('
+    Rule-Pick 'B-hours　'
+    Rule-Prompt 'B-hours' '7' ''
+    Rule-Error '欄位未儲存' '必填'
+    Check-RuleRows $ruleDb created
+    Rule-Prompt 'B-hours' '' 'bad-number'
+    Rule-Error '欄位未儲存' 'bad-number'
+    Check-RuleRows $ruleDb created
+    Rule-Prompt 'B-hours' 'bad-number' '9'
+    $null = Wait-For 'corrected edit saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已更新資料列欄位。' }
+
+    Native-Menu 120 1 '加入筆記…'
+    Rule-Pick 'External  ('
+    Rule-Prompt '加入集合' '待處理' '待處理'
+    Rule-Prompt 'B-hours' '0' '0'
+    $null = Wait-For 'existing note joined the same collection' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將筆記加入集合。'
+    }
+    Check-RuleRows $ruleDb edited
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $ruleHome
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Check-RuleRows $ruleDb edited
+    Native-File 4 '備份工作區…' $ruleBackup '工作區備份已完成'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    $sourceStamp = (Get-FileHash -LiteralPath $ruleDb).Hash
+    $backupStamp = (Get-FileHash -LiteralPath $ruleBackup).Hash
+    Copy-Item -LiteralPath $ruleBackup -Destination $ruleRestoreDb
+    $process = Start-Notebook $ruleRestore
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Check-RuleRows $ruleRestoreDb restored
+    Start-RuleRow 'Restored row'
+    Rule-Prompt 'A-check' 'false' 'false'
+    Rule-Prompt 'B-hours' '0' ''
+    Rule-Error '欄位值無效' '必填'
+    Rule-Prompt 'B-hours' '' '0'
+    $null = Wait-For 'restored board applied rules' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已新增集合資料列。' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Check-RuleRows $ruleRestoreDb new-restored
+    if ((Get-FileHash -LiteralPath $ruleDb).Hash -cne $sourceStamp -or
+        (Get-FileHash -LiteralPath $ruleBackup).Hash -cne $backupStamp) { throw 'Isolated restore changed source or backup.' }
+    Write-Host "PASS: collection rules, actual native creation and edits, rejected input and cancel without writes, legacy properties, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

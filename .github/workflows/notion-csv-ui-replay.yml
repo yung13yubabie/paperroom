@@ -1,0 +1,62 @@
+name: Replay the verified Notion feature EXE
+on:
+  push:
+    branches: ['dev/integration/notion-zip-ui-replay-20261125']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  replay:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARTIFACT_ID: '15049454478'
+      ORIGINAL_RUN: '45671282196'
+      ORIGINAL_COMMIT: '877907663daf213df2fdaaefa1cd79e55b24f27c'
+      OUTER_SHA: 'cbcfe6651f2788cf73b072cb89e5de837521c1a2d499bb4f993b0a072804fef6'
+      PACKAGE_SHA: '442005c87a5a3e30680364ee1a001f51428a0f92bd657ac88a48ebd684867d59'
+      EXE_SHA: '6f3e530f03c48d424f0dd5a4bcf09ec5ef5fca570ec2da6f195d4b9a5fae4d73'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify only QA files changed and exercise the original downloaded EXE
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git merge-base --is-ancestor $env:ORIGINAL_COMMIT HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned build is not an ancestor.' }
+          $changed = @(git diff --name-only $env:ORIGINAL_COMMIT HEAD)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 2 -or
+              $changed -notcontains 'scripts/windows-notion-csv-workflow.ps1' -or
+              $changed -notcontains '.github/workflows/notion-csv-ui-replay.yml') { throw 'Application input changed.' }
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-notion-replay-' + [guid]::NewGuid())
+          [void][IO.Directory]::CreateDirectory($root)
+          try {
+            $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID"
+            $metadata = gh api $route | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $metadata.expired -or $metadata.workflow_run.id -ne [long]$env:ORIGINAL_RUN -or
+                $metadata.workflow_run.head_sha -cne $env:ORIGINAL_COMMIT -or $metadata.digest -cne "sha256:$env:OUTER_SHA") {
+              throw 'Unexpected artifact metadata.'
+            }
+            $outer = Join-Path $root 'download.zip'
+            gh api "$route/zip" > $outer
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $outer).Hash -ine $env:OUTER_SHA) { throw 'Download SHA-256 differs.' }
+            $unpacked = Join-Path $root 'outer'
+            Expand-Archive -LiteralPath $outer -DestinationPath $unpacked
+            $package = Join-Path $unpacked 'Paperroom-v0.1.2-windows-x64-draft.zip'
+            if ((Get-FileHash -LiteralPath $package).Hash -ine $env:PACKAGE_SHA) { throw 'Package SHA-256 differs.' }
+            $app = Join-Path $root 'inner'
+            Expand-Archive -LiteralPath $package -DestinationPath $app
+            $exe = Join-Path $app 'Paperroom.exe'
+            if ((Get-FileHash -LiteralPath $exe).Hash -ine $env:EXE_SHA) { throw 'EXE SHA-256 differs.' }
+            Write-Host "Verified replay artifact $env:ARTIFACT_ID with EXE $env:EXE_SHA; only QA changed."
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXE_SHA
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+          }

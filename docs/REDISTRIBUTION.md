@@ -37,3 +37,11 @@ v0.1.1 Windows ZIP 的 `licenses/DEPENDENCIES.txt` 列出 Windows 依賴，並�
 未簽章 Windows CI 另存一份建置證據，不改動只含 EXE 的測試 ZIP。證據包含該 EXE 的 SHA-256、Rust 版本與提交，以及 Cargo 解出的 MSVC 目標和主機建置相依。相依套件列出名稱、版號、授權宣告與授權檔名，省略建置路徑。若該 Rust 工具鏈帶有版權通知檔，證據會記錄相應雜湊。
 
 發佈前仍須核對最終包實際連結的物件、適用的 MSVC／Windows SDK 條款，以及應附的 Rust、相依套件和內嵌素材通知原文。Cargo 相依圖與連結 MAP 計數各自只能證明其中一部分。
+
+## 本次草稿的證據層級與待辦
+
+從最終 MSVC 連結擷取兩種紀錄。MAP 顯示可辨識的符號與物件，`/VERBOSE:LIB` 顯示連結器選入的封存檔成員。草稿只附移除本機路徑後的摘要，並記下能辨認的封存檔、雜湊和工具鏈版本。未辨識的列會保留計數。Cargo 目標相依清單另列為建置輸入。連結最佳化可能移除或合併程式碼，僅靠這些紀錄無法完整歸屬 EXE 的每一個位元。[MSVC 連結器紀錄](https://learn.microsoft.com/en-us/cpp/build/reference/verbose-print-progress-messages?view=msvc-170)
+
+草稿 ZIP 附四份內嵌的 PDF 補充通知與 Rust 標準函式庫版權原文。另從符合 Cargo.lock 雜湊的 crates.io 封存檔採集 Windows 目標相依的原文。清冊會列出沒有找到通知檔名的套件。讀取 Rust 1.100.0 的 `COPYRIGHT-library.html` 時，已核對內文沒有相對授權檔連結。它的外部連結仍需要網路。
+
+從 [草稿 PR](https://github.com/yung13yubabie/paperroom/pull/1) 指定的 CI 取得 GitHub 外層 ZIP，再解開裡面的 `Paperroom-v0.1.2-windows-x64-draft.zip`。以 CI 紀錄核對這兩層 ZIP、內含 EXE 和通知清冊的 SHA-256。草稿可用來核查包內實際檔案。正式發佈仍需確認未辨識組件及這次使用的 MSVC／Windows SDK 的適用條款。[Microsoft 的 Visual C++ 再散布說明](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170)

@@ -1273,6 +1273,7 @@ impl App {
                             let mut report = media.report(imported.pages.len(), imported.skipped);
                             report.push_str("\r\n\r\n");
                             report.push_str(&csv.report());
+                            report.push_str("\r\n\r\n同批同一 ZIP 部件中可唯一比對的相對頁面連結，會出現在「筆記連結」選單。原始 Markdown 不變。片段只認唯一的字面標題。外部連結、附件路徑及未能確認的頁面連結保留原樣。");
                             let status = format!(
                                 "已匯入 {} 篇 Markdown、{} 筆附件關聯及 {} 份原始 CSV。",
                                 imported.pages.len(), media.count(), csv.count(),
@@ -1916,10 +1917,14 @@ impl App {
                 let handled = links.iter().map(|target| target.note_id).collect::<HashSet<_>>();
                 let mut related = links.into_iter().map(|link| {
                     let anchor = link.anchor.as_deref().unwrap_or("");
-                    let action = if anchor.starts_with("#^") { "預覽" } else { "前往" };
+                    let action = if link.anchor_syntax != AnchorSyntax::NotionMarkdown && anchor.starts_with("#^") {
+                        "預覽"
+                    } else { "前往" };
                     let mut label = format!("{action}　{}", link.label);
                     if !anchor.is_empty() { label.push_str(&format!(" {anchor}")); }
-                    if let Some((title, detail)) = targets.get(&link.note_id) {
+                    if let Some(path) = &link.notion_path {
+                        label.push_str(&format!("　｜ {path}"));
+                    } else if let Some((title, detail)) = targets.get(&link.note_id) {
                         label.push_str(&format!("　｜ {title}　｜ {detail}"));
                     }
                     (link.note_id, label, link.anchor, link.anchor_syntax)

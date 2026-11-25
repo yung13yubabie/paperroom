@@ -294,7 +294,7 @@ impl App {
         &mut self, id: i64, anchor: Option<&str>, syntax: crate::markdown::AnchorSyntax,
     ) -> Result<()> {
         unsafe {
-            if let Some(anchor) = anchor.filter(|anchor| anchor.starts_with("#^")) {
+            if let Some(anchor) = anchor.filter(|anchor| syntax != crate::markdown::AnchorSyntax::NotionMarkdown && anchor.starts_with("#^")) {
                 self.preview_block_link(id, anchor)
             } else {
                 self.open_note_destination(id, anchor, syntax, true)
@@ -327,7 +327,7 @@ impl App {
                 self.present();
             }
             let body = &self.current.as_ref().unwrap().body;
-            let (section, selection) = if anchor.starts_with("#^") {
+            let (section, selection) = if syntax != crate::markdown::AnchorSyntax::NotionMarkdown && anchor.starts_with("#^") {
                 match resolve_block(body, anchor) {
                     BlockLookup::Found { source, .. } => {
                         let selection = if select_source {

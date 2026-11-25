@@ -3040,6 +3040,8 @@ with sqlite3.connect(sys.argv[1]) as db:
     if ((Get-FileHash -LiteralPath $ruleDb).Hash -cne $sourceStamp -or
         (Get-FileHash -LiteralPath $ruleBackup).Hash -cne $backupStamp) { throw 'Isolated restore changed source or backup.' }
     Write-Host "PASS: collection rules, actual native creation and edits, rejected input and cancel without writes, legacy properties, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
+
+    . (Join-Path $PSScriptRoot 'windows-notion-page-links.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

@@ -1,4 +1,4 @@
-//! Preserve original Notion database CSV exports alongside imported Markdown.
+//! Keep original Notion CSV files and Markdown member paths for each ZIP import.
 use super::attachments::{MAX_FILE_BYTES, MAX_STORAGE_BYTES};
 use super::{Result, clean_title, insert};
 use rusqlite::{Transaction, params};
@@ -15,6 +15,7 @@ const SCOPE: &str = "CSV 附件保留匯出檔內的原始位元組。Notion 關
 
 #[derive(Default)]
 pub(crate) struct CsvSources {
+    pub(super) page_origins: BTreeMap<Vec<String>, (Option<String>, String)>,
     namespaces: BTreeSet<String>,
     files: BTreeMap<(String, String), CsvSource>,
     bytes: usize,
@@ -61,6 +62,12 @@ fn abbreviated(text: &str, limit: usize) -> String {
 }
 
 impl CsvSources {
+    pub(crate) fn record_page_origin(&mut self, keys: &[String], part: Option<&str>, path: &str) {
+        if windows_zip_path(path) {
+            self.page_origins.insert(keys.to_vec(), (part.map(str::to_owned), path.into()));
+        }
+    }
+
     pub(crate) fn add_namespace(&mut self, part: &str) -> Result<()> {
         if !windows_zip_path(part) || !self.namespaces.insert(part.to_lowercase()) {
             return Err("Notion 內嵌 ZIP 部件名稱不安全或重複。未執行匯入。".into());

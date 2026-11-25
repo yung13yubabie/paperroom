@@ -160,6 +160,7 @@ pub fn wiki_targets(body: &str) -> Vec<String> {
 pub(crate) enum AnchorSyntax {
     Wiki,
     Markdown,
+    NotionMarkdown,
 }
 
 pub(crate) struct NoteReference {
@@ -227,16 +228,19 @@ fn decode_fragment(raw: &str) -> Option<String> {
 
 fn heading_levels(anchor: &str, syntax: AnchorSyntax) -> Option<Vec<String>> {
     let suffix = anchor.strip_prefix('#')?;
-    if suffix.len() > 4096 { return None; }
+    if suffix.len() > 4096 || (syntax == AnchorSyntax::NotionMarkdown && suffix.contains('#')) {
+        return None;
+    }
     // Split before decoding: "%23" is a literal hash in one Markdown
     // heading. A raw "#" separates explicitly named ancestors.
     suffix.split('#').map(|part| {
         if part.starts_with('^') { return None; }
         let name = match syntax {
             AnchorSyntax::Wiki => part.to_owned(),
-            AnchorSyntax::Markdown => decode_fragment(part)?,
+            AnchorSyntax::Markdown | AnchorSyntax::NotionMarkdown => decode_fragment(part)?,
         };
         let label = name.trim();
+        if syntax == AnchorSyntax::NotionMarkdown && label.starts_with('^') { return None; }
         (!label.is_empty() && !name.chars().any(char::is_control)).then(|| label.to_owned())
     }).collect()
 }

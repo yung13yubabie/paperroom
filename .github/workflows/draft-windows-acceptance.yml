@@ -1,7 +1,7 @@
 name: Verify pinned draft Windows candidate
 on:
   push:
-    branches: ['dev/offline-workspace-handoff', 'dev/features/**']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125']
     paths:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -148,14 +148,14 @@ jobs:
           }
 
   candidate-replay:
-    # Opt in for QA-only fixes that must replay the exact downloadable candidate.
-    if: github.repository == 'yung13yubabie/paperroom' && contains(github.event.head_commit.message, '[candidate-replay]')
+    # Replay the exact integrated binary on this test-only branch.
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/integration/pr1-7-20261125' && contains(github.event.head_commit.message, '[candidate-replay]')
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: f936a18ccc836f0906d3b924114781b212bd1afb
-      PINNED_EXE_SHA: 94e681f82e86168cf0550e6cc2a5d735bf843a3f6baecb83a698949624c5abf5
-      PINNED_ZIP_SHA: f14e9f456bf4b5bf730ced433650a1e39388fee9164d80e420f4b0dffd4bb4e2
+      PINNED_SOURCE: 0a2325f53f3e3fc125229c57936451de9ae60e20
+      PINNED_EXE_SHA: 2a0eefa5d6f6e543b50ce272cdef29eae42b36cd6a01b2aed45560908623bcda
+      PINNED_ZIP_SHA: 766bbe0fcd70028db0c1e6c3079b596e226167fe3716b3626d89d8f527167db7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -180,11 +180,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15023184534"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15034501985"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45618960695 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45637058713 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'
@@ -217,3 +217,24 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $root -Recurse -Force
           }
+
+  integrated-rust:
+    name: Run the full integration Rust suite
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/integration/pr1-7-20261125' && contains(github.event.head_commit.message, '[candidate-replay]')
+    permissions:
+      contents: read
+    runs-on: windows-2022
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Run all Windows Rust tests with the locked toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned Rust toolchain could not be installed.' }
+          cargo +1.100.0 test --locked --target x86_64-pc-windows-msvc
+          exit $LASTEXITCODE

@@ -987,7 +987,7 @@ print(f"SQLite Canvas {state}: {len(canvas['nodes'])} nodes, {len(canvas['edges'
 '@ | python - $Database $Title $Source $State $Export
     if ($LASTEXITCODE -ne 0) { throw "Canvas persistence or export check failed at $State." }
 }
-function Start-Notebook([string]$Folder) {
+function Start-NotebookProcess([string]$Folder) {
     $binary = Join-Path $Folder 'Paperroom.exe'
     Assert-Hash $binary
     $info = [Diagnostics.ProcessStartInfo]::new($binary, '--portable')
@@ -997,7 +997,10 @@ function Start-Notebook([string]$Folder) {
         $info.Environment[$key] = Join-Path $Folder $key
         $null = [IO.Directory]::CreateDirectory($info.Environment[$key])
     }
-    $started = [Diagnostics.Process]::Start($info)
+    [Diagnostics.Process]::Start($info)
+}
+function Start-Notebook([string]$Folder) {
+    $started = Start-NotebookProcess $Folder
     try {
         $null = Wait-For 'Paperroom note window' {
             $started.Refresh()
@@ -2432,9 +2435,12 @@ print("Verified original Markdown paths and bytes, one fresh import root, exact 
     Native-Menu 109 1 '匯出可攜 Vault ZIP…' -MenuOpen
     Native-Menu 109 1 '匯入：ReviewFixture  (#' -MenuOpen -CaptionPrefix
     Native-File 36 '匯出可攜 Vault ZIP…' $jointZip '已匯出 3 篇 Markdown 與 1 個來源附件。已加入可攜連結清單。' -AlreadyOpened
+    $jointBackup = Join-Path $root '整合工作區備份.sqlite3'
+    Native-File 4 '備份工作區…' $jointBackup '工作區備份已完成'
     Close-Notebook $process
     $process.Dispose()
     $process = $null
+    $originHash = (Get-FileHash -LiteralPath $reviewDb).Hash
     $archiveHash = (Get-FileHash -LiteralPath $jointZip).Hash
     @'
 from pathlib import Path
@@ -2535,6 +2541,154 @@ print("Integrated workspace: ZIP rebinds only the stable identity, includes the 
         if ((Get-FileHash -LiteralPath $file).Hash -cne $checks[$file]) { throw 'Integrated workflow wrote into the source Vault.' }
     }
     Write-Host 'PASS: same real Vault sample across preview refusal, note links, repeated Canvas locations, saved formula sorting, checksum refusal and portable ZIP re-import after restart.'
+
+
+    # Follow the documented separate-folder restore, using only the downloaded EXE and the UI backup.
+    $fullRestore = Join-Path $root 'full-workspace-restore'
+    $fullData = Join-Path $fullRestore 'paperroom-data'
+    [void](New-Item -ItemType Directory -Path $fullRestore)
+    [void](New-Item -ItemType Directory -Path $fullData)
+    $fullDb = Join-Path $fullData 'notes.sqlite3'
+    $backupHash = (Get-FileHash -LiteralPath $jointBackup).Hash
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $fullRestore 'Paperroom.exe')
+    Copy-Item -LiteralPath $jointBackup -Destination $fullDb
+    if ((Get-FileHash -LiteralPath $fullDb).Hash -cne $backupHash -or
+        @(Get-ChildItem -LiteralPath $fullData -Force).Count -ne 1) {
+        throw 'A separate workspace must start with the exact backup bytes and no SQLite sidecars.'
+    }
+    $process = Start-Notebook $fullRestore
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'ReviewA' '場'
+    Native-Menu 120 3 '前往　ReviewB　｜ ReviewedB' -CaptionPrefix
+    $null = Wait-For 'first opening of restored workspace resolves the renamed identity' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewedB' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('場內的精確內容')
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $fullRestore
+    $window = $process.MainWindowHandle
+    Open-LinkedFixture 'ReviewA' '場'
+    foreach ($node in @(@(1,'first',@(237,33,125)),@(2,'second',@(18,164,116)))) {
+        Locate-NoteOnCanvas 1 'IntegratedResearch' 1 2 $node[0] $node[1] $node[2]
+        Open-LocationSource 'ReviewA' '相對頁'
+    }
+    Native-Menu 120 3 '前往　ReviewB　｜ ReviewedB' -CaptionPrefix
+    $null = Wait-For 'reopened backup resolves the exact renamed note instead of the namesake' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewedB' -and
+        [PaperroomHighlightGui]::Read((Control $window 121)).Contains('場內的精確內容')
+    }
+    Open-SortCollection 'IntegratedReview'
+    Open-SortNamedView 1 'IntegratedOrder'
+    Assert-RankedRows @('ReviewedB','ReviewA')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+
+    $invalidRestore = Join-Path $root 'truncated-workspace-restore'
+    $invalidData = Join-Path $invalidRestore 'paperroom-data'
+    [void](New-Item -ItemType Directory -Path $invalidRestore)
+    [void](New-Item -ItemType Directory -Path $invalidData)
+    $invalidDb = Join-Path $invalidData 'notes.sqlite3'
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $invalidRestore 'Paperroom.exe')
+    @'
+from contextlib import closing
+from pathlib import Path
+import json, sqlite3, sys
+origin, archive, restored, invalid = map(Path, sys.argv[1:])
+
+def snapshot(path):
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+        assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",), path
+        assert not db.execute("PRAGMA foreign_key_check").fetchall(), path
+        queries = (
+            "SELECT p.import_root,p.note_id,p.relative_path,n.title,n.body,t.token FROM vault_paths p "
+            "JOIN notes n ON n.id=p.note_id JOIN note_link_identities t ON t.note_id=n.id ORDER BY p.relative_path",
+            "SELECT c.id,c.title,c.source,b.import_root FROM saved_canvases c "
+            "JOIN canvas_vault_bindings b ON b.canvas_id=c.id",
+            "SELECT v.collection_id,v.name,v.rules_json,f.name,f.expression FROM collection_views v "
+            "JOIN collection_formulas f ON f.collection_id=v.collection_id",
+            "SELECT c.collection_id,c.note_id,c.status,p.key,p.value FROM collection_notes c "
+            "JOIN note_properties p ON p.note_id=c.note_id ORDER BY c.note_id,p.key",
+            "SELECT p.relative_path,o.relative_path,a.content FROM attachments a "
+            "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id",
+        )
+        return [db.execute(query).fetchall() for query in queries]
+
+expected = snapshot(origin)
+assert snapshot(archive) == snapshot(restored) == expected
+notes, canvases, views, ranks, media = expected
+by_path = {row[2]: row for row in notes}
+a, b, decoy = (by_path[path] for path in ("\u5834/ReviewA.md", "\u5834/ReviewB.md", "ReviewB.md"))
+assert b[3] == "ReviewedB" and decoy[3] == "ReviewB"
+assert f"paperroom:note:{b[1]}:{b[5]}|ReviewB" in a[4] and "./ReviewB.md#review" in a[4]
+assert len(canvases) == 1 and canvases[0][1] == "IntegratedResearch" and canvases[0][3] == a[0]
+assert [n["id"] for n in json.loads(canvases[0][2])["nodes"]] == ["first", "second"]
+assert len(views) == 1 and views[0][1] == "IntegratedOrder" and views[0][4] == 'typed("\u5de5\u6642")'
+assert json.loads(views[0][2]) == [False, [], [["\u5be9\u95b1\u9806\u4f4d", "formula-number", True]]]
+assert {row[1]: row[4] for row in ranks} == {a[1]: "3", b[1]: "7"}
+assert media == [(a[2], "\u7d20\u6750/\u5361.txt", b"asset one")]
+
+# Drop a full page from the real backup while preserving its SQLite-format header.
+raw = archive.read_bytes()
+assert raw.startswith(b"SQLite format 3\0")
+page_size = int.from_bytes(raw[16:18], "big")
+if page_size == 1:
+    page_size = 65536
+assert 512 <= page_size <= 65536 and len(raw) % page_size == 0 and len(raw) > page_size * 2
+with invalid.open("xb") as out:
+    out.write(raw[:-page_size])
+print("Full backup has the original stable note identity and attachment, exact Canvas binding and nodes, and saved formula and sort. Prepared a truncated copy.")
+'@ | python - $reviewDb $jointBackup $fullDb $invalidDb
+    if ($LASTEXITCODE -ne 0) { throw 'Workspace backup and restore did not preserve the integrated feature data.' }
+    $invalidHash = (Get-FileHash -LiteralPath $invalidDb).Hash
+    $watcher = [IO.FileSystemWatcher]::new($invalidData)
+    $watcher.NotifyFilter = [IO.NotifyFilters]'FileName, DirectoryName, LastWrite, Size'
+    $watchEvents = @('Created','Changed','Deleted','Renamed','Error')
+    $watchPrefix = 'PaperroomRejectedBackup.' + [guid]::NewGuid().ToString('N')
+    try {
+        foreach ($eventName in $watchEvents) {
+            $null = Register-ObjectEvent -InputObject $watcher -EventName $eventName -SourceIdentifier "$watchPrefix.$eventName"
+        }
+        $watcher.EnableRaisingEvents = $true
+        $window = [IntPtr]::Zero
+        $process = Start-NotebookProcess $invalidRestore
+        $alert = Wait-For 'truncated backup startup error from the exact EXE' {
+            $process.Refresh()
+            if ($process.HasExited) { throw "Backup startup exited without its expected native error (code $($process.ExitCode))." }
+            $handle = $process.MainWindowHandle
+            if ($handle -ne [IntPtr]::Zero -and [PaperroomHighlightGui]::GetDlgItem($handle,103) -ne [IntPtr]::Zero) {
+                throw 'The app opened an editor with the truncated backup.'
+            }
+            [PaperroomHighlightGui]::ForegroundAlert($handle,$process.Id,'紙間無法啟動')
+        }
+        if (![PaperroomHighlightGui]::DialogContains($alert,$process.Id,'database disk image is malformed')) {
+            throw 'The startup error did not identify database corruption.'
+        }
+        [PaperroomHighlightGui]::TapKey($alert,$process.Id,0x0D)
+        if (!$process.WaitForExit(10000) -or $process.ExitCode -ne 1) { throw 'The corrupt backup did not exit with the startup failure code.' }
+        $process.Dispose()
+        $process = $null
+        Start-Sleep -Milliseconds 300
+        $events = @(Get-Event | Where-Object { $_.SourceIdentifier.StartsWith($watchPrefix,[StringComparison]::Ordinal) })
+        if ($events.Count -ne 0) {
+            $details = $events | ForEach-Object { "$($_.SourceIdentifier.Split('.')[-1]): $($_.SourceEventArgs)" }
+            throw "The failed startup triggered writes, sidecar activity or a watcher error: $($details -join ', ')"
+        }
+    } finally {
+        $watcher.Dispose()
+        foreach ($eventName in $watchEvents) {
+            Unregister-Event -SourceIdentifier "$watchPrefix.$eventName" -ErrorAction SilentlyContinue
+            Remove-Event -SourceIdentifier "$watchPrefix.$eventName" -ErrorAction SilentlyContinue
+        }
+    }
+    if ((Get-FileHash -LiteralPath $invalidDb).Hash -cne $invalidHash -or
+        @(Get-ChildItem -LiteralPath $invalidData -Force).Count -ne 1 -or
+        (Get-FileHash -LiteralPath $jointBackup).Hash -cne $backupHash -or
+        (Get-FileHash -LiteralPath $reviewDb).Hash -cne $originHash) {
+        throw 'Restore testing modified a backup input or the original workspace, or left a sidecar.'
+    }
+    Write-Host 'PASS: native full-workspace backup and isolated restore retained the exact renamed identity, both Canvas occurrences and formula-based order after restart. The truncated backup showed a native corruption error, exited with code 1 and triggered no workspace writes.'
 
     $locationHome = Join-Path $root 'canvas-locations-workspace'
     $vaultA = Join-Path $root 'LocationVaultA'

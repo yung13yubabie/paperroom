@@ -391,7 +391,29 @@ def main(argv=None):
             {key: getattr(args, key) for key in toolchain_fields},
             bounded(args.cargo_lock, 4 << 20) if args.cargo_lock else None,
         )
-    except (OSError, UnicodeError, ValueError, struct.error):
+    except ValueError as error:
+        # Do not publish exception text derived from private file content.
+        safe = {
+            "invalid evidence digest or source identity",
+            "link evidence exceeds the permitted input size",
+            "approved roots must use distinct known Windows root kinds",
+            "approved source roots must be distinguishable",
+            "unsupported Cargo.lock structure",
+            "unexpected crates.io identity in Cargo.lock",
+            "the supplied executable does not match the pinned PE digest",
+            "candidate PE header is invalid",
+            "candidate is not a valid x64 PE32+ image",
+            "candidate has an empty PE image",
+            "MAP timestamp or image base does not match the exact PE",
+            "MAP evidence has too many distinct retained observations",
+            "MSVC trace refers to too many distinct private archives",
+            "MSVC trace has too many distinct selected member observations",
+            "Visual Studio product identity is not recognized",
+            "toolchain version is not a bounded numeric version",
+        }
+        detail = str(error)
+        parser.exit(2, f"MSVC link evidence could not be verified. {detail if detail in safe else 'Invalid data.'}\n")
+    except (OSError, struct.error):
         parser.exit(2, "MSVC link evidence could not be read or verified.\n")
     print(json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True))
     return 0

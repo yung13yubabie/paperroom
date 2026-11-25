@@ -25,15 +25,18 @@ try {
     $vs = $instance.installationPath
     Import-Module (Join-Path $vs 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll') *> $null
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' *> $null
-    $linker = (Get-Command link.exe -CommandType Application).Source
-    $compiler = (Get-Command cl.exe -CommandType Application).Source
     $vcRoot = [IO.Path]::GetFullPath($env:VCToolsInstallDir).TrimEnd('\','/')
     $sdkRoot = [IO.Path]::GetFullPath($env:WindowsSdkDir).TrimEnd('\','/')
     $sdkVersion = $env:WindowsSDKVersion.TrimEnd('\','/')
-    $nativeBin = Join-Path $vcRoot 'bin/Hostx64/x64'
-    if ($linker -ine (Join-Path $nativeBin 'link.exe') -or $compiler -ine (Join-Path $nativeBin 'cl.exe')) {
-        throw 'The resolved MSVC tools do not match the selected native developer shell.'
+    $nativeBin = [IO.Path]::GetFullPath((Join-Path $vcRoot 'bin/Hostx64/x64'))
+    $linker = Join-Path $nativeBin 'link.exe'
+    $compiler = Join-Path $nativeBin 'cl.exe'
+    if (!(Test-Path -LiteralPath $linker -PathType Leaf) -or !(Test-Path -LiteralPath $compiler -PathType Leaf)) {
+        throw 'The selected native developer shell has no x64 MSVC linker or compiler.'
     }
+    # Point the C build and the final Rust link at the same chosen native tools.
+    $env:PATH = "$nativeBin;$env:PATH"
+    $env:CC_x86_64_pc_windows_msvc = $compiler
     $sysroot = rustc --print sysroot
     if ($LASTEXITCODE -ne 0 -or !$sysroot -or !(Test-Path -LiteralPath $sysroot -PathType Container)) {
         throw 'The pinned Rust sysroot was unavailable.'

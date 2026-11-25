@@ -39,7 +39,8 @@ jobs:
       - name: Run Windows tests with locked dependencies
         run: cargo test --locked --target x86_64-pc-windows-msvc
 
-      - name: Build release EXE
+      - name: Build release EXE and capture restricted CRT evidence
+        id: build
         run: |
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
           $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
@@ -52,10 +53,43 @@ jobs:
             $flags += "--remap-path-prefix=$($path.Replace('\', '/'))=$token"
           }
           $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
-          cargo build --locked --release --target x86_64-pc-windows-msvc
+          $map = Join-Path $env:RUNNER_TEMP ('paperroom-' + [guid]::NewGuid().ToString('N') + '.map')
+          $mapHash = 'unavailable'
+          $crtEvidence = 'unresolved'
+          try {
+            cargo rustc --locked --release --target x86_64-pc-windows-msvc --bin paperroom -- -C "link-arg=/MAP:$map"
+            if ($LASTEXITCODE -ne 0) { throw 'The Windows release build failed.' }
+            $built = 'target/x86_64-pc-windows-msvc/release/paperroom.exe'
+            $exeHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+            if (Test-Path -LiteralPath $map -PathType Leaf) {
+              try {
+                $mapHash = (Get-FileHash -LiteralPath $map -Algorithm SHA256).Hash
+                $counts = [ordered]@{ libcmt = 0; libucrt = 0; libvcruntime = 0 }
+                $pattern = '^\s*[0-9a-f]+:[0-9a-f]+\s+\S+\s+[0-9a-f]+\s+(?:[fi]\s+)*(libcmt|libucrt|libvcruntime)(?:\.lib)?:[A-Za-z0-9_.$-]+\.obj\s*$'
+                foreach ($line in [IO.File]::ReadLines($map)) {
+                  if ($line -match $pattern) { $counts[$Matches[1].ToLowerInvariant()]++ }
+                }
+                $parts = @($counts.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+                $status = if ($counts.Values -contains 0) { 'unresolved (one or more markers absent)' } else { 'markers observed (not a linked inventory)' }
+                $crtEvidence = "$status; " + ($parts -join ', ')
+              } catch {
+                $crtEvidence = 'unresolved (map could not be inspected)'
+              }
+            }
+            "exe_hash=$exeHash" >> $env:GITHUB_OUTPUT
+            "map_hash=$mapHash" >> $env:GITHUB_OUTPUT
+            "crt_evidence=$crtEvidence" >> $env:GITHUB_OUTPUT
+          } finally {
+            if (Test-Path -LiteralPath $map -PathType Leaf) {
+              Remove-Item -LiteralPath $map -Force -ErrorAction SilentlyContinue
+              if (Test-Path -LiteralPath $map -PathType Leaf) { throw 'Could not remove the private link map.' }
+            }
+          }
 
       - name: Verify and exercise the unsigned artifact
         id: verify
+        env:
+          BUILD_EXE_HASH: ${{ steps.build.outputs.exe_hash }}
         run: |
           $metadata = cargo metadata --no-deps --format-version 1 --locked
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
@@ -66,6 +100,7 @@ jobs:
 
           $built = 'target/x86_64-pc-windows-msvc/release/paperroom.exe'
           $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+          if ($builtHash -cne $env:BUILD_EXE_HASH) { throw 'The executable differs from the recorded release build.' }
           $folder = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'paperroom-unsigned')
           $exe = Join-Path $folder.FullName 'Paperroom.exe'
           Copy-Item -LiteralPath $built -Destination $exe
@@ -107,6 +142,8 @@ jobs:
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           ARCHIVE_HASH: ${{ steps.upload.outputs.artifact-digest }}
           VERIFY_ONLY: ${{ inputs.verify_only }}
+          MAP_HASH: ${{ steps.build.outputs.map_hash }}
+          CRT_EVIDENCE: ${{ steps.build.outputs.crt_evidence }}
         run: |
           $summary = @(
             "Paperroom $env:VERSION unsigned Windows x64 (MSVC)"
@@ -115,6 +152,8 @@ jobs:
             "- Source commit: $env:GITHUB_SHA"
             "- Run: $env:GITHUB_RUN_ID (attempt $env:GITHUB_RUN_ATTEMPT)"
             "- Paperroom.exe SHA-256: $env:EXE_HASH"
+            "- Private MSVC MAP SHA-256: $env:MAP_HASH"
+            "- MSVC CRT public-symbol row counts: $env:CRT_EVIDENCE"
           )
           if ($env:VERIFY_ONLY -eq 'true') {
             $summary += '- Verification only. Artifact upload was skipped.'
@@ -127,4 +166,5 @@ jobs:
               "- GitHub artifact ZIP SHA-256: $env:ARCHIVE_HASH"
             )
           }
+          Write-Host "MSVC CRT public-symbol row counts for EXE SHA-256 $($env:EXE_HASH): $env:CRT_EVIDENCE; map SHA-256 $env:MAP_HASH"
           $summary >> $env:GITHUB_STEP_SUMMARY

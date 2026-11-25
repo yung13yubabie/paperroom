@@ -44,7 +44,7 @@ body = {
     ],
     "edges": [
         {"id":"arrow","fromNode":"image","fromSide":"right","fromEnd":"none",
-         "toNode":"text","toSide":"left","toEnd":"arrow","label":"讀圖到文字","vendorExtra":{"test":true}}
+         "toNode":"text","toSide":"left","toEnd":"arrow","label":"讀圖到文字","vendorExtra":{"test":True}}
     ]
 }
 (root / "LooseCanvas.canvas").write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")

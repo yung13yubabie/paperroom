@@ -1449,6 +1449,7 @@ try {
     Native-Menu 113 26 '清除本篇螢光標記…'
     $confirm = Wait-For 'clear-highlight confirmation' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '清除螢光標記', 6) }
     Command $confirm 6
+    $null = Wait-For 'clear confirmation closed' { ![PaperroomHighlightGui]::IsWindowVisible($confirm) }
     $null = Wait-For 'clear acknowledgment' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已清除 1 個螢光標記。' }
     Command $window 110
     Read-PreviewMark $false 'after confirmed clear'

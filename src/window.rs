@@ -2834,6 +2834,31 @@ mod tests {
             SendMessageW(widgets.preview, EM_SETREADONLY, 1, 0);
             assert!(read_text(widgets.preview).unwrap().contains("閱讀標題"));
             assert_eq!(read_text(widgets.body).unwrap(), manuscript);
+            // Probe the real standard Unicode EDIT control used for source text.
+            // The mixed source separators themselves are not written to a database here;
+            // UI projection, native selection coordinates, and storage are separate gates.
+            let source = "前段\r\n第二行\n第三行\r選取 📝 結尾\r\n保留下一行";
+            let projected = source.replace("\r\n", "\n")
+                .replace('\r', "\n").replace('\n', "\r\n");
+            assert_eq!(GetDlgItem(host, i32::from(BODY)), widgets.body);
+            assert_eq!(GetDlgCtrlID(widgets.body), i32::from(BODY));
+            let mut owner_pid = 0;
+            assert_ne!(GetWindowThreadProcessId(widgets.body, &raw mut owner_pid), 0);
+            assert_eq!(owner_pid, std::process::id());
+            assert!(load_editor_text(widgets.body, &projected));
+            assert_eq!(read_text(widgets.body).unwrap(), projected);
+
+            let emoji = projected.find('📝').unwrap();
+            let start = projected[..emoji].encode_utf16().count();
+            let end = start + '📝'.len_utf16();
+            SendMessageW(widgets.body, EM_SETSEL, start, end as isize);
+            let (mut found_start, mut found_end) = (u32::MAX, u32::MAX);
+            SendMessageW(widgets.body, EM_GETSEL,
+                (&raw mut found_start) as usize, (&raw mut found_end) as isize);
+            assert_eq!((found_start as usize, found_end as usize), (start, end));
+
+            SendMessageW(widgets.body, EM_REPLACESEL, 1, wide("〔📝〕").as_ptr() as isize);
+            assert_eq!(read_text(widgets.body).unwrap(), projected.replace('📝', "〔📝〕"));
             assert_ne!(DestroyWindow(host), 0);
         }
     }

@@ -59,7 +59,11 @@ impl App {
             let key=msg.wParam as u16;
             if !matches!(key,VK_F6|VK_F7|VK_F8|VK_F9){return false;}
             if (msg.lParam & (1<<30))==0 {
-                self.mutate(|app|match key {VK_F6=>app.command_palette(),VK_F7=>app.quick_switcher(),VK_F8=>app.note_outline(),_=>app.return_from_block_link()});
+                if key == VK_F8 {
+                    self.show_note_outline();
+                } else {
+                    self.mutate(|app|match key {VK_F6=>app.command_palette(),VK_F7=>app.quick_switcher(),_=>app.return_from_block_link()});
+                }
             }
             true
         }
@@ -146,14 +150,35 @@ impl App {
         }
     }
 
-    pub(super) unsafe fn note_outline(&mut self)->Result<()> {
+    pub(super) unsafe fn show_note_outline(&mut self) {
+        unsafe {
+            if let Err(error) = self.note_outline() {
+                self.show_error(error);
+            }
+        }
+    }
+
+    unsafe fn note_outline(&mut self)->Result<()> {
         unsafe {
             let note=self.current.as_ref().filter(|n|n.row.trash_root.is_none() && !self.extras.board)
                 .ok_or("請先開啟一篇使用中的筆記。")?;
-            let headings=crate::store::navigation::outline(&note.body);
-            if headings.is_empty(){label(self.widgets.status,"本篇沒有 Markdown 標題。");return Ok(());}
-            let labels=headings.iter().map(|h|format!("H{}　{}　（第 {} 行）",h.level,h.title,h.line)).collect::<Vec<_>>();
-            let Some(i)=choose_navigation(self.hwnd,self.widgets.files,&labels) else{return Ok(())};
+            let draft = if self.editing {
+                if !self.editor_ready {
+                    return Err("編輯器尚未就緒，請重新開啟筆記。".into());
+                }
+                Some(read_text(self.widgets.body)?)
+            } else {
+                None
+            };
+            let headings = crate::store::navigation::outline(draft.as_deref().unwrap_or(&note.body));
+            if headings.is_empty() {
+                label(self.widgets.status, "本篇沒有 Markdown 標題。");
+                return Ok(());
+            }
+            let Some(i) = choose_navigation_page(self.hwnd, self.widgets.files, headings.len(), |i| {
+                let h = &headings[i];
+                format!("H{}　{}　（第 {} 行）", h.level, h.title, h.line)
+            }) else { return Ok(()); };
             let h = &headings[i];
             if self.focus_source_selection(h.start, h.end)? {
                 label(self.widgets.status, &format!("標題大綱：第 {} 行，{}", h.line, h.title));

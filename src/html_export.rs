@@ -171,6 +171,7 @@ fn start_document(output: &mut impl Write, title: &str) -> std::io::Result<()> {
         "main{max-width:72ch;margin:2rem auto;padding:0 1rem;overflow-wrap:anywhere}a{color:#13624e}",
         "blockquote{margin-inline:0;border-inline-start:3px solid #457b66;padding-inline:1rem}",
         "pre{white-space:pre-wrap}td,th{padding:.3rem;border-bottom:1px solid #aaa}",
+        ".contents li{padding-inline-start:calc(var(--depth)*.75rem)}",
         "</style></head><body><main>",
     ).as_bytes())
 }
@@ -195,10 +196,34 @@ fn render_markdown(
 ) -> Result<()> {
     let options = Options::ENABLE_GFM | Options::ENABLE_WIKILINKS |
         Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+    let (_, prose) = super::vault_search::frontmatter(body);
+    let frontmatter_end = body.len() - prose.len();
+    let headings = crate::markdown::heading_offsets(body, options)
+        .into_iter().filter(|(offset, _, _)| *offset >= frontmatter_end)
+        .collect::<Vec<_>>();
+    if !headings.is_empty() {
+        output.write_all("<nav class=\"contents\" aria-label=\"本篇目錄\"><h2>本篇目錄</h2><ol>".as_bytes())?;
+        let top = headings.iter().map(|(_, level, _)| *level).min().unwrap_or(1);
+        for (ordinal, (_, level, title)) in headings.iter().enumerate() {
+            let depth = level - top;
+            let id = ordinal + 1;
+            write!(output, "<li style=\"--depth:{depth}\"><a href=\"#section-{id}\">")?;
+            escape(output, if title.trim().is_empty() { "未命名標題" } else { title })?;
+            output.write_all(b"</a></li>")?;
+        }
+        output.write_all(b"</ol></nav>")?;
+    }
+    let mut headings = headings.into_iter().enumerate().peekable();
     let mut links = Vec::new();
     for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
         match event {
-            Event::Start(Tag::Heading { level, .. }) => write!(output, "<{level}>")?,
+            Event::Start(Tag::Heading { level, .. }) => {
+                if let Some((ordinal, _)) = headings.next_if(|(_, (offset, _, _))| *offset == range.start) {
+                    write!(output, "<{level} id=\"section-{}\">", ordinal + 1)?;
+                } else {
+                    write!(output, "<{level}>")?;
+                }
+            }
             Event::End(TagEnd::Heading(level)) => write!(output, "</{level}>")?,
             Event::Start(Tag::List(Some(start))) => write!(output, "<ol start=\"{start}\">")?,
             Event::End(TagEnd::List(ordered)) => output.write_all(if ordered { b"</ol>" } else { b"</ul>" })?,
@@ -333,6 +358,40 @@ mod tests {
         assert!(db.export_html_workspace(&output).is_err());
         assert_eq!(fs::read_dir(&dir)?.count(), 0);
         assert!(db.note(broken)?.is_some());
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn exported_contents_link_to_each_heading_without_touching_markdown() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let database = dir.join("notes.sqlite3");
+        let output = dir.join("目錄.zip");
+        let raw = concat!(
+            "\u{feff}---\r\n# 私用中繼資料\r\naliases: [片段]\r\n---\r\n\r\n",
+            "# 開場 & <安全>\r\n\r\n## 同名 🎬\r\n\r\n第一處\r\n\r\n",
+            "~~~md\r\n## 程式碼內的假標題\r\n~~~\r\n\r\n",
+            "## 同名 🎬\r\n\r\n第二處\r\n\r\n收尾\r\n----\r\n",
+        );
+        let id = Notebook::open(&database, false)?.add(None, "工作筆記", raw)?;
+        let notebook = Notebook::open(&database, false)?;
+        notebook.export_html_workspace(&output)?;
+        let mut archive = zip::ZipArchive::new(File::open(output)?)?;
+        let mut html = String::new();
+        archive.by_name(&format!("pages/{id}.html"))?.read_to_string(&mut html)?;
+        let contents = html.split_once("aria-label=\"本篇目錄\"").unwrap().1.split_once("</nav>").unwrap().0;
+        assert!(contents.contains("開場 &amp; &lt;安全&gt;"));
+        assert!(!contents.contains("私用中繼資料") && !contents.contains("程式碼內的假標題"));
+        assert!(contents.contains("href=\"#section-2\">同名 🎬</a>"));
+        assert!(contents.contains("href=\"#section-3\">同名 🎬</a>"));
+        assert!(html.contains("<h2 id=\"section-2\">同名 🎬</h2><p>第一處</p>"));
+        assert!(html.contains("<h2 id=\"section-3\">同名 🎬</h2><p>第二處</p>"));
+        assert!(html.contains("<h2 id=\"section-4\">收尾</h2>"));
+        let mut archived_raw = Vec::new();
+        archive.by_name(&format!("markdown/{id}.md"))?.read_to_end(&mut archived_raw)?;
+        assert_eq!(archived_raw, raw.as_bytes());
+        drop(archive);
+        drop(notebook);
         fs::remove_dir_all(dir)?;
         Ok(())
     }

@@ -30,7 +30,13 @@
 | 流程 | 操作 |
 | --- | --- |
 | 匯入 Zotero 元資料 | 從 Zotero 匯出 CSL JSON。在「檔案」選「匯入 Zotero CSL JSON 書目」，核對預覽後確認。同名書目會建立個別子筆記。開啟批次根筆記，選「匯出 Zotero 原始 CSL JSON」可取得原檔。這個格式提供書目欄位，完整收藏庫、PDF、標註和 Word 引文連結需要其他方式保留。[Zotero 匯出說明](https://www.zotero.org/support/kb/exporting) |
-| 在瀏覽器閱讀工作區 | 在「檔案」選「匯出工作區 HTML ZIP」，使用新檔名。解壓縮整包後開啟 `index.html`。可沿上層、子筆記和有效的紙間整頁連結閱讀，並另存原始 Markdown 及附件。其他連結以文字呈現，完整目的地可在 Markdown 找到。匯出最多 10,000 篇、64 MiB Markdown 內文、128 MiB 附件。[Notion 工作區匯出參照](https://www.notion.com/help/export-your-content) |
+| 在瀏覽器閱讀工作區 | 在「檔案」選「匯出工作區 HTML ZIP」，使用新檔名。解壓縮整包後開啟 `index.html`。可沿上層、本篇目錄、子筆記和有效的紙間整頁連結閱讀，並另存原始 Markdown 及附件。其他連結以文字呈現，完整目的地可在 Markdown 找到。匯出最多 10,000 篇、64 MiB Markdown 內文、128 MiB 附件。[Notion 工作區匯出參照](https://www.notion.com/help/export-your-content) |
+
+### 長筆記大綱與離線目錄
+
+1. 開啟一篇有 Markdown 標題的筆記，按 F8，依層級與行號選取段落。閱讀時會進入原文編輯定位。在前方新增標題或空行後，直接再按 F8，選單會以目前草稿計算。
+2. 經「檔案 → 匯出工作區 HTML ZIP」輸出並整包解壓，從 `index.html` 開啟筆記。有標題的頁面可從「本篇目錄」跳到各小節。程式碼區塊中的 `#` 不會加入目錄，同名小節依篇內順序各自定位。
+3. 原始 Markdown 可從同一頁的下載連結取得。回歸測試用繁中與 emoji 合成稿檢查 F8 選區、保存重開、還原後輸出的目錄目標及 Markdown 原文位元組。
 | 建立心智圖 | 開啟卡片白板，從「白板操作」選「新增心智圖根節點」。右鍵選取節點後可加子節點、改名、改掛父節點或選取整個分支一起移動。有子節點時，請先調整分支再刪除父節點。從「匯出分支 JSON Canvas」可另存文字、位置和箭頭。要完整保留紙間可編輯的樹狀資料，請用工作區備份。[Heptabase 心智圖說明](https://wiki.heptabase.com/keyboard-shortcuts#mindmaps) |
 
 測試時可先用同名的合成書目及父子筆記，匯出後把來源移出再重新開啟。比較原始 JSON、Markdown 和附件的 SHA-256。試著把心智圖父節點移到它的子節點下方，原有分支應保持原位。

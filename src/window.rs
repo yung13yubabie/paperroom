@@ -1183,6 +1183,10 @@ impl App {
                 }
                 return;
             }
+            if action == 25 {
+                self.show_note_outline();
+                return;
+            }
             self.mutate(|app| {
                 let is_notion_zip = action == 2;
                 let action = match action {
@@ -1213,7 +1217,6 @@ impl App {
                     22 => return app.vault_source_picker(),
                     23 => return app.command_palette(),
                     24 => return app.quick_switcher(),
-                    25 => return app.note_outline(),
                     26 => return app.search_pdf_excerpt_cards_ui(),
                     27 => return app.refresh_vault_attachment_ui(),
                     28 => return app.import_zotero_csl_ui(),

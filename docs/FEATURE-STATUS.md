@@ -4,10 +4,10 @@
 
 | 產品 | 列數 | 已驗證 | 部分 | 未實作 | 外部服務 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Notion | 99 | 8 | 38 | 25 | 28 |
+| Notion | 99 | 8 | 39 | 24 | 28 |
 | Obsidian | 88 | 6 | 39 | 34 | 9 |
 | Heptabase | 65 | 5 | 35 | 13 | 12 |
-| 合計 | 252 | 19 | 112 | 72 | 49 |
+| 合計 | 252 | 19 | 113 | 71 | 49 |
 
 「已驗證」表示清冊該列指的本機工作流可從正常操作入口完成，並驗過相關的存檔、重開與資料邊界。「部分」表示已有可用的本機對應，列內會註明尚缺的行為。「未實作」表示目前沒有對應入口或資料模型。「外部服務」表示該項仍需外部服務。Canvas 的拖曳及與官方 Obsidian 的回匯證據沿用上一輪的合成樣本。[Canvas 操作證據](UI-ACCEPTANCE.md#canvas-拖曳與回匯)
 
@@ -48,7 +48,7 @@
 | 同步區塊 | 部分 | 多篇筆記可共用同一段帶 ID 的 Markdown，並從引用處定位、編輯原文或解除單一引用。任意富文字區塊、跨工作區和多人即時同步仍待做。 | [官方](https://www.notion.com/help/synced-blocks) · [synced_blocks.rs](../src/synced_blocks.rs) |
 | 分欄 | 未實作 | 現有儲存單位是整篇筆記。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 折疊區塊 | 未實作 | 現有儲存單位是整篇筆記。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
-| 目錄 | 未實作 | 現有儲存單位是整篇筆記。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
+| 目錄 | 部分 | F8 可從紙間跳到本篇 Markdown 標題。離線 HTML 篇頁有可點擊的目錄，同名標題各有目的地。筆記內可插入的獨立目錄區塊仍待做。 | [官方](https://www.notion.com/help/columns-headings-and-dividers) · [操作步驟](UI-ACCEPTANCE.md#長筆記大綱與離線目錄) |
 | 區塊 ID 嵌入 | 部分 | 同工作區可插入並顯示唯一 ID 的 Markdown 區塊。原廠區塊物件與匯入格式仍待做。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [操作步驟](UI-ACCEPTANCE.md#同步區塊vault-嵌入與日誌月曆) |
 | 數學公式排版 | 未實作 | 資料公式與數學排版各自獨立。 | [官方](https://www.notion.com/help/math-equations) · [markdown.rs](../src/markdown.rs) |
 | 連結其他頁 | 部分 | 支援紙間 ID 與已解析的 Wiki 連結。 | [官方](https://www.notion.com/help/create-links-and-backlinks) · [note_links.rs](../src/note_links.rs) |
@@ -167,7 +167,7 @@
 | 快捷鍵 | 部分 | 標題／正文搜尋與標星；無完整查詢語言。 | [官方](https://obsidian.md/help/plugins/search) · [store.rs](../src/store.rs) |
 | 命令面板 | 部分 | F6 搜尋並執行五項內建導覽命令。全應用程式命令、可設定或擴充命令待做。 | [官方](https://obsidian.md/help/plugins/command-palette) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 快速切換器 | 部分 | F7 依標題、來源路徑或完整別名打開指定筆記，也可用 tag:#父層 找含子標籤的匯入筆記。模糊排序、快速新建及新分頁待做。 | [官方](https://obsidian.md/help/plugins/quick-switcher) · [navigation_ui.rs](../src/navigation_ui.rs) |
-| 大綱 | 部分 | F8 依標題層級與行號列大綱，可跳到同名標題的精確位置。拖曳重新排序段落待做。 | [官方](https://obsidian.md/help/plugins/outline) · [navigation_ui.rs](../src/navigation_ui.rs) |
+| 大綱 | 部分 | F8 依標題層級與行號列出已保存內容或目前草稿，可跳到同名標題的精確位置。拖曳重新排序段落待做。 | [官方](https://obsidian.md/help/plugins/outline) · [navigation_ui.rs](../src/navigation_ui.rs) |
 | 懸浮頁面預覽 | 未實作 | 沒有上述獨立入口。 | [官方](https://obsidian.md/help/plugins/page-preview) · [window.rs](../src/window.rs) |
 | JSON Canvas 匯入與匯出 | 部分 | 保留未知欄位，可修改既有節點。紙間研究 ZIP 可攜帶普通筆記及圖片，以標準檔案節點連同附件匯出，並在乾淨紙間工作區回匯。若重新匯入 ZIP 會把原先未確定的路徑配成特定附件，或配到不同附件，紙間會拒絕輸出；仍可個別匯出 .canvas。一般 Canvas 附件交換和未支援結構仍有缺口。 | [規格與文件](https://jsoncanvas.org/spec/1.0/) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 文字節點 | 部分 | 保留未知欄位；修改後重新序列化。支援部分原生操作，預覽有繪製上限。 | [官方](https://obsidian.md/help/plugins/canvas) · [canvas_edit.rs](../src/canvas_edit.rs) |

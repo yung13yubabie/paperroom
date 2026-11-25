@@ -303,13 +303,14 @@ pub fn heading_section<'a>(body: &'a str, anchor: &str) -> Option<&'a str> {
 pub(crate) fn source_headings(body: &str) -> Vec<(usize, u8, String)> {
     let (_, prose) = crate::store::vault_search::frontmatter(body);
     let skipped = body.len() - prose.len();
-    heading_offsets(prose).into_iter().map(|(at, level, title)| (skipped + at, level, title)).collect()
+    heading_offsets(prose, Options::empty()).into_iter()
+        .map(|(at, level, title)| (skipped + at, level, title)).collect()
 }
 
-pub(crate) fn heading_offsets(body:&str)->Vec<(usize,u8,String)> {
+pub(crate) fn heading_offsets(body: &str, options: Options) -> Vec<(usize, u8, String)> {
     let mut headings = Vec::new();
     let mut active = None::<(usize, u8, String)>;
-    for (event, range) in Parser::new(body).into_offset_iter() {
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 active = Some((range.start, level as u8, String::new()));

@@ -281,6 +281,12 @@ public static class PaperroomHighlightGui {
             VirtualKey = key, Scan = scan, Flags = flags
         } } };
     }
+    public static void TapKey(IntPtr owner, uint pid, ushort key) {
+        if (!ForegroundIsOwned(owner, pid)) throw new InvalidOperationException("Expected the owned window before typing.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        SendPhysical(new[] { Key(key, 0, 0), Key(key, 0, 2) });
+    }
     private static void SendPhysical(Input[] input) {
         int size = Marshal.SizeOf<Input>();
         if (size != (IntPtr.Size == 8 ? 40 : 28)) throw new InvalidOperationException("Unexpected Windows INPUT size.");
@@ -417,7 +423,7 @@ function Command([IntPtr]$Owner, [int]$Id) {
         throw "Could not invoke control $Id."
     }
 }
-function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
+function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint16]$Shortcut = 0) {
     if (![PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id)) {
         [void][PaperroomHighlightGui]::SetForegroundWindow($window)
         $null = Wait-For 'isolated app foreground' { [PaperroomHighlightGui]::ForegroundIsOwned($window, $process.Id) }
@@ -425,9 +431,13 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
     try {
-        $button = Control $window $OwnerControl
-        $point = [PaperroomHighlightGui]::ButtonPoint($window, $process.Id, $button)
-        [PaperroomHighlightGui]::MouseAction($window, $process.Id, $button, $point, 0)
+        if ($Shortcut) {
+            [PaperroomHighlightGui]::TapKey($window, $process.Id, $Shortcut)
+        } else {
+            $button = Control $window $OwnerControl
+            $point = [PaperroomHighlightGui]::ButtonPoint($window, $process.Id, $button)
+            [PaperroomHighlightGui]::MouseAction($window, $process.Id, $button, $point, 0)
+        }
         $menu = Wait-For "menu containing $Caption" {
             [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0)
         }
@@ -552,6 +562,19 @@ function Open-Editor {
     $null = Wait-For 'native source editor visible' { [PaperroomHighlightGui]::IsWindowVisible($field) }
     return $field
 }
+function Assert-OutlineSelection([uint32]$Item, [string]$MenuLabel, [string]$ExpectedLine, [string]$After) {
+    Native-Menu 109 $Item $MenuLabel 0x77 # F8
+    $field = Control $window 104
+    $null = Wait-For 'outline opened the editor' { [PaperroomHighlightGui]::IsWindowVisible($field) }
+    $source = [PaperroomHighlightGui]::Read($field)
+    $expectedStart = $source.IndexOf($ExpectedLine + "`r`n" + $After, [StringComparison]::Ordinal)
+    if ($expectedStart -lt 0) { throw "The expected source heading and following paragraph were absent." }
+    $null = Wait-For "outline selected the UTF-16 range for $MenuLabel" {
+        $selection = [PaperroomHighlightGui]::Send($field, 0x00B0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+        ($selection -band 0xffff) -eq $expectedStart -and ($selection -shr 16) -eq $expectedStart + $ExpectedLine.Length
+    }
+    Write-Host "F8 selected expected source heading: $MenuLabel."
+}
 function Read-PreviewMark([bool]$Expected, [string]$Phase) {
     $preview = Control $window 121
     $null = Wait-For 'native RichEdit preview visible' { [PaperroomHighlightGui]::IsWindowVisible($preview) }
@@ -628,6 +651,9 @@ if export != "-":
         html = archive.read(f"pages/{note}.html")
         assert html.count(b"<mark>") == 1 and b"<mark>" + text + b"</mark>" in html
         assert "==\u4fdd\u7559==".encode("utf-8") in html, "unmarked literal was changed"
+        for section, text_after in ((2, "\u7b2c\u4e00\u8655"), (3, "\u7b2c\u4e8c\u8655")):
+            assert f'href="#section-{section}">\u540c\u540d \U0001f3ac</a>'.encode() in html
+            assert f'<h2 id="section-{section}">\u540c\u540d \U0001f3ac</h2><p>{text_after}</p>'.encode() in html
 print(f"Read-only SQLite check: note version {version}, exact raw bytes, {len(marks)} exact byte range(s).")
 '@ | python - $Database $source $title $selected $markValue $zipValue
     if ($LASTEXITCODE -ne 0) { throw 'SQLite or HTML ZIP verification failed.' }
@@ -652,7 +678,7 @@ try {
         [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
         Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
     }
-    $manuscript = "---`nqa: highlight`n---`n`n前方 📘選取📝 後方`n`n==保留==`n"
+    $manuscript = "---`nqa: highlight`n---`n`n前方 📘選取📝 後方`n`n==保留==`n`n# 開場`n`n## 同名 🎬`n第一處`n`n## 同名 🎬`n第二處`n"
     [IO.File]::WriteAllText($source, $manuscript, [Text.UTF8Encoding]::new($false))
     Write-Host "Exercise exact Windows EXE SHA-256 $ExeSha256."
     $process = Start-Notebook $live
@@ -722,6 +748,30 @@ try {
         throw ("Foreground preview color checks failed: " + ($previewFailures -join ' | '))
     }
     Write-Host 'PASS: native highlight, preview, normal reopen, exact Markdown, Backup, isolated restore, HTML and cancel/clear.'
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Select-Note $title
+    Assert-OutlineSelection 3 'H2　同名 🎬　（第 14 行）' '## 同名 🎬' '第二處'
+    $field = Control $window 104
+    $updated = [PaperroomHighlightGui]::Read($field).Replace('# 開場', "# 新段落 📽`r`n`r`n# 開場")
+    [PaperroomHighlightGui]::Write($field, $updated)
+    Assert-OutlineSelection 4 'H2　同名 🎬　（第 16 行）' '## 同名 🎬' '第二處'
+    Command $window 110
+    $null = Wait-For 'saved outline manuscript in reading mode' { [PaperroomHighlightGui]::IsWindowVisible((Control $window 121)) }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Select-Note $title
+    Assert-OutlineSelection 4 'H2　同名 🎬　（第 16 行）' '## 同名 🎬' '第二處'
+    if ([PaperroomHighlightGui]::Read((Control $window 104)) -cne $updated) {
+        throw 'Saved manuscript differs from the draft after reopening.'
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: F8 outline selected the second of two same-name Unicode headings in the saved source, live draft, and resumed note. Offline HTML links separately identified both sections.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

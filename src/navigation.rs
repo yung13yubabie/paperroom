@@ -223,7 +223,7 @@ impl BlockNoteSnapshot {
         Self::from_parts(note.row.id, note.version, &note.row.title, &note.body)
     }
 
-    fn from_parts(id: i64, version: i64, title: &str, body: &str) -> Self {
+    pub(super) fn from_parts(id: i64, version: i64, title: &str, body: &str) -> Self {
         use std::hash::{DefaultHasher, Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();

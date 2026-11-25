@@ -59,7 +59,7 @@
 | 音訊播放 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
 | 影片播放器 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
 | 網頁嵌入 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
-| 工作區搜尋 | 部分 | 標題／正文搜尋、標星和頁樹。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [store.rs](../src/store.rs) |
+| 工作區搜尋 | 部分 | 標題與原始正文可用關鍵字、標籤與 Vault 資料夾交集搜尋，有上下文及精確命中跳轉。已移到垃圾桶或刪除的筆記不進入結果。附件與外部來源由其他入口或服務管理。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
 | 側欄捷徑 | 部分 | 標題／正文搜尋、標星和頁樹。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [store.rs](../src/store.rs) |
 | 收藏 | 部分 | 標題／正文搜尋、標星和頁樹。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [store.rs](../src/store.rs) |
 | 最近瀏覽 | 未實作 | 未見對應瀏覽歷程或首頁設定。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [window.rs](../src/window.rs) |
@@ -162,7 +162,7 @@
 | 明確傳出連結 | 已驗證 | 由已解析的筆記參照列出。 | [官方](https://obsidian.md/help/plugins/outgoing-links) · [note_links.rs](../src/note_links.rs) |
 | 圖譜 | 部分 | 局部、工作區和匯入 Vault 三種範圍，已解析的邊可查有向最短路徑，並以節點返回筆記。 | [官方](https://obsidian.md/help/plugins/graph) · [note_links.rs](../src/note_links.rs) |
 | 未連結提及 | 部分 | 可在同一匯入批次用唯一名稱或別名找未連結提及，可加來源完整標籤，確認後建立工作區連結。持續顯示、文字篩選、排序及外部 Vault 連結格式待做。 | [官方](https://obsidian.md/help/plugins/backlinks) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
-| 搜尋 | 部分 | 標題／正文搜尋，以及已匯入 Vault 的資料夾、別名和標籤交集搜尋，可開啟精確來源。完整查詢語言待做。 | [官方](https://obsidian.md/help/plugins/search) · [vault_search.rs](../src/vault_search.rs) |
+| 搜尋 | 部分 | 全域標題／正文片語可用標籤及 Vault 來源資料夾篩選，預覽上下文並跳到命中位置。原有 Vault 的別名、資料夾及標籤搜尋仍可用。完整查詢語言待做。 | [官方](https://obsidian.md/help/plugins/search) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
 | 書籤 | 部分 | 標題／正文搜尋與標星；無完整查詢語言。 | [官方](https://obsidian.md/help/plugins/bookmarks) · [store.rs](../src/store.rs) |
 | 快捷鍵 | 部分 | 標題／正文搜尋與標星；無完整查詢語言。 | [官方](https://obsidian.md/help/plugins/search) · [store.rs](../src/store.rs) |
 | 命令面板 | 部分 | F6 搜尋並執行五項內建導覽命令。全應用程式命令、可設定或擴充命令待做。 | [官方](https://obsidian.md/help/plugins/command-palette) · [navigation_ui.rs](../src/navigation_ui.rs) |

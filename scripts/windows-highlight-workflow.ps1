@@ -357,6 +357,14 @@ public static class PaperroomHighlightGui {
             if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
         SendPhysical(new[] { Key(0x11, 0, 0), Key(0x5A, 0, 0), Key(0x5A, 0, 2), Key(0x11, 0, 2) });
     }
+    public static void WorkspaceSearchKey(IntPtr owner, uint pid) {
+        if (!ForegroundIsOwned(owner, pid) || GetForegroundWindow() != owner)
+            throw new InvalidOperationException("Expected the isolated workspace before Ctrl+Shift+F.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        SendPhysical(new[] { Key(0x11, 0, 0), Key(0x10, 0, 0), Key(0x46, 0, 0),
+                             Key(0x46, 0, 2), Key(0x10, 0, 2), Key(0x11, 0, 2) });
+    }
     public static bool EditorHasFocus(IntPtr owner, uint pid, IntPtr edit) {
         return ForegroundIsOwned(owner, pid) && DialogFocus(owner) == edit &&
             GetWindowThreadProcessId(edit, out uint editPid) != 0 && editPid == pid;
@@ -882,6 +890,54 @@ function Assert-OutlineSelection([uint32]$Item, [string]$MenuLabel, [string]$Exp
     }
     Write-Host "F8 selected expected source heading: $MenuLabel."
 }
+function Open-WorkspaceSearch([switch]$Menu) {
+    if ($Menu) { Native-Menu 109 35 '全域搜尋筆記…' }
+    else { [PaperroomHighlightGui]::WorkspaceSearchKey($window,$process.Id) }
+    Wait-For 'native workspace search dialog' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','全域搜尋筆記',1)
+    }
+}
+function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$Value) {
+    $edit = Control $Dialog $FieldId
+    $point = [PaperroomHighlightGui]::FilenamePoint($Dialog,$process.Id,$edit)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+    $null = Wait-For "workspace search field $FieldId focus" {
+        [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$Dialog,$edit)
+    }
+    [PaperroomHighlightGui]::TypeFilename($window,$process.Id,$Dialog,$edit,$Value)
+    $null = Wait-For "exact workspace search filter $FieldId" {
+        [PaperroomHighlightGui]::Read($edit) -ceq $Value
+    }
+}
+function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {
+    $go = Control $Dialog 1
+    $point = [PaperroomHighlightGui]::ButtonPoint($Dialog,$process.Id,$go)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$go,$point,0)
+    $null = Wait-For "workspace search: $Status" { [PaperroomHighlightGui]::Read((Control $Dialog 106)) -ceq $Status }
+    $list = Control $Dialog 104
+    $items = [PaperroomHighlightGui]::Send($list,0x018B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64() # LB_GETCOUNT
+    $preview = [PaperroomHighlightGui]::Read((Control $Dialog 105))
+    if ($items -ne $Count -or ($Context -and !$preview.Contains($Context)) -or ($Count -eq 0 -and $preview)) {
+        throw "Workspace search returned unexpected results or context. Count: $items; context: $preview"
+    }
+    Write-Host "Verified search UI: $Status"
+}
+function Assert-SearchSelection([int]$FieldId, [string]$Text, [string]$Status) {
+    $field = Control $window $FieldId
+    $null = Wait-For 'workspace search jumped to its source' {
+        [PaperroomHighlightGui]::IsWindowVisible($field) -and
+        [PaperroomHighlightGui]::EditorHasFocus($window,$process.Id,$field) -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq $Status
+    }
+    $body = [PaperroomHighlightGui]::Read($field)
+    $start = $body.IndexOf($Text,[StringComparison]::Ordinal)
+    if ($start -lt 0) { throw 'The search target did not contain the expected text.' }
+    $null = Wait-For 'native EDIT selection matches exact UTF-16 search span' {
+        $span = [PaperroomHighlightGui]::Send($field,0x00B0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+        ($span -band 0xffff) -eq $start -and ($span -shr 16) -eq $start + $Text.Length
+    }
+    Write-Host "Verified exact native UTF-16 range $start..$($start+$Text.Length): $Text"
+}
 function Read-PreviewMark([bool]$Expected, [string]$Phase) {
     $preview = Control $window 121
     $null = Wait-For 'native RichEdit preview visible' { [PaperroomHighlightGui]::IsWindowVisible($preview) }
@@ -1368,6 +1424,83 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: physical Canvas marquee, canceled drag, equal group movement, reopen and Ctrl+Z, connect/disconnect and Undo, and exact export to a second workspace.'
+
+    $searchVault = Join-Path $root 'SearchFixture'
+    $folder = Join-Path $searchVault '製片'
+    $other = Join-Path $searchVault '製片舊'
+    [void][IO.Directory]::CreateDirectory($folder)
+    [void][IO.Directory]::CreateDirectory($other)
+    $searchTitle = 'SearchSameTake'
+    $keyword = '訊號🧪'
+    $searchBody = "---`r`ntags: [製片/早班]`r`n---`r`n📝 左側 $keyword 右側`r`n"
+    $chosen = Join-Path $folder "$searchTitle.md"
+    [IO.File]::WriteAllText($chosen,$searchBody,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $other "$searchTitle.md"),"同名另一版 $keyword #製片/夜班",[Text.UTF8Encoding]::new($false))
+    $originalSearchHash = (Get-FileHash -LiteralPath $chosen).Hash
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    Native-VaultFolder $searchVault '附件綁定 0 筆，未解析 0 筆'
+    $dialog = Open-WorkspaceSearch
+    Type-SearchFilter $dialog 101 $keyword
+    Search-Workspace $dialog '找到 2 筆筆記。' 2
+    Type-SearchFilter $dialog 102 '=#製片'
+    Search-Workspace $dialog '沒有符合條件的筆記。' 0
+    Type-SearchFilter $dialog 102 '#製片'
+    Type-SearchFilter $dialog 103 '../製片'
+    Search-Workspace $dialog '請使用 Vault 相對資料夾路徑。' 0
+    Type-SearchFilter $dialog 103 '製片'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1 "左側 〔$keyword〕 右側"
+    if (![PaperroomHighlightGui]::Read((Control $dialog 105)).Contains("製片/$searchTitle.md")) {
+        throw 'The identical titles were not disambiguated by the exact source folder.'
+    }
+    Finish-Revision $dialog 111
+    Assert-SearchSelection 104 $keyword '全域搜尋：正文第 4 行'
+    Native-Menu 113 3 '移到垃圾桶'
+    $dialog = Wait-For 'native trash confirmation for the selected search hit' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'移到垃圾桶')
+    }
+    Finish-Revision $dialog 1
+    $null = Wait-For 'trashed result left the active note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -cne $searchTitle
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $live
+    $window = $process.MainWindowHandle
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 $keyword
+    Type-SearchFilter $dialog 103 '製片'
+    Search-Workspace $dialog '沒有符合條件的筆記。' 0
+    Type-SearchFilter $dialog 101 '訊號'
+    Type-SearchFilter $dialog 103 '製片舊'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1 '同名另一版 〔訊號〕'
+    Finish-Revision $dialog 2
+    $trash = Control $window 107
+    $point = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,$trash)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$trash,$point,0)
+    $null = Wait-For 'the trashed search hit can be restored' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $searchTitle -and
+        [PaperroomHighlightGui]::Read((Control $window 113)) -ceq '還原'
+    }
+    $restore = Control $window 113
+    $point = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,$restore)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$restore,$point,0)
+    $null = Wait-For 'restored search hit reentered the workspace' {
+        [PaperroomHighlightGui]::Read((Control $window 113)) -ceq '更多'
+    }
+    $dialog = Open-WorkspaceSearch
+    Type-SearchFilter $dialog 101 'sameTake'
+    Type-SearchFilter $dialog 103 '製片'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1 'Search〔SameTake〕'
+    Finish-Revision $dialog 111
+    Assert-SearchSelection 103 'SameTake' '全域搜尋：標題命中'
+    if ((Get-FileHash -LiteralPath $chosen).Hash -cne $originalSearchHash) {
+        throw 'Search, trash or restore changed the original Vault Markdown bytes.'
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

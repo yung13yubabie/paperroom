@@ -94,7 +94,7 @@ impl App {
                 14=>self.insert_synced_block(),
                 15=>self.manage_synced_blocks(),
                 16=>self.view_synced_consumers(),
-                _=>{self.change_view(View::All);SetFocus(self.widgets.search);SendMessageW(self.widgets.search,EM_SETSEL,0,-1);Ok(())}
+                _=>self.workspace_search_ui(),
             }
         }
     }

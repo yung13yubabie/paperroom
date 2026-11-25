@@ -66,6 +66,18 @@ fn valid_tag(s: &str) -> bool {
     valid_tag_path(s) && s.chars().any(|c| !c.is_numeric())
 }
 
+pub(super) fn source_folder(raw: &str) -> Result<&str> {
+    let folder = if raw.trim().is_empty() { "" } else { raw.trim_end_matches('/') };
+    if (folder.is_empty() && !raw.trim().is_empty())
+        || folder.len() > MAX_FILTER || folder.chars().any(char::is_control)
+        || folder.contains(['\\', ':'])
+        || (!folder.is_empty() && folder.split('/').any(|p| matches!(p, "" | "." | "..")))
+    {
+        return Err("請使用 Vault 相對資料夾路徑。".into());
+    }
+    Ok(folder)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TagMatch {
     Exact,
@@ -322,13 +334,10 @@ impl Notebook {
     ) -> Result<Vec<(i64, String)>> {
         // Keep the blank request as whole-Vault search, but never rewrite a
         // nonblank path to select a similarly named imported folder.
-        let folder = if folder.trim().is_empty() { "" } else { folder.trim_end_matches('/') };
+        let folder = source_folder(folder)?;
         let alias = alias.trim();
-        if [folder, alias].iter().any(|s| s.len() > MAX_FILTER || s.chars().any(char::is_control))
-            || folder.contains(['\\', ':'])
-            || (!folder.is_empty() && folder.split('/').any(|p| matches!(p, "" | "." | "..")))
-        {
-            return Err("請使用 Vault 相對資料夾路徑或完整別名。".into());
+        if alias.len() > MAX_FILTER || alias.chars().any(char::is_control) {
+            return Err("請使用完整別名。".into());
         }
         let tag = (!raw_tag.trim().is_empty()).then(|| TagFilter::parse(raw_tag, mode)).transpose()?;
         let mut hits = Vec::new();

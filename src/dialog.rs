@@ -296,7 +296,7 @@ fn template(caption: &str, editable: bool, multiline: bool, decision: Option<(&s
     Ok(words.chunks_exact(2).map(|pair| u32::from(pair[0]) | (u32::from(pair[1]) << 16)).collect())
 }
 
-fn control(
+pub(crate) fn control(
     words: &mut Vec<u16>,
     rect: [u16; 4],
     id: i32,

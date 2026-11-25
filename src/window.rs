@@ -10,6 +10,8 @@ mod vault_sync_ui;
 mod vault_search_ui;
 #[path = "navigation_ui.rs"]
 mod navigation_ui;
+#[path = "workspace_search_ui.rs"]
+mod workspace_search_ui;
 #[path = "synced_blocks_ui.rs"]
 mod synced_blocks_ui;
 #[path = "journal_ui.rs"]
@@ -1168,6 +1170,7 @@ impl App {
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
                 (33, "關於紙間／第三方補充通知…"),
+                (35, "全域搜尋筆記…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
             if action == 33 {
@@ -1223,6 +1226,7 @@ impl App {
                     28 => return app.import_zotero_csl_ui(),
                     29 => return app.export_zotero_csl_ui(),
                     31 => return app.import_canvas_bundle_ui(),
+                    35 => return app.workspace_search_ui(),
                     30 => {
                         if let Some(path) = file_dialog(app.hwnd, "HTML ZIP\0*.zip\0\0", "zip", Some("paperroom-html.zip"))? {
                             let report = app.notebook.export_html_workspace(&path)?;
@@ -1678,6 +1682,11 @@ impl App {
             }
             match msg.wParam as u8 {
                 b'N' => self.new_note(false),
+                b'F' if GetKeyState(VK_SHIFT as i32) < 0 => {
+                    if (msg.lParam & (1<<30)) == 0 {
+                        self.mutate(|app| app.workspace_search_ui());
+                    }
+                }
                 b'F' => {
                     SetFocus(self.widgets.search);
                     SendMessageW(self.widgets.search, EM_SETSEL, 0, -1);

@@ -288,6 +288,22 @@ public static class PaperroomHighlightGui {
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
         return thread != 0 && actual == pid && GetGUIThreadInfo(thread, ref gui) && gui.Capture == owner;
     }
+    public static int[] InspectMenuSelection(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption) {
+        if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
+            throw new InvalidOperationException("The verified native menu is no longer open.");
+        IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
+        int target = MenuPosition(menu, itemId, caption, false);
+        int count = GetMenuItemCount(menu);
+        int highlighted = -1;
+        for (int i = 0; i < count; ++i) {
+            uint state = GetMenuState(menu, (uint)i, 0x400); // MF_BYPOSITION
+            if (state == uint.MaxValue) throw new InvalidOperationException("The menu item state is unavailable.");
+            if ((state & 0x80) == 0) continue; // MF_HILITE
+            if (highlighted >= 0) throw new InvalidOperationException("More than one native menu item is highlighted.");
+            highlighted = i;
+        }
+        return new[] {target, highlighted, count};
+    }
     public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
@@ -563,6 +579,30 @@ function Native-Menu([int]$OwnerControl, [uint32]$Item, [string]$Caption, [uint1
     } finally {
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
+}
+function Native-MenuFromKeyboard([int]$OwnerControl, [uint32]$Item, [string]$Caption) {
+    Click-WorkspaceButton $OwnerControl
+    $menu = Wait-For "keyboard navigation of $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32768', $null, 0)
+    }
+    for ($attempt = 0; $attempt -lt 64; $attempt++) {
+        $target, $highlighted, $count = [PaperroomHighlightGui]::InspectMenuSelection($window, $process.Id, $menu, $Item, $Caption)
+        if ($highlighted -eq $target) {
+            [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
+            $null = Wait-For "native menu closed after $Caption" { ![PaperroomHighlightGui]::IsWindowVisible($menu) }
+            Write-Host "Verified and selected native menu command $Item by keyboard: $Caption."
+            return
+        }
+        $forward = ($target - $highlighted + $count) % $count
+        $left = if ($highlighted -lt 0) { $count - $target } else { $count - $forward }
+        $key = if ($left -lt $forward) { 0x26 } else { 0x28 }
+        [PaperroomHighlightGui]::TapKey($window, $process.Id, $key)
+        $null = Wait-For 'menu highlight changed after a physical arrow key' {
+            $state = [PaperroomHighlightGui]::InspectMenuSelection($window, $process.Id, $menu, $Item, $Caption)
+            $state[1] -ne $highlighted
+        }
+    }
+    throw "Did not reach the verified keyboard menu command $Caption."
 }
 function Replace-EditorText([IntPtr]$Field, [string]$Text) {
     $point = [PaperroomHighlightGui]::ControlPoint($window, $process.Id, $Field, 'Edit')
@@ -1125,7 +1165,9 @@ try {
     $window = $process.MainWindowHandle
     Select-Note $title
     Read-PreviewMark $true 'restored backup'
-    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 '
+    # The Windows CI desktop can clip this row under the popup's scroll arrow.
+    Native-MenuFromKeyboard 109 30 '匯出工作區 HTML ZIP…'
+    Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 ' -AlreadyOpened
     $null = Open-Editor
     Native-Menu 113 26 '清除本篇螢光標記…'
     $cancel = Wait-For 'clear-highlight confirmation' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '清除螢光標記', 7) }

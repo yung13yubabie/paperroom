@@ -46,7 +46,7 @@ from contextlib import closing
 from pathlib import Path
 import json, sqlite3, sys
 with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
-    assert db.execute('PRAGMA user_version').fetchone() == (34,)
+    assert db.execute('PRAGMA user_version').fetchone() == (35,)
     rules = {name: json.loads(raw) for name,raw in db.execute('SELECT name,rules_json FROM collection_views')}
     assert rules == {
         'A-Week': [False,[['\u622a\u6b62\u65e5','date',17,'']],[]],

@@ -73,7 +73,7 @@
 | 彙總 | 部分 | 集合內可從同一資料列操作入口查看關聯和彙總。公式可依具名關聯計數或合計最新欄位值，顯示來源有問題的筆記 ID。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
 | 公式運算 | 部分 | 可編輯既有集合公式並在保存後重算。支援數字／布林／日期型別值、條件和關聯計數／加總。錯誤顯示在結果，完整語法待做。 | [官方](https://www.notion.com/help/formulas) · [formula.rs](../src/formula.rs) |
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
-| 分組 | 部分 | 集合表格與看板可依單一欄位分組並保存設定。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
+| 分組 | 部分 | 集合表格與看板可依單一欄位分組。具名看板和依屬性分組的表格可收合群組並保存狀態。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [操作](UI-ACCEPTANCE.md#具名集合檢視的分組收合) |
 | 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可從同一視圖編輯已宣告的型別欄位。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
 | 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期篩選本週、未來七天、逾期，也可選其他週月或前後日數。條件和群組可在同層複製或移動。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [日期篩選操作](UI-ACCEPTANCE.md#集合相對日期篩選) |
 | 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用，支援屬性、公式結果、具名關聯的彙總筆數及加總。空值和無效值置後，關聯目標清單與自訂選項排序仍待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |

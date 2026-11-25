@@ -1,0 +1,106 @@
+{
+  "notion": {
+    "專案 11111111111111111111111111111111.md": "# 合成專案\n\n只用於測試。\n",
+    "專案 11111111111111111111111111111111/入口.md": "# 驗收入口\n\n[到甲](./甲/鏡頭.md)\n\n[到乙](./乙/鏡頭.md)\n",
+    "專案 11111111111111111111111111111111/甲/鏡頭.md": "# 同名鏡頭\n\n甲子頁專屬正文。\n",
+    "專案 11111111111111111111111111111111/乙/鏡頭.md": "# 同名鏡頭\n\n乙子頁專屬正文。\n",
+    "專案 11111111111111111111111111111111/AA-conflict.csv": "名稱,工時\r\n不可寫入列,3\r\n",
+    "專案 11111111111111111111111111111111/BB-valid.csv": "名稱,編號,備註\r\n追蹤列甲,00042,CSV 原始值\r\n追蹤列乙,00007,另一列\r\n"
+  },
+  "canvas": {
+    "nodes": [
+      {
+        "id": "group",
+        "type": "group",
+        "x": -200,
+        "y": -120,
+        "width": 350,
+        "height": 270,
+        "label": "相片組",
+        "background": "附件/畫面.png",
+        "backgroundStyle": "cover"
+      },
+      {
+        "id": "card",
+        "type": "file",
+        "x": -100,
+        "y": -46,
+        "width": 150,
+        "height": 130,
+        "file": "附件/畫面.png"
+      },
+      {
+        "id": "note",
+        "type": "text",
+        "x": 190,
+        "y": -46,
+        "width": 160,
+        "height": 130,
+        "text": "合成筆記"
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge",
+        "fromNode": "card",
+        "fromSide": "right",
+        "fromEnd": "none",
+        "toNode": "note",
+        "toSide": "left",
+        "toEnd": "arrow",
+        "label": "說明"
+      }
+    ]
+  },
+  "vault_canvas": {
+    "nodes": [
+      {
+        "id": "group",
+        "type": "group",
+        "x": -200,
+        "y": -120,
+        "width": 350,
+        "height": 290,
+        "label": "Vault 群組",
+        "background": "Media/RestoreBackground.png",
+        "backgroundStyle": "cover"
+      },
+      {
+        "id": "frame",
+        "type": "file",
+        "x": -100,
+        "y": -45,
+        "width": 170,
+        "height": 145,
+        "file": "Media/RestoreFrame.png"
+      }
+    ],
+    "edges": []
+  },
+  "vault_asset_colors": {
+    "Media/RestoreFrame.png": {
+      "root": [
+        43,
+        139,
+        217
+      ],
+      "decoy": [
+        218,
+        64,
+        134
+      ]
+    },
+    "Media/RestoreBackground.png": {
+      "root": [
+        44,
+        166,
+        107
+      ],
+      "decoy": [
+        215,
+        123,
+        27
+      ]
+    }
+  }
+}

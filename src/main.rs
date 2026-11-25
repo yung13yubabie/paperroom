@@ -3,11 +3,31 @@
 #[cfg(any(windows, test))]
 mod archive;
 #[cfg(any(windows, test))]
+mod board_image_dib;
+#[cfg(any(windows, test))]
+mod canvas;
+#[cfg(any(windows, test))]
+mod canvas_projection;
+#[cfg(any(windows, test))]
+mod formula;
+#[cfg(any(windows, test))]
 mod markdown;
 #[cfg(any(windows, test))]
 mod output;
 #[cfg(any(windows, test))]
 mod store;
+#[cfg(any(windows, test))]
+mod vault;
+#[cfg(any(windows, test))]
+mod vault_edit;
+#[cfg(any(windows, test))]
+mod pdf_geometry;
+#[cfg(any(windows, test))]
+mod pdf_render;
+#[cfg(any(windows, test))]
+mod about_notices;
+#[cfg(windows)]
+mod dialog;
 #[cfg(windows)]
 mod window;
 

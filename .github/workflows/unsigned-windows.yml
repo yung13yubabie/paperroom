@@ -1,0 +1,499 @@
+name: Build unsigned Windows artifact
+on:
+  push:
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125', 'dev/integration/pr1-11-notion-canvas-20261125', 'dev/integration/pr1-12-readiness-20261125', 'dev/integration/pr13-16-readiness-20261125']
+    paths-ignore:
+      - '.github/workflows/draft-windows-acceptance.yml'
+      - 'docs/WINDOWS-DRAFT-QA.md'
+      - 'scripts/windows-about-notices.ps1'
+      - 'scripts/windows-highlight-workflow.ps1'
+      - 'scripts/verify-windows-notice-bundle.py'
+      - 'scripts/test_windows_notice_bundle.py'
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: 'Build and verify on Windows without uploading an artifact'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned:
+    # Preserve the existing candidate and its completed full tests for the acceptance-only change.
+    if: >-
+      !(github.event_name == 'push' && github.repository == 'yung13yubabie/paperroom' &&
+      github.ref == 'refs/heads/dev/offline-workspace-handoff' &&
+      github.event.before == 'acdffdffaa10f9919d39494a14de6d83517484fc' &&
+      github.event.head_commit.message == 'Verify pinned Windows candidate GUI and notice bundle')
+    runs-on: windows-2022
+    timeout-minutes: 40
+    outputs:
+      draft_artifact_id: ${{ steps.upload_draft.outputs.artifact-id }}
+      draft_artifact_sha: ${{ steps.upload_draft.outputs.artifact-digest }}
+      package_name: ${{ steps.draft_package.outputs.name }}
+      package_sha: ${{ steps.draft_package.outputs.package_sha }}
+      index_sha: ${{ steps.draft_package.outputs.index_sha }}
+      dependency_sha: ${{ steps.draft_package.outputs.dependency_sha }}
+      registry_sha: ${{ steps.draft_package.outputs.registry_sha }}
+      link_sha: ${{ steps.build.outputs.link_inventory_sha }}
+      crt_sha: ${{ steps.build.outputs.crt_sha }}
+      probe_sha: ${{ steps.build.outputs.probe_sha }}
+      crt_notice_sha: ${{ steps.draft_package.outputs.crt_notice_sha }}
+      provenance_sha: ${{ steps.provenance.outputs.sha256 }}
+      exe_sha: ${{ steps.verify.outputs.exe_hash }}
+      version: ${{ steps.verify.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Confirm source and install native toolchain
+        run: |
+          $head = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Checkout differs from the event commit.' }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+
+      - name: Test the release checker
+        run: python -B ./scripts/test_windows_candidate.py
+
+      - name: Test the MSVC provenance checker
+        run: python -B ./scripts/test_windows_build_provenance.py
+
+      - name: Test the same-link witness parser
+        run: python -B ./scripts/test_windows_link_inventory.py
+
+      - name: Test the CRT archive witness parser
+        run: python -B ./scripts/test_windows_crt_archive_proof.py
+
+      - name: Build the candidate and collect private same-link evidence
+        id: build
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'paperroom-provenance'
+          [void](New-Item -ItemType Directory -Path $folder)
+          $inventory = Join-Path $folder 'paperroom-msvc-link-inventory.json'
+          $crt = Join-Path $folder 'msvc-crt-archives.json'
+          $probe = Join-Path $folder 'msvc-link-probe.json'
+          $receipt = ./scripts/windows-link-collect.ps1 -Inventory $inventory -CrtProof $crt -LinkProbe $probe -SourceCommit $env:GITHUB_SHA
+          "exe_hash=$($receipt.ExeHash)" >> $env:GITHUB_OUTPUT
+          "map_hash=$($receipt.MapHash)" >> $env:GITHUB_OUTPUT
+          "link_inventory_sha=$($receipt.InventoryHash)" >> $env:GITHUB_OUTPUT
+          "crt_sha=$($receipt.CrtHash)" >> $env:GITHUB_OUTPUT
+          "probe_sha=$($receipt.ProbeHash)" >> $env:GITHUB_OUTPUT
+
+      - name: Run Windows tests with locked dependencies
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Verify and exercise the unsigned artifact
+        id: verify
+        env:
+          BUILD_EXE_HASH: ${{ steps.build.outputs.exe_hash }}
+          GUIDE_CAPTURE: ${{ github.repository == 'yung13yubabie/paperroom' && github.event_name == 'push' && github.ref == 'refs/heads/dev/offline-workspace-handoff' && contains(github.event.head_commit.message, '[guide-capture]') }}
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $package = @((ConvertFrom-Json $metadata).packages | Where-Object name -ceq 'paperroom')
+          if ($package.Count -ne 1) { throw 'Expected one Paperroom package.' }
+          $version = $package[0].version
+          if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Expected a three-part release version.' }
+
+          $built = 'target/x86_64-pc-windows-msvc/release/paperroom.exe'
+          $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($builtHash -cne $env:BUILD_EXE_HASH) { throw 'The executable differs from the recorded release build.' }
+          $folder = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'paperroom-unsigned')
+          $exe = Join-Path $folder.FullName 'Paperroom.exe'
+          Copy-Item -LiteralPath $built -Destination $exe
+          python ./scripts/windows-candidate.py audit $exe
+          if ($LASTEXITCODE -ne 0) { throw 'Executable privacy audit failed.' }
+          ./scripts/assert-windows-system-crt.ps1 -Exe $exe
+          $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          $fixedFile = $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart -join '.'
+          $fixedProduct = $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart -join '.'
+          if ($info.FileVersion -cne $version -or $info.ProductVersion -cne $version -or
+              $fixedFile -ne "$version.0" -or $fixedProduct -ne "$version.0" -or
+              $info.ProductName -cne 'Paperroom' -or $info.OriginalFilename -cne 'Paperroom.exe') {
+            throw 'PE VERSIONINFO differs from the package.'
+          }
+          if ((Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned') {
+            throw 'Expected an unsigned build.'
+          }
+          if ($env:GUIDE_CAPTURE -eq 'true') {
+            $png = Join-Path $env:RUNNER_TEMP 'Paperroom-first-window.png'
+            ./scripts/windows-storage.ps1 -Exe $exe -Screenshot $png -RequireGuideScreenshot
+            Write-Host "Guide capture PNG SHA-256 $((Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash); app EXE SHA-256 $builtHash"
+          } else {
+            ./scripts/windows-storage.ps1 -Exe $exe
+          }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne $builtHash) { throw 'Staged executable differs from the build.' }
+          $status = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $status) { throw 'Build or tests modified the checkout.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "exe_hash=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Record sanitized MSVC dependency and Rust evidence
+        id: provenance
+        env:
+          VERIFIED_EXE_HASH: ${{ steps.verify.outputs.exe_hash }}
+        run: |
+          $inputsDir = Join-Path $env:RUNNER_TEMP ('paperroom-cargo-input-' + [guid]::NewGuid().ToString('N'))
+          $receiptDir = Join-Path $env:RUNNER_TEMP 'paperroom-provenance'
+          $receipt = Join-Path $receiptDir 'paperroom-msvc-provenance.json'
+          [void](New-Item -ItemType Directory -Path $inputsDir)
+          try {
+            $metadata = Join-Path $inputsDir 'cargo-metadata.json'
+            $compiler = Join-Path $inputsDir 'rustc-info.txt'
+            cargo metadata --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 > $metadata
+            if ($LASTEXITCODE -ne 0) { throw 'Target-filtered Cargo metadata failed.' }
+            rustc -vV > $compiler
+            if ($LASTEXITCODE -ne 0) { throw 'Rust compiler metadata failed.' }
+            $sysroot = rustc --print sysroot
+            if ($LASTEXITCODE -ne 0 -or !$sysroot) { throw 'Rust sysroot was unavailable.' }
+            python -B ./scripts/windows-build-provenance.py --metadata $metadata --exe-sha256 $env:VERIFIED_EXE_HASH --rustc-info $compiler --rust-sysroot $sysroot > $receipt
+            if ($LASTEXITCODE -ne 0) { throw 'The sanitized MSVC build receipt was not generated.' }
+            $data = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+            if ($data.exe_sha256 -cne $env:VERIFIED_EXE_HASH.ToLowerInvariant() -or
+                $data.target -cne 'x86_64-pc-windows-msvc' -or $data.rustc.host -cne 'x86_64-pc-windows-msvc' -or
+                $data.rustc.release -cne $env:RUSTUP_TOOLCHAIN) {
+              throw 'MSVC build receipt does not match the verified EXE and toolchain.'
+            }
+            $hash = (Get-FileHash -LiteralPath $receipt -Algorithm SHA256).Hash.ToLowerInvariant()
+            "sha256=$hash" >> $env:GITHUB_OUTPUT
+            "packages=$($data.packages.Count)" >> $env:GITHUB_OUTPUT
+            "rust_library_notice_observed=$($data.rust_toolchain_notices.copyright_library_observed)" >> $env:GITHUB_OUTPUT
+            Write-Host "Sanitized MSVC build receipt SHA-256 $hash for EXE $($data.exe_sha256); $($data.packages.Count) resolved packages"
+          } finally {
+            Remove-Item -LiteralPath $inputsDir -Recurse -Force
+          }
+
+      - name: Test and stage the draft notice-inclusive ZIP
+        id: draft_package
+        env:
+          EXE_HASH: ${{ steps.verify.outputs.exe_hash }}
+          VERSION: ${{ steps.verify.outputs.version }}
+          PROVENANCE_HASH: ${{ steps.provenance.outputs.sha256 }}
+          LINK_HASH: ${{ steps.build.outputs.link_inventory_sha }}
+          CRT_HASH: ${{ steps.build.outputs.crt_sha }}
+          PROBE_HASH: ${{ steps.build.outputs.probe_sha }}
+        run: |
+          python -B ./scripts/test_windows_reviewed_notice_package.py
+          if ($LASTEXITCODE -ne 0) { throw 'Draft package tests failed.' }
+          python -B ./scripts/test_windows_registry_notices.py
+          if ($LASTEXITCODE -ne 0) { throw 'Registry notice tests failed.' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'paperroom-provenance'
+          $exe = Join-Path $env:RUNNER_TEMP 'paperroom-unsigned/Paperroom.exe'
+          $provenance = Join-Path $evidence 'paperroom-msvc-provenance.json'
+          $link = Join-Path $evidence 'paperroom-msvc-link-inventory.json'
+          $crt = Join-Path $evidence 'msvc-crt-archives.json'
+          $probe = Join-Path $evidence 'msvc-link-probe.json'
+          $crtNotice = 'docs/third-party/msvc-sdk/NOTICE.md'
+          $crtNoticeHash = (Get-FileHash -LiteralPath $crtNotice -Algorithm SHA256).Hash.ToLowerInvariant()
+          $dependency = 'docs/third-party/dependency-inventory.tsv'
+          $dependencyHash = (Get-FileHash -LiteralPath $dependency -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sysroot = rustc --print sysroot
+          if ($LASTEXITCODE -ne 0 -or !$sysroot) { throw 'Could not locate the pinned Rust notice source.' }
+          $folder = Join-Path $env:RUNNER_TEMP 'paperroom-draft-package'
+          [void](New-Item -ItemType Directory -Path $folder)
+          $name = "Paperroom-v$($env:VERSION)-windows-x64-draft.zip"
+          $output = Join-Path $folder $name
+          $registry = Join-Path $env:RUNNER_TEMP 'paperroom-registry-notices'
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          python -B ./scripts/windows-registry-notices.py --exe $exe --exe-sha256 $env:EXE_HASH --provenance $provenance --provenance-sha256 $env:PROVENANCE_HASH --lock Cargo.lock --cargo-home $cargoHome --output $registry
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to collect audited notices from the locked crate archives.' }
+          $registryHash = (Get-FileHash -LiteralPath (Join-Path $registry 'evidence/registry-notices.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $data = python -B ./scripts/windows-reviewed-notice-package.py build --registry-notice-root $registry --crt-proof $crt --crt-proof-sha256 $env:CRT_HASH --crt-notice $crtNotice --crt-notice-sha256 $crtNoticeHash --link-probe $probe --link-probe-sha256 $env:PROBE_HASH --output $output --exe $exe --exe-sha256 $env:EXE_HASH --provenance $provenance --provenance-sha256 $env:PROVENANCE_HASH --link-inventory $link --link-inventory-sha256 $env:LINK_HASH --dependency-inventory $dependency --dependency-inventory-sha256 $dependencyHash --commit $env:GITHUB_SHA --version $env:VERSION --rust-sysroot $sysroot
+          if ($LASTEXITCODE -ne 0) { throw 'The notice-inclusive draft ZIP did not pass staging.' }
+          $result = $data | ConvertFrom-Json
+          if ($result.notice_index_sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+              (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash -ine $result.package_sha256) {
+            throw 'The staged notice-inclusive ZIP or index has an invalid receipt.'
+          }
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "package_sha=$($result.package_sha256)" >> $env:GITHUB_OUTPUT
+          "index_sha=$($result.notice_index_sha256)" >> $env:GITHUB_OUTPUT
+          "dependency_sha=$dependencyHash" >> $env:GITHUB_OUTPUT
+          "registry_sha=$registryHash" >> $env:GITHUB_OUTPUT
+          "crt_notice_sha=$crtNoticeHash" >> $env:GITHUB_OUTPUT
+          Write-Host "Checked CRT source note SHA-256 $crtNoticeHash."
+          Write-Host "Draft ZIP $($result.package_sha256), notice index $($result.notice_index_sha256), EXE $env:EXE_HASH."
+
+      - name: Upload the draft notice-inclusive ZIP
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        id: upload_draft
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-${{ steps.verify.outputs.version }}-notice-draft-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paperroom-draft-package/${{ steps.draft_package.outputs.name }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Paperroom.exe as the only archive member
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-${{ steps.verify.outputs.version }}-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paperroom-unsigned/Paperroom.exe
+          if-no-files-found: error
+
+      - name: Upload the separate build provenance receipt
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        id: upload_provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-msvc-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paperroom-provenance/paperroom-msvc-provenance.json
+          if-no-files-found: error
+
+      - name: Upload the separate CI-only guide capture
+        if: ${{ github.repository == 'yung13yubabie/paperroom' && github.event_name == 'push' && github.ref == 'refs/heads/dev/offline-workspace-handoff' && contains(github.event.head_commit.message, '[guide-capture]') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-guide-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/Paperroom-first-window.png
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record source and artifact identities
+        env:
+          VERSION: ${{ steps.verify.outputs.version }}
+          EXE_HASH: ${{ steps.verify.outputs.exe_hash }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARCHIVE_HASH: ${{ steps.upload.outputs.artifact-digest }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+          MAP_HASH: ${{ steps.build.outputs.map_hash }}
+          LINK_INVENTORY_SHA: ${{ steps.build.outputs.link_inventory_sha }}
+          DRAFT_ARTIFACT: ${{ steps.upload_draft.outputs.artifact-id }}
+          DRAFT_ARCHIVE_SHA: ${{ steps.upload_draft.outputs.artifact-digest }}
+          DRAFT_PACKAGE_SHA: ${{ steps.draft_package.outputs.package_sha }}
+          NOTICE_INDEX_SHA: ${{ steps.draft_package.outputs.index_sha }}
+          PROVENANCE_HASH: ${{ steps.provenance.outputs.sha256 }}
+          PROVENANCE_PACKAGES: ${{ steps.provenance.outputs.packages }}
+          RUST_LIBRARY_NOTICE: ${{ steps.provenance.outputs.rust_library_notice_observed }}
+          PROVENANCE_ARTIFACT: ${{ steps.upload_provenance.outputs.artifact-id }}
+        run: |
+          $summary = @(
+            "Paperroom $env:VERSION unsigned Windows x64 (MSVC)"
+            ''
+            "- Repository: $env:GITHUB_REPOSITORY"
+            "- Source commit: $env:GITHUB_SHA"
+            "- Run: $env:GITHUB_RUN_ID (attempt $env:GITHUB_RUN_ATTEMPT)"
+            "- Paperroom.exe SHA-256: $env:EXE_HASH"
+            "- Private MSVC MAP SHA-256: $env:MAP_HASH"
+            "- Sanitized same-link inventory SHA-256: $env:LINK_INVENTORY_SHA"
+            "- Notice-inclusive draft ZIP SHA-256: $env:DRAFT_PACKAGE_SHA"
+            "- Notice index SHA-256: $env:NOTICE_INDEX_SHA"
+            "- MSVC build receipt SHA-256: $env:PROVENANCE_HASH ($env:PROVENANCE_PACKAGES resolved packages)"
+            "- Rust library copyright file observed: $env:RUST_LIBRARY_NOTICE"
+          )
+          if ($env:VERIFY_ONLY -eq 'true') {
+            $summary += '- Verification only. Artifact upload was skipped.'
+          } else {
+            if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or
+                $env:ARCHIVE_HASH -notmatch '^[a-f0-9]{64}$' -or
+                $env:PROVENANCE_ARTIFACT -notmatch '^[1-9][0-9]*$' -or
+                $env:DRAFT_ARTIFACT -notmatch '^[1-9][0-9]*$' -or $env:DRAFT_ARCHIVE_SHA -notmatch '^[a-f0-9]{64}$') {
+              throw 'GitHub did not return valid artifact IDs and the EXE archive digest.'
+            }
+            $summary += @(
+              "- GitHub artifact ID: $env:ARTIFACT_ID"
+              "- GitHub artifact ZIP SHA-256: $env:ARCHIVE_HASH"
+              "- Separate MSVC build receipt artifact ID: $env:PROVENANCE_ARTIFACT"
+              "- Draft ZIP artifact ID: $env:DRAFT_ARTIFACT"
+              "- GitHub download wrapper ZIP SHA-256: $env:DRAFT_ARCHIVE_SHA"
+            )
+          }
+          $summary | ForEach-Object { Write-Host $_ }
+          $summary >> $env:GITHUB_STEP_SUMMARY
+
+  verify-download:
+    name: Verify the downloaded draft ZIP on Windows
+    needs: unsigned
+    if: ${{ needs.unsigned.outputs.draft_artifact_id != '' }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: windows-2022
+    timeout-minutes: 14
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARTIFACT_ID: ${{ needs.unsigned.outputs.draft_artifact_id }}
+      OUTER_HASH: ${{ needs.unsigned.outputs.draft_artifact_sha }}
+      PACKAGE_NAME: ${{ needs.unsigned.outputs.package_name }}
+      PACKAGE_HASH: ${{ needs.unsigned.outputs.package_sha }}
+      INDEX_HASH: ${{ needs.unsigned.outputs.index_sha }}
+      DEPENDENCY_HASH: ${{ needs.unsigned.outputs.dependency_sha }}
+      REGISTRY_HASH: ${{ needs.unsigned.outputs.registry_sha }}
+      LINK_HASH: ${{ needs.unsigned.outputs.link_sha }}
+      CRT_HASH: ${{ needs.unsigned.outputs.crt_sha }}
+      CRT_NOTICE_HASH: ${{ needs.unsigned.outputs.crt_notice_sha }}
+      PROBE_HASH: ${{ needs.unsigned.outputs.probe_sha }}
+      PROVENANCE_HASH: ${{ needs.unsigned.outputs.provenance_sha }}
+      EXE_HASH: ${{ needs.unsigned.outputs.exe_sha }}
+      VERSION: ${{ needs.unsigned.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Fetch and verify the same archive that readers download
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-draft-download-' + [guid]::NewGuid())
+          [void](New-Item -ItemType Directory -Path $root)
+          "PAPERROOM_DOWNLOAD_ROOT=$root" >> $env:GITHUB_ENV
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA -or $env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:PACKAGE_NAME -cnotmatch '^Paperroom-v[0-9]+[.][0-9]+[.][0-9]+-windows-x64-draft[.]zip$') {
+            throw 'Unexpected draft download identity.'
+          }
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID"
+          $metadata = gh api $route
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the draft artifact metadata.' }
+          $meta = $metadata | ConvertFrom-Json
+          if ($meta.expired -or $meta.workflow_run.id -ne [long]$env:GITHUB_RUN_ID -or
+              $meta.workflow_run.head_sha -cne $env:GITHUB_SHA -or $meta.digest -cne "sha256:$env:OUTER_HASH") {
+            throw 'The uploaded draft artifact metadata does not match this run.'
+          }
+          $outer = Join-Path $root 'github-download.zip'
+          gh api "$route/zip" > $outer
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $outer -Algorithm SHA256).Hash -ine $env:OUTER_HASH) {
+            throw 'The actual download wrapper has the wrong SHA-256.'
+          }
+          $package = Join-Path $root $env:PACKAGE_NAME
+          $zip = [IO.Compression.ZipFile]::OpenRead($outer)
+          try {
+            if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].FullName -cne $env:PACKAGE_NAME -or
+                $zip.Entries[0].Length -le 0 -or $zip.Entries[0].Length -gt 50331648) {
+              throw 'The download wrapper must contain exactly the bounded draft ZIP.'
+            }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.Entries[0], $package)
+          } finally {
+            $zip.Dispose()
+          }
+          python -B ./scripts/windows-reviewed-notice-package.py verify --registry-notice-index-sha256 $env:REGISTRY_HASH --crt-proof-sha256 $env:CRT_HASH --crt-notice-sha256 $env:CRT_NOTICE_HASH --link-probe-sha256 $env:PROBE_HASH --package $package --package-sha256 $env:PACKAGE_HASH --notice-index-sha256 $env:INDEX_HASH --exe-sha256 $env:EXE_HASH --provenance-sha256 $env:PROVENANCE_HASH --link-inventory-sha256 $env:LINK_HASH --dependency-inventory-sha256 $env:DEPENDENCY_HASH --commit $env:GITHUB_SHA --version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'The downloaded ZIP or its notice contents failed verification.' }
+          $zip = [IO.Compression.ZipFile]::OpenRead($package)
+          $exe = Join-Path $root 'Paperroom.exe'
+          try {
+            $entry = $zip.GetEntry('Paperroom.exe')
+            if (!$entry -or $entry.Length -le 0 -or $entry.Length -gt 16777216) { throw 'Missing bounded candidate EXE.' }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $exe)
+          } finally {
+            $zip.Dispose()
+          }
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXE_HASH) {
+            throw 'The EXE extracted from the verified ZIP has the wrong SHA-256.'
+          }
+          "PAPERROOM_EXE=$exe" >> $env:GITHUB_ENV
+          Write-Host "Verified the same downloadable ZIP $env:PACKAGE_HASH and extracted EXE $env:EXE_HASH on Windows Server."
+
+      - name: Verify the public v0.1.1 upgrade with the downloaded candidate EXE
+        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' || github.ref == 'refs/heads/dev/integration/pr1-11-notion-canvas-20261125' || github.ref == 'refs/heads/dev/integration/pr1-12-readiness-20261125' || github.ref == 'refs/heads/dev/integration/pr13-16-readiness-20261125' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $legacy = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'Paperroom-v0.1.1.exe'
+          Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $legacy -TimeoutSec 45
+          $sha = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+          if ((Get-FileHash -LiteralPath $legacy -Algorithm SHA256).Hash -ine $sha) {
+            throw 'Public v0.1.1 baseline digest differs.'
+          }
+          ./scripts/windows-storage.ps1 -Exe $env:PAPERROOM_EXE -UpgradeBaseline $legacy
+
+      - name: Open the actual downloaded EXE and read About
+        run: ./scripts/windows-about-notices.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:EXE_HASH
+
+      - name: Exercise the full native GUI suite from the downloaded EXE
+        id: gui
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
+        run: |
+          $joint = $env:GITHUB_REF -ceq 'refs/heads/dev/integration/pr13-16-readiness-20261125'
+          if ($joint) {
+            $env:PAPERROOM_GROUP_HISTORY_RECEIPT = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'group-history-restore.json'
+          }
+          if ($joint -or $env:GITHUB_REF -ceq 'refs/heads/dev/integration/pr1-12-readiness-20261125') {
+            $env:PAPERROOM_VAULT_RESTORE_RECEIPT = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'vault-restore.json'
+          }
+          ./scripts/windows-highlight-workflow.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:EXE_HASH
+          foreach ($receipt in @($env:PAPERROOM_VAULT_RESTORE_RECEIPT, $env:PAPERROOM_GROUP_HISTORY_RECEIPT)) {
+            if ($receipt -and !(Test-Path -LiteralPath $receipt -PathType Leaf)) {
+              throw 'The full native suite did not produce a required restore receipt.'
+            }
+          }
+
+      - name: Retain the actual Vault restore receipt
+        if: ${{ steps.gui.outcome == 'success' && github.ref == 'refs/heads/dev/integration/pr1-12-readiness-20261125' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-Vault-Restore-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/vault-restore.json
+          if-no-files-found: error
+
+      - name: Retain native integration and isolated backup evidence
+        if: ${{ steps.gui.outcome == 'success' && github.ref == 'refs/heads/dev/integration/pr13-16-readiness-20261125' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-PR13-16-Integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/vault-restore.json
+            ${{ env.PAPERROOM_DOWNLOAD_ROOT }}/group-history-restore.json
+          if-no-files-found: error
+
+      - name: Remove the downloaded QA inputs
+        if: ${{ always() }}
+        run: |
+          if ($env:PAPERROOM_DOWNLOAD_ROOT -and (Test-Path -LiteralPath $env:PAPERROOM_DOWNLOAD_ROOT)) {
+            Remove-Item -LiteralPath $env:PAPERROOM_DOWNLOAD_ROOT -Recurse -Force
+          }
+
+  client-handoff:
+    name: Package the manual offline Windows client handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Archive the five handoff files and verify readback
+        run: |
+          git archive --format=zip --prefix=Paperroom-Windows-Offline-QA/ \
+            -o "$RUNNER_TEMP/Paperroom-Windows-Offline-QA.zip" HEAD:qa/windows-client-offline
+          python -B - "$RUNNER_TEMP/Paperroom-Windows-Offline-QA.zip" <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import hashlib
+          import sys
+          archive = Path(sys.argv[1])
+          root = "Paperroom-Windows-Offline-QA/"
+          with ZipFile(archive) as z:
+              assert z.testzip() is None
+              assert {n for n in z.namelist() if not n.endswith("/")} == {
+                  root + n for n in ("README.md", "EVIDENCE.md", "fixture.md", "checkpoint.ps1", "RC-CHECKLIST.md")
+              }
+              fixture = z.read(root + "fixture.md")
+              assert hashlib.sha256(fixture).hexdigest() == "27e9aed88fe0db6037d303e8e830270926b8222acfd0e6c6b387ab20b1af1ad4"
+              assert b"61e6e5ffb694702827c7e6fe031c638429b90105590649b732728b65805665c4" in z.read(root + "README.md")
+          print("Manual-only handoff ZIP SHA-256", hashlib.sha256(archive.read_bytes()).hexdigest())
+          PY
+
+      - name: Upload only the manual offline test handoff
+        if: ${{ github.event_name == 'push' || !inputs.verify_only }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Paperroom-Windows-Offline-QA-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/Paperroom-Windows-Offline-QA.zip
+          if-no-files-found: error

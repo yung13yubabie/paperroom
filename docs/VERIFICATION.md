@@ -1,6 +1,56 @@
 # 版本驗證紀錄
 
+## 公開前核對本機候選
+
+先準備同一候選的獨立 EXE、Windows ZIP、原始碼 ZIP 和 SHA-256 清單。從建置紀錄取完整 Git commit，從實際驗收紀錄取 EXE 的 SHA-256。清單每行應有一個 SHA-256 與對應檔名，只列這三份資產。授權對照請選依賴鎖檔相同且已完成授權檢查的 Windows ZIP。
+
+```sh
+python3 scripts/windows-candidate.py preflight \
+  final/Paperroom.exe final/Paperroom-Windows-x64.zip final/Paperroom-source.zip \
+  reviewed/previous-Windows-x64.zip "$PAPERROOM_COMMIT" \
+  --manifest final/SHA256SUMS.txt --tested-exe-sha256 "$PAPERROOM_TESTED_EXE_SHA" \
+  --source-prefix "paperroom-$PAPERROOM_VERSION"
+```
+
+本機開發包使用 `paperroom-offline-workspace/` 作為原始碼 ZIP 根目錄，可省略 `--source-prefix`。檢查會掃描 Windows EXE 的已知主機路徑、測試標記及憑據格式，確認 ZIP 內外的 EXE 一致，並核對授權、ZIP 成員、Git 歸檔及三份交付檔的雜湊。若清單、受測 EXE 或原始碼任一不符，指令會失敗。可用 `python3 -B scripts/test_windows_candidate.py` 重跑正向與失敗案例。
+
+請把建置記錄、離線驗收紀錄和檢查輸出與候選版本一起保留。此檢查接收已驗證的身分及檔案，建置來源須由建置紀錄核對。原生 MSVC、Windows 桌面與公開下載驗證各自記錄。已獲准的遠端分支若可執行「Build unsigned Windows artifact」，可選 `verify_only`，在 Windows 測試並記錄 EXE 的 SHA-256，略過產物上傳。
+
+### 核對 GNU 重建的執行檔
+
+在 Linux 以相同 Git 提交、Rust 和 MinGW-w64 版本，從兩個不同的來源目錄執行 `python3 scripts/windows-candidate.py build-gnu --offline --target-dir <空目錄>`。為兩次建置分別指定新的輸出目錄。指令在最後連結時使用 GNU `--no-insert-timestamp`，並檢查產物的 PE 時間戳為零。SQLite 的 C 編譯與 Rust 編譯仍各自使用路徑映射。[GNU 連結器手冊](https://www.sourceware.org/binutils/docs/ld/Options.html)
+
+使用 `sha256sum` 和 `cmp` 比較兩份 EXE。用 `audit` 的 `--prefix` 參數指定兩個來源目錄與輸出目錄，再對最終附件執行上述 `preflight`。這項核對適用於指定工具鏈的未簽章 EXE。MSVC、簽章後的執行檔與不同版本的工具鏈須個別核對。
+
+## 0.1.2 未簽章候選檔
+
+Windows x64 GNU 執行檔為 1,906,176 位元組，SHA-256 為 `b0f9b1dd2bd4d041fe021d4f01772f40d69bc4430457a0dee1c747b4b806382e`。直接解析 PE 的 RT_VERSION 資源，產品名稱為 `Paperroom`；FileVersion 與 ProductVersion 的顯示字串都為 `0.1.2`，固定數字欄位均為 `0.1.2.0`。PE 憑證表為空。
+
+以同一雜湊的 EXE 在無網卡的 Debian 13／Wine 10 虛擬機驗證首啟、建立和自動儲存筆記、正常關閉、存檔後強制結束及重開，已儲存筆記仍可讀，SQLite 完整性檢查通過。在筆記樹輸入繁中關鍵字，選取唯一結果後也能讀回標題與內文。另驗證可攜模式的首啟與正常關閉。Linux 的 13 項測試及以相同原始碼編譯的 Windows 測試程式 16 項全部通過。以下 v0.1.1 的完整 GUI 匯入、備份、還原紀錄屬於該版本。
+
+候選分支的 TreeView 初始化與 `813c0ee` 相同。在 GitHub-hosted Windows Server 2022，以 MSVC 從候選原始碼通過 16 項 Rust 測試及 release 建置。該次建置的 EXE 通過預設與可攜模式的首啟、自動儲存、正常關閉、強制結束後重開和 SQLite 完整性檢查。[候選版原生 Windows 測試](https://github.com/yung13yubabie/paperroom/actions/runs/45291962904/job/138102699385)
+
+上面記錄的 GNU EXE 在 Wine 實測，Windows Server 2022 使用同一候選原始碼另編的 MSVC EXE。簽章、時間戳、乾淨 Windows 10／11 的 SmartScreen 與實體繁中輸入法仍待驗收。
+
+### 手動驗證公開 Release
+
+在 GitHub 的 Actions 開啟 **Windows storage checks**，按 **Run workflow**，選擇 `maintenance/signing-preparation`。在 `release_tag` 輸入公開標籤，例如 `v0.1.1`。留空則執行所選分支的 Windows 原始碼測試。
+
+流程先解析標籤指向的 commit，再以公開網址下載 EXE、Windows ZIP、原始碼 ZIP 和 SHA-256 清單。核對三份檔案的雜湊及原始碼 ZIP 的 commit 與檔案內容，逐位元組比對 Windows ZIP 內外的 EXE。最後使用候選分支的測試腳本，對剛下載核對的同一份 EXE 執行 Windows 儲存測試。流程成為預設分支的一部分後，預設分支也可手動執行。由 `release` 事件啟動時會從預設分支取得測試腳本。
+
+也可由已有 GitHub 寫入權限的維護者在 CLI 指定分支和輸入：
+
+```console
+gh workflow run windows.yml --repo yung13yubabie/paperroom --ref maintenance/signing-preparation -f release_tag=v0.1.1
+```
+
+同一套檢查已由候選分支的測試推送在 Windows Server 2022 跑完。公開 v0.1.1 解析至 `a519f1561f35786e12707e41112c298eac1a6084`，下載後 EXE 的 SHA-256 為 `0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82`。ZIP 及清單核對通過，公開 EXE 在預設與可攜模式都通過重開復原和 SQLite 完整性檢查。這次的執行紀錄使用測試推送觸發，手動按鈕的送出仍待驗證。[公開附件的原生 Windows 測試](https://github.com/yung13yubabie/paperroom/actions/runs/45292139827/job/138103307777)
+
 ## v0.1.1
+
+GitHub-hosted Windows Server 2022 已以 SHA-256 核對原版 GNU EXE。預設模式和可攜模式都完成首啟、編輯、自動儲存、正常關閉、強制結束、重開與 SQLite 完整性驗證。[原版 EXE 的 Windows 實測](https://github.com/yung13yubabie/paperroom/actions/runs/45284932624)
+
+標籤原始碼的 MSVC 測試有 15 項通過。原生編輯器測試要求 Windows 一次註冊樹狀與標準控制項，初始化回傳失敗。在獨立 QA 分支改為只註冊所需的樹狀控制項，正式啟動與測試共用同一檢查；16 項原生測試與儲存測試全數通過。原版 v0.1.1 EXE 並未編入這項修改。[標籤的測試紀錄](https://github.com/yung13yubabie/paperroom/actions/runs/45284252126) · [修正後的 QA 紀錄](https://github.com/yung13yubabie/paperroom/actions/runs/45284932451)
 
 Windows x64 GUI 執行檔使用 Rust 1.100.0、GNU 目標和 MinGW-w64 GCC 14.2 建置。兩次建置分別使用空的輸出目錄，產物逐位元組相同。執行檔未簽章。
 

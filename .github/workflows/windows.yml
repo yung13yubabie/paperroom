@@ -1,13 +1,32 @@
 name: Windows storage checks
 on:
   push:
+    paths-ignore:
+      - '.github/workflows/draft-windows-acceptance.yml'
+      - 'docs/WINDOWS-DRAFT-QA.md'
+      - 'scripts/windows-about-notices.ps1'
+      - 'scripts/windows-highlight-workflow.ps1'
+      - 'scripts/verify-windows-notice-bundle.py'
+      - 'scripts/test_windows_notice_bundle.py'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Public release tag to verify (leave blank for native source tests)'
+        type: string
+        required: false
   release:
     types: [published]
 permissions:
   contents: read
 jobs:
   storage:
+    # The acceptance-only change verifies the pinned candidate without rebuilding it.
+    if: >-
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')) &&
+      !(github.event_name == 'push' && github.repository == 'yung13yubabie/paperroom' &&
+      github.ref == 'refs/heads/dev/offline-workspace-handoff' &&
+      github.event.before == 'acdffdffaa10f9919d39494a14de6d83517484fc' &&
+      github.event.head_commit.message == 'Verify pinned Windows candidate GUI and notice bundle')
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
@@ -23,56 +42,67 @@ jobs:
         run: cargo test --locked --target x86_64-pc-windows-msvc
       - name: Build Windows x64 smoke-test binary
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
-      - name: Exercise first launch and crash recovery
+      - name: Check the candidate for VC runtime DLL imports
         shell: pwsh
-        run: ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
-
-      - name: Verify published release assets
-        if: github.event_name == 'release'
+        run: ./scripts/assert-windows-system-crt.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe
+      - name: Fetch and verify the pinned public v0.1.1 upgrade baseline
+        id: legacy
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $assets = Join-Path $env:RUNNER_TEMP 'paperroom-release-check'
-          [void][IO.Directory]::CreateDirectory($assets)
-          $exe = 'Paperroom.exe'
-          $appZip = "Paperroom-${env:RELEASE_TAG}-Windows-x64.zip"
-          $sourceZip = "Paperroom-${env:RELEASE_TAG}-source.zip"
-          gh release download --repo $env:GITHUB_REPOSITORY --dir $assets --pattern $exe --pattern $appZip --pattern $sourceZip --pattern 'SHA256SUMS.txt' -- $env:RELEASE_TAG
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to download release assets.' }
-          $manifest = Get-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt')
-          foreach ($name in @($exe, $appZip, $sourceZip)) {
-            $pattern = '^([0-9A-Fa-f]{64}) [ *]' + [regex]::Escape($name) + '$'
-            $entries = @($manifest | ForEach-Object { if ($_ -cmatch $pattern) { $Matches[1] } })
-            if ($entries.Count -ne 1) { throw "Expected one $name entry in SHA256SUMS.txt." }
-            $actual = (Get-FileHash -LiteralPath (Join-Path $assets $name) -Algorithm SHA256).Hash
-            if ($actual -ine $entries[0]) { throw "Published $name checksum mismatch." }
-            Write-Host "Verified published $name SHA-256 $actual"
+          $legacy = Join-Path $env:RUNNER_TEMP ('paperroom-v011-' + [guid]::NewGuid())
+          [void][System.IO.Directory]::CreateDirectory($legacy)
+          try {
+            $exe = Join-Path $legacy 'Paperroom.exe'
+            Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $exe -TimeoutSec 45
+            $sha = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+            if ((Get-FileHash -LiteralPath $exe).Hash -ine $sha) { throw 'Public v0.1.1 baseline digest differs.' }
+            "exe=$exe" >> $env:GITHUB_OUTPUT
+          } catch {
+            Remove-Item -LiteralPath $legacy -Recurse -Force
+            throw
           }
-          $verifyZip = @'
-          from hashlib import file_digest
-          from pathlib import Path
-          from sys import argv
-          from zipfile import ZipFile
+      - name: Exercise first launch, crash recovery and upgrade from published v0.1.1
+        shell: pwsh
+        env:
+          V011_BASELINE: ${{ steps.legacy.outputs.exe }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:V011_BASELINE) -or
+              !(Test-Path -LiteralPath $env:V011_BASELINE -PathType Leaf)) {
+            throw 'Pinned public upgrade baseline is required for this check.'
+          }
+          try {
+            ./scripts/windows-storage.ps1 -Exe ./target/x86_64-pc-windows-msvc/release/paperroom.exe -UpgradeBaseline $env:V011_BASELINE
+          } finally {
+            Remove-Item -LiteralPath $env:V011_BASELINE -Force
+            Remove-Item -LiteralPath (Split-Path $env:V011_BASELINE -Parent)
+          }
 
-          assets, exe, app_zip, source_zip, commit = argv[1:]
-          assets = Path(assets)
-          with (assets / exe).open("rb") as standalone:
-              published_digest = file_digest(standalone, "sha256").digest()
-          with ZipFile(assets / app_zip) as archive:
-              assert archive.namelist().count(exe) == 1, "Expected one EXE at ZIP root"
-              with archive.open(exe) as bundled:
-                  assert file_digest(bundled, "sha256").digest() == published_digest, "Bundled EXE differs"
-          with ZipFile(assets / source_zip) as archive:
-              assert archive.comment.decode() == commit, "Source ZIP does not name the release commit"
-          '@
-          python -c $verifyZip $assets $exe $appZip $sourceZip $env:GITHUB_SHA
-          if ($LASTEXITCODE -ne 0) { throw 'Release ZIP contents failed verification.' }
+  release-assets:
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '' &&
+      (github.ref == 'refs/heads/maintenance/signing-preparation' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.sha }}
+          persist-credentials: false
 
-      - name: Exercise published Windows EXE
-        if: github.event_name == 'release'
+      - name: Resolve the tag and verify public downloads
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'paperroom-release-check'
+          python ./scripts/verify-release.py "$env:GITHUB_REPOSITORY" "$env:RELEASE_TAG" "$folder"
+          if ($LASTEXITCODE -ne 0) { throw 'Public release verification failed.' }
+
+      - name: Smoke-test the verified public Windows EXE
         shell: pwsh
         run: |
           $exe = Join-Path $env:RUNNER_TEMP 'paperroom-release-check/Paperroom.exe'
@@ -80,7 +110,7 @@ jobs:
           ./scripts/windows-storage.ps1 -Exe $exe -Screenshot $screenshot
 
       - name: Attach captured release window
-        if: success() && github.event_name == 'release'
+        if: success()
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -15,7 +15,6 @@ trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/debs" "$work/gnu" "$work/metadata"
 export LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0
 export SOURCE_DATE_EPOCH="$(git -C "$repo" log -1 --format=%ct "$source_commit")"
-export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 export CARGO_BUILD_JOBS=2
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 rustc "+$rust_toolchain" -vV > "$work/metadata/rustc.txt"
@@ -69,10 +68,11 @@ build() (
     label="$1"
     cd "$work/$label/src"
     export CARGO_TARGET_DIR="$work/$label/out"
-    export RUSTFLAGS="--remap-path-prefix=$PWD=/paperroom --remap-path-prefix=$CARGO_TARGET_DIR=/target --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$sysroot=/toolchain -Clink-arg=-Wl,--no-insert-timestamp -Clink-arg=-static-libgcc"
-    export CFLAGS_x86_64_pc_windows_gnu="-ffile-prefix-map=$PWD=/paperroom -ffile-prefix-map=$CARGO_TARGET_DIR=/target -ffile-prefix-map=$CARGO_HOME=/cargo -g0"
+    export RUSTFLAGS="--remap-path-prefix=$work=/build-temp --remap-path-prefix=$PWD=/paperroom --remap-path-prefix=$CARGO_TARGET_DIR=/target --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$sysroot=/toolchain"
+    export CFLAGS_x86_64_pc_windows_gnu="-ffile-prefix-map=$work=/build-temp -ffile-prefix-map=$PWD=/paperroom -ffile-prefix-map=$CARGO_TARGET_DIR=/target -ffile-prefix-map=$CARGO_HOME=/cargo -g0"
     cargo "+$rust_toolchain" rustc --offline --locked --release --target "$target" --bin paperroom \
-        -- -C "link-arg=-Wl,-Map,$work/$label/final.map"
+        -- -C link-arg=-Wl,--no-insert-timestamp -C link-arg=-static-libgcc -C link-arg=-Wl,-Map,final.map
+    mv -- final.map "$work/$label/final.map"
 )
 build proof_a > "$work/proof_a/build.log" 2>&1 &
 first=$!
@@ -89,7 +89,10 @@ fi
 artifact="out/$target/release/paperroom.exe"
 exe="$work/proof_a/$artifact"
 rebuild="$work/different_source_b/$artifact"
-cmp -- "$exe" "$rebuild"
+if ! cmp -- "$exe" "$rebuild"; then
+    python3 -B "$repo/scripts/package-windows-gnu-audit.py" compare "$exe" "$rebuild"
+    exit 1
+fi
 exe_sha="$(sha256sum "$exe" | cut -d ' ' -f 1)"
 printf 'Both independent builds: %s\n' "$exe_sha"
 cargo "+$rust_toolchain" metadata --offline --locked --filter-platform "$target" --format-version 1 \

@@ -195,6 +195,12 @@ def verify(path, commit, exe_sha, zip_sha):
         names = archive.namelist()
         if len(names) > 1024 or len(names) != len(set(names)) or sum(i.file_size for i in archive.infolist()) > 64 << 20:
             raise ValueError("Invalid ZIP inventory")
+        if len(names) != len({n.casefold() for n in names}) or any(
+            not re.fullmatch(r"[a-zA-Z0-9_.+/-]+", n, re.ASCII)
+            or any(part in {"", ".", ".."} or part.endswith(".") for part in n.split("/"))
+            for n in names
+        ):
+            raise ValueError("The package contains an unsafe or ambiguous path")
         if any(re.search(r"(?i)\.(?:dll|lib|pdb|a|deb)$", n) for n in names):
             raise ValueError("The package contains a raw toolchain or runtime file")
         if archive.testzip() is not None:
@@ -211,6 +217,31 @@ def verify(path, commit, exe_sha, zip_sha):
     print(f"Verified GNU ZIP readback, including all {len(names)} members.")
 
 
+def describe_difference(first, second):
+    def layout(path):
+        binary = path.read_bytes()
+        pe_start = struct.unpack_from("<I", binary, 0x3C)[0]
+        count = struct.unpack_from("<H", binary, pe_start + 6)[0]
+        optional_size = struct.unpack_from("<H", binary, pe_start + 20)[0]
+        optional = pe_start + 24
+        sections = optional + optional_size
+        result = {}
+        for at in range(sections, sections + 40 * count, 40):
+            name = binary[at:at+8].split(b"\0", 1)[0].decode("ascii")
+            size, start = struct.unpack_from("<II", binary, at + 16)
+            result[name] = (size, start, digest(binary[start:start+size]))
+        return binary, sections + 40 * count, result
+
+    a, a_header, a_sections = layout(first)
+    b, b_header, b_sections = layout(second)
+    differences = [(name, a_sections.get(name, ())[:2], b_sections.get(name, ())[:2])
+                   for name in sorted(a_sections.keys() | b_sections.keys())
+                   if a_sections.get(name) != b_sections.get(name)]
+    print(f"PE sizes {len(a)} / {len(b)}, header lengths {a_header} / {b_header}")
+    print(f"Different header byte offsets: {[i for i, (x, y) in enumerate(zip(a[:a_header], b[:b_header])) if x != y][:48]}")
+    print(f"Sections with size, offset or content differences: {differences}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     jobs = parser.add_subparsers(dest="mode", required=True)
@@ -219,6 +250,9 @@ def main():
     b.add_argument("--sysroot", type=Path, required=True)
     b.add_argument("--output", type=Path, required=True)
     b.add_argument("--commit", required=True)
+    d = jobs.add_parser("compare")
+    d.add_argument("first", type=Path)
+    d.add_argument("second", type=Path)
     v = jobs.add_parser("verify")
     v.add_argument("--package", type=Path, required=True)
     v.add_argument("--commit", required=True)
@@ -227,6 +261,8 @@ def main():
     a = parser.parse_args()
     if a.mode == "build":
         build(a.work, a.sysroot, a.commit, a.output)
+    elif a.mode == "compare":
+        describe_difference(a.first, a.second)
     else:
         verify(a.package, a.commit, a.exe_sha256, a.zip_sha256)
 

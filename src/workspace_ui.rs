@@ -273,21 +273,32 @@ impl App {
         }
     }
 
-    pub(super) unsafe fn import_local_canvas_ui(&mut self) -> Result<()> {
+    pub(super) unsafe fn import_local_canvas_ui(&mut self, use_vault_root: bool) -> Result<()> {
         unsafe {
-            let Some(path) = file_dialog(self.hwnd, "JSON Canvas\0*.canvas\0\0", "canvas", None)? else {
-                return Ok(());
+            use crate::store::canvas_bundle::LocalCanvasBundle;
+
+            let vault = if use_vault_root {
+                let Some(folder) = folder_dialog(self.hwnd)? else { return Ok(()); };
+                Some(folder)
+            } else { None };
+            let Some(path) = file_dialog_in(
+                self.hwnd, "JSON Canvas\0*.canvas\0\0", "canvas", None, vault.as_deref(),
+            )? else { return Ok(()); };
+            let (preview, caption, status) = if let Some(vault) = vault {
+                (LocalCanvasBundle::read_vault(&path, &vault)?,
+                 "預覽 Obsidian Vault Canvas", "已從 Obsidian Vault 匯入 Canvas 與附件。")
+            } else {
+                (LocalCanvasBundle::read(&path)?,
+                 "預覽 Canvas 與同資料夾附件", "已匯入 Canvas 與同資料夾附件。")
             };
-            let preview = crate::store::canvas_bundle::LocalCanvasBundle::read(&path)?;
             if !crate::dialog::preview_decision(
-                self.hwnd, "預覽 Canvas 與同資料夾附件", &preview.description(),
-                "確認匯入", "取消匯入",
+                self.hwnd, caption, &preview.description(), "確認匯入", "取消匯入",
             )? { return Ok(()); }
             self.mutate(|app| {
                 let (id, title) = preview.save(&app.notebook)?;
                 let doc = app.notebook.read_canvas(id)?;
                 app.activate_canvas(id, title, doc, None)?;
-                label(app.widgets.status, "已匯入 Canvas 與同資料夾附件。");
+                label(app.widgets.status, status);
                 Ok(())
             });
             Ok(())

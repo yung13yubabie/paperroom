@@ -320,7 +320,9 @@ impl Notebook {
         raw_tag: &str,
         mode: TagMatch,
     ) -> Result<Vec<(i64, String)>> {
-        let folder = folder.trim().trim_end_matches('/');
+        // Keep the blank request as whole-Vault search, but never rewrite a
+        // nonblank path to select a similarly named imported folder.
+        let folder = if folder.trim().is_empty() { "" } else { folder.trim_end_matches('/') };
         let alias = alias.trim();
         if [folder, alias].iter().any(|s| s.len() > MAX_FILTER || s.chars().any(char::is_control))
             || folder.contains(['\\', ':'])
@@ -672,4 +674,59 @@ mod tests {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod exact_folder_scope_tests {
+    use super::*;
+    use std::{fs, io::Read};
+
+    #[test]
+    fn fullwidth_space_distinguishes_scoped_chinese_folders_after_reopen() -> Result<()> {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let scratch = Scratch(super::super::tests::data_dir());
+        let vault = scratch.0.join("研究來源");
+        let make = |title| format!("---\naliases: [構圖]\n---\n# 同名\n{title}");
+        let active = [("研究", "主要"), ("取景", "同名異處")];
+        let omitted = "　研究";
+        let sources = [active[0], active[1], (omitted, "已略過")];
+        for (folder, expected) in sources {
+            fs::create_dir_all(vault.join(folder))?;
+            fs::write(vault.join(folder).join("構圖.md"), make(expected))?;
+        }
+        let path = scratch.0.join("工作區.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let scanned = crate::vault::read(&vault)?;
+        assert_eq!(scanned.incompatible, 1);
+        let root = db.import_vault("研究", scanned.pages)?;
+        let other = db.import_vault("研究", crate::vault::read(&vault)?.pages)?;
+        drop(db);
+        let db = Notebook::open(&path, false)?;
+        assert!(db.search_vault_sources(root, omitted, "構圖", "", TagMatch::Exact)?.is_empty(),
+            "omitted source folder must not redirect to a sibling");
+        let blank = db.search_vault_sources(root, "", "構圖", "", TagMatch::Exact)?;
+        assert_eq!(blank.len(), 2);
+        assert_eq!(db.search_vault_sources(root, "　 ", "構圖", "", TagMatch::Exact)?, blank);
+        for (folder, expected) in active {
+            let hits = db.search_vault_sources(root, folder, "構圖", "", TagMatch::Exact)?;
+            assert_eq!(hits.len(), 1);
+            let destination = format!("{folder}/構圖.md");
+            assert_eq!(hits[0].1, destination, "folder scope must be exact");
+            assert_eq!(db.note(hits[0].0)?.unwrap().body, make(expected));
+            assert!(!db.vault_search_hit(other, hits[0].0, &destination)?);
+        }
+        let path = scratch.0.join("匯出.zip");
+        assert_eq!(db.export_vault_markdown(root, &path)?, 2);
+        let mut zip = zip::ZipArchive::new(fs::File::open(path)?)?;
+        assert!(zip.by_name(&format!("{omitted}/構圖.md")).is_err());
+        for (folder, expected) in active {
+            let mut actual = Vec::new();
+            zip.by_name(&format!("{folder}/構圖.md"))?.read_to_end(&mut actual)?;
+            assert_eq!(actual, make(expected).as_bytes());
+        }
+        Ok(())
+    }
 }

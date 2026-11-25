@@ -2843,7 +2843,7 @@ mod tests {
             assert_eq!(GetDlgItem(host, i32::from(BODY)), widgets.body);
             assert_eq!(GetDlgCtrlID(widgets.body), i32::from(BODY));
             let mut owner_pid = 0;
-            assert_ne!(GetWindowThreadProcessId(widgets.body, &raw mut owner_pid), 0);
+            assert_ne!(GetWindowThreadProcessId(widgets.body, std::ptr::from_mut(&mut owner_pid)), 0);
             assert_eq!(owner_pid, std::process::id());
             assert!(load_editor_text(widgets.body, &projected));
             assert_eq!(read_text(widgets.body).unwrap(), projected);
@@ -2854,7 +2854,8 @@ mod tests {
             SendMessageW(widgets.body, EM_SETSEL, start, end as isize);
             let (mut found_start, mut found_end) = (u32::MAX, u32::MAX);
             SendMessageW(widgets.body, EM_GETSEL,
-                (&raw mut found_start) as usize, (&raw mut found_end) as isize);
+                std::ptr::from_mut(&mut found_start) as usize,
+                std::ptr::from_mut(&mut found_end) as isize);
             assert_eq!((found_start as usize, found_end as usize), (start, end));
 
             SendMessageW(widgets.body, EM_REPLACESEL, 1, wide("〔📝〕").as_ptr() as isize);

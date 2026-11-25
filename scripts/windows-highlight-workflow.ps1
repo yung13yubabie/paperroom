@@ -911,16 +911,17 @@ function Open-WorkspaceSearch([switch]$Menu) {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','全域搜尋筆記',1)
     }
 }
-function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$Value) {
+function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
     $edit = Control $Dialog $FieldId
     $point = [PaperroomHighlightGui]::FilenamePoint($Dialog,$process.Id,$edit)
     [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
     $null = Wait-For "workspace search field $FieldId focus" {
         [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$Dialog,$edit)
     }
-    [PaperroomHighlightGui]::TypeFilename($window,$process.Id,$Dialog,$edit,$Value)
+    [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+    [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$ExactText)
     $null = Wait-For "exact workspace search filter $FieldId" {
-        [PaperroomHighlightGui]::Read($edit) -ceq $Value
+        [PaperroomHighlightGui]::Read($edit) -ceq $ExactText
     }
 }
 function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {

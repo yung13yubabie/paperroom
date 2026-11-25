@@ -17,6 +17,15 @@ function New-NativeReviewView([string]$Name, [int]$Operator, [string]$Label, [st
     Choose-CollectionRow "收合 「$Fold」"
 }
 
+function Open-JointShared([string]$Status) {
+    Native-Menu 120 3 '開啟資料列…'
+    Choose-CollectionRow "$Status　Shared  ("
+    $null = Wait-For 'original Shared collection row opened' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'Shared' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟集合資料列'
+    }
+}
+
 function Export-JointClip([string]$Path, [string]$ExpectedHash) {
     Native-Menu 113 8 '附件與 PDF 摘錄…'
     Native-Menu 113 2 '管理附件…' -MenuOpen
@@ -153,7 +162,8 @@ Native-Menu 109 14 '屬性型別…'
 Native-Menu 109 1 '設定屬性型別…' -MenuOpen
 Collection-Prompt '設定工作區屬性型別' 'Due'
 Native-Menu 109 3 '日期' -MenuOpen
-Select-Note 'Shared'
+Open-ColumnsCollection 1 'A-Review'
+Open-JointShared '未分類'
 Add-HistoryFile $clips[0]
 
 Open-ColumnsCollection 1 'A-Review'
@@ -164,7 +174,7 @@ New-NativeReviewView 'B-Timing' 15 '明天' @('Memo','Due') 'Side'
 Assert-GroupRows @('Shared','Cover')
 $records.baseline = Read-JointReviewState $jointReviewDb 'baseline' $due
 
-Select-Note 'Shared'
+Open-JointShared '待處理'
 Native-Menu 113 4 '設定文字屬性…'
 Rule-Prompt '文字屬性' '' 'Due'
 Rule-Prompt '設定文字屬性' $due $later
@@ -183,7 +193,8 @@ Open-ColumnsCollection 2 'B-Review'
 Open-SortNamedView 1 'B-Timing'
 Assert-GroupRows @('Cover')
 
-Select-Note 'Shared'
+Open-ColumnsCollection 2 'B-Review'
+Open-JointShared '待處理'
 $revision = Open-Revision 3
 $preview = [PaperroomHighlightGui]::Read((Control $revision 101))
 if (!$preview.Contains("Due = $due") -or !$preview.Contains("Clip.txt　4 位元組　#$($records.baseline.current_attachment_id)")) {
@@ -248,7 +259,7 @@ Choose-CollectionRow '收合 「Hidden」'
 Open-ColumnsCollection 2 'B-Review'
 Open-SortNamedView 1 'B-Timing'
 Assert-GroupRows @('Shared','Cover')
-Select-Note 'Shared'
+Open-JointShared '待處理'
 Export-JointClip (Join-Path $root 'joint-export-isolated.txt') $originalDigest
 $records.refolded = Read-JointReviewState $jointReviewCopyDb 'isolated' $due
 Close-Notebook $process

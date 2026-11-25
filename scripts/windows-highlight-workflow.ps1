@@ -718,8 +718,13 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
             })
         }
         $null = Wait-For "$Caption completed" {
-            ![PaperroomHighlightGui]::IsWindowVisible($dialog) -and
+            if ([PaperroomHighlightGui]::IsWindowVisible($dialog)) { return $false }
+            try {
                 [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith($Status, [StringComparison]::Ordinal)
+            } catch {
+                if (!$_.Exception.Message.Contains('Native text missing or truncated.')) { throw }
+                return $false
+            }
         }
         if ($saving -and !(Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw 'The application reported success without the exact requested output file.'

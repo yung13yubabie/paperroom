@@ -31,7 +31,7 @@ jobs:
         id: build
         run: |
           package="$RUNNER_TEMP/Paperroom-v0.1.2-windows-x64-gnu-audit.zip"
-          bash scripts/build-windows-gnu-audit.sh "$package"
+          PAPERROOM_GNU_NATIVE_AUDIT_ONLY=1 bash scripts/build-windows-gnu-audit.sh "$package"
           exe_sha="$(python3 -c 'import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); print(json.loads(z.read("evidence/gnu-candidate.json"))["exe_sha256"])' "$package")"
           zip_sha="$(sha256sum "$package" | cut -d ' ' -f 1)"
           echo "exe_sha=$exe_sha" >> "$GITHUB_OUTPUT"

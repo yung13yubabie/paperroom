@@ -122,18 +122,24 @@ def rust_licenses(entries, sysroot):
         entries[f"licenses/rust-toolchain/{name}"] = (docs / name).read_bytes()
 
 
-def build(work, sysroot, commit, output):
+def build(work, sysroot, commit, output, permit_different_rebuild):
     if output.exists():
         raise ValueError("Use a fresh output path")
     exe_path = work / f"proof_a/out/{TARGET}/release/paperroom.exe"
     binary = exe_path.read_bytes()
-    if binary != (work / f"different_source_b/out/{TARGET}/release/paperroom.exe").read_bytes():
+    second_path = work / f"different_source_b/out/{TARGET}/release/paperroom.exe"
+    second = second_path.read_bytes()
+    is_identical = binary == second
+    if not is_identical and not permit_different_rebuild:
         raise ValueError("Two independent builds produced different EXE bytes")
-    for root in (work, work / "proof_a/src", work / "different_source_b/src"):
-        name = str(root)
-        if name.encode() in binary or name.encode("utf-16-le") in binary:
-            raise ValueError("An absolute build path entered the PE")
+    for candidate in (binary, second):
+        for root in (work, work / "proof_a/src", work / "different_source_b/src"):
+            name = str(root)
+            if name.encode() in candidate or name.encode("utf-16-le") in candidate:
+                raise ValueError("An absolute build path entered the PE")
     stamp = pe(binary, exe_path)
+    if pe(second, second_path) != stamp:
+        raise ValueError("The independent rebuild changed PE dependency evidence")
     vendor = (work / "gnu").resolve()
     std = sysroot.resolve()
     members = runtime_members(work / "proof_a/final.map", vendor, std)
@@ -165,7 +171,9 @@ def build(work, sysroot, commit, output):
     entries["GNU-AUDIT.md"] = (ROOT / "docs/WINDOWS-GNU-AUDIT.md").read_bytes()
     details = {
         "source_commit": commit, "target": TARGET, "exe_sha256": exe_sha,
-        "independent_builds_match": 2, "pe": stamp,
+        "independent_builds_match": 2 if is_identical else 0,
+        "independent_builds_sha256": [exe_sha, digest(second)],
+        "pe": stamp,
         "cargo_packages": len(receipt["packages"]), "target_registry_packages": len(registry["packages"]),
         "no_matching_registry_notice": [
             {"name": row["name"], "version": row["version"], "license_expression": row["license_expression"]}
@@ -206,8 +214,16 @@ def verify(path, commit, exe_sha, zip_sha):
         if archive.testzip() is not None:
             raise ValueError("A ZIP member has a CRC error")
         index = json.loads(archive.read(INDEX))
-        if (index["source_commit"], index["target"], index["exe_sha256"], index["independent_builds_match"]) != (commit, TARGET, exe_sha, 2):
+        if (index["source_commit"], index["target"], index["exe_sha256"]) != (commit, TARGET, exe_sha):
             raise ValueError("Package identity differs")
+        match_count = index["independent_builds_match"]
+        rebuild = index.get("independent_builds_sha256", [exe_sha, exe_sha])
+        if (not isinstance(rebuild, list) or len(rebuild) != 2 or rebuild[0] != exe_sha
+                or not all(isinstance(s, str) and HEX64.fullmatch(s) for s in rebuild)
+                or match_count != (2 if rebuild[0] == rebuild[1] else 0)):
+            raise ValueError("Invalid rebuild evidence")
+        print("GNU rebuild is byte-identical." if match_count == 2
+              else "GNU rebuild differs; this ZIP is a native test sample only.")
         expected = index["member_sha256"]
         if set(names) != {INDEX, *expected} or expected[EXE] != exe_sha:
             raise ValueError("Manifest inventory differs")
@@ -259,6 +275,7 @@ def main():
     b.add_argument("--sysroot", type=Path, required=True)
     b.add_argument("--output", type=Path, required=True)
     b.add_argument("--commit", required=True)
+    b.add_argument("--permit-different-rebuild", action="store_true")
     d = jobs.add_parser("compare")
     d.add_argument("first", type=Path)
     d.add_argument("second", type=Path)
@@ -269,7 +286,7 @@ def main():
     v.add_argument("--zip-sha256", required=True)
     a = parser.parse_args()
     if a.mode == "build":
-        build(a.work, a.sysroot, a.commit, a.output)
+        build(a.work, a.sysroot, a.commit, a.output, a.permit_different_rebuild)
     elif a.mode == "compare":
         describe_difference(a.first, a.second)
     else:

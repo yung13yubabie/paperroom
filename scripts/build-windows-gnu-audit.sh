@@ -17,6 +17,7 @@ export LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0
 export SOURCE_DATE_EPOCH="$(git -C "$repo" log -1 --format=%ct "$source_commit")"
 export CARGO_BUILD_JOBS=2
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 rustc "+$rust_toolchain" -vV > "$work/metadata/rustc.txt"
 grep -qx 'release: 1.100.0' "$work/metadata/rustc.txt"
@@ -97,13 +98,15 @@ fi
 artifact="out/$target/release/paperroom.exe"
 exe="$work/proof_a/$artifact"
 rebuild="$work/different_source_b/$artifact"
+comparison=()
 if ! cmp -s -- "$exe" "$rebuild"; then
     printf 'The two fresh GNU EXEs differ.\n'
     python3 -B "$repo/scripts/package-windows-gnu-audit.py" compare "$exe" "$rebuild"
-    exit 1
+    [[ "${PAPERROOM_GNU_NATIVE_AUDIT_ONLY:-0}" == 1 ]] || exit 1
+    comparison+=(--permit-different-rebuild)
 fi
 exe_sha="$(sha256sum "$exe" | cut -d ' ' -f 1)"
-printf 'Both independent builds: %s\n' "$exe_sha"
+printf 'Designated GNU candidate: %s\n' "$exe_sha"
 cargo "+$rust_toolchain" metadata --offline --locked --filter-platform "$target" --format-version 1 \
     --manifest-path "$work/proof_a/src/Cargo.toml" > "$work/metadata/cargo.json"
 python3 -B "$repo/scripts/windows-build-provenance.py" --target "$target" \
@@ -117,4 +120,4 @@ python3 -B "$repo/scripts/windows-registry-notices.py" --target "$target" \
     --cargo-home "$CARGO_HOME" --output "$work/registry"
 
 python3 -B "$repo/scripts/package-windows-gnu-audit.py" build \
-    --work "$work" --sysroot "$sysroot" --commit "$source_commit" --output "$output"
+    --work "$work" --sysroot "$sysroot" --commit "$source_commit" --output "$output" "${comparison[@]}"

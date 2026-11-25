@@ -1571,7 +1571,14 @@ print('Reopened SQLite preserves the two original imports and the independent re
         throw 'The Markdown heading preview did not show the expected same-name source.'
     }
     Finish-Revision $dialog 1
-    Assert-SearchSelection 104 '# 細節' '標題連結：第 1 行，細節'
+    $headingEditor = Control $window 104
+    $null = Wait-For 'Markdown heading source selection after closing preview' {
+        $span = [PaperroomHighlightGui]::Send($headingEditor,0x00B0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64()
+        [PaperroomHighlightGui]::IsWindowVisible($headingEditor) -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '標題連結：第 1 行，細節' -and
+        ($span -band 0xffff) -eq 0 -and ($span -shr 16) -eq '# 細節'.Length
+    }
+    Write-Host 'Verified the Markdown heading excerpt and exact source selection.'
     Native-Menu 120 2 '反向連結　LinkSender　｜ 現場/LinkSender.md' -CaptionPrefix
     $null = Wait-For 'returned from heading to backlink source' {
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'LinkSender'

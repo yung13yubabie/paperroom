@@ -1595,11 +1595,18 @@ print('Reopened SQLite preserves the two original imports and the independent re
     Type-SearchFilter $dialog 101 'ReviewA'
     Type-SearchFilter $dialog 103 '場'
     Search-Workspace $dialog '找到 1 筆筆記。' 1
-    Finish-Revision $dialog 2
+    Finish-Revision $dialog 111
     $null = Wait-For 'opened the imported source note after restart' {
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewA'
     }
     Native-Menu 120 2 '前往　相對頁' -CaptionPrefix
+    $heading = Wait-For 'native relative heading preview' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#review',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $heading 101)).Contains('場內的精確內容')) {
+        throw 'The relative heading preview opened the wrong same-name note.'
+    }
+    Finish-Revision $heading 1
     $null = Wait-For 'relative link opened the exact target by body, not title alone' {
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewB' -and
         ([PaperroomHighlightGui]::Read((Control $window 104))).Contains('場內的精確內容') -and

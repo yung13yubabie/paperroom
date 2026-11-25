@@ -611,6 +611,9 @@ impl App {
                 if origin.is_some() {
                     options.push((9, "查看匯入來源路徑"));
                 }
+                if crate::store::notion_handoff::is_notion_csv(&file.name, origin.as_deref()) {
+                    options.push((10, "從 Notion CSV 建立新集合…"));
+                }
                 let action = popup(hwnd, anchor, None, &options);
                 match action {
                     1 => {
@@ -677,6 +680,16 @@ impl App {
                     }
                     7 => self.open_pdf_view(file.id, 1)?,
                     8 => self.jump_pdf_annotation(file.id, anchor)?,
+                    10 => {
+                        let Some(title) = crate::dialog::prompt(
+                            hwnd, "從 Notion CSV 建立新集合",
+                            "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）", "", 120,
+                        )? else { return Ok(()); };
+                        let (id, count) = self.notebook.create_collection_from_notion_csv(note, file.id, &title)?;
+                        self.rebuild();
+                        self.open_kanban(id, title.trim().to_owned())?;
+                        label(self.widgets.status, &format!("已建立集合，匯入 {count} 列。原始 CSV 已保留。"));
+                    }
                     9 => {
                         if let Some(path) = origin {
                             crate::dialog::show_text(hwnd, "匯入時的相對附件路徑", &path)?;

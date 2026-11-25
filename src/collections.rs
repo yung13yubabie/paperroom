@@ -28,7 +28,7 @@ CREATE TABLE note_relations (
 CREATE INDEX note_relations_target ON note_relations(target_id,source_id);
 ";
 const MAX_NAME: usize = 256;
-const MAX_ITEMS: i64 = 1000;
+pub(super) const MAX_ITEMS: i64 = 1000;
 const MAX_COLLECTIONS: i64 = 128;
 const MAX_RELATIONS: i64 = 1000;
 
@@ -113,14 +113,18 @@ fn require_inspected_link(
     Ok(())
 }
 
+pub(super) fn insert_collection(tx: &Transaction<'_>, name: &str) -> Result<i64> {
+    let name = checked_label(name)?;
+    let count: i64 = tx.query_row("SELECT count(*) FROM collections", [], |r| r.get(0))?;
+    if count >= MAX_COLLECTIONS { return Err("集合已達 128 個上限。".into()); }
+    tx.execute("INSERT INTO collections(name) VALUES(?1)", [name])?;
+    Ok(tx.last_insert_rowid())
+}
+
 impl Notebook {
     pub fn create_collection(&self, name: &str) -> Result<i64> {
-        let name = checked_label(name)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let count: i64 = tx.query_row("SELECT count(*) FROM collections", [], |r| r.get(0))?;
-        if count >= MAX_COLLECTIONS { return Err("集合已達 128 個上限。".into()); }
-        tx.execute("INSERT INTO collections(name) VALUES(?1)", [name])?;
-        let id = tx.last_insert_rowid();
+        let id = insert_collection(&tx, name)?;
         tx.commit()?;
         Ok(id)
     }

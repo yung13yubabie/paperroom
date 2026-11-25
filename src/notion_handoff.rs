@@ -1,7 +1,7 @@
 //! Preserve original Notion database CSV exports alongside imported Markdown.
 use super::attachments::{MAX_FILE_BYTES, MAX_STORAGE_BYTES};
-use super::{Result, clean_title, insert};
-use rusqlite::{Transaction, params};
+use super::{Notebook, Result, clean_title, insert};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write;
@@ -11,7 +11,7 @@ const MAX_TOTAL_CSV_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_DEPTH: usize = 64;
 const FOLDER: &str = "Notion 原始 CSV";
-const SCOPE: &str = "CSV 附件保留匯出檔內的原始位元組。Notion 關聯欄位沿用 CSV 中的原文字串或網址。若要將某份 CSV 另建為文字欄位表格，先另存副本，再使用「匯入 CSV 表格」。";
+const SCOPE: &str = "CSV 附件保留匯出檔的原始位元組。打開來源筆記，從「管理附件」可直接將選取的 CSV 建成新集合。CSV 的欄值保留為文字，公式與關聯不會重建。Markdown 連結保留原路徑；報告中的檔案匹配不代表可在紙間跳轉。";
 
 #[derive(Default)]
 pub(crate) struct CsvSources {
@@ -58,6 +58,60 @@ fn abbreviated(text: &str, limit: usize) -> String {
         short.push('…');
     }
     short
+}
+
+pub(crate) fn is_notion_csv(name: &str, source: Option<&str>) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("csv"))
+        && source.is_some_and(|origin| origin.starts_with("外層 ZIP／") || origin.starts_with("內嵌 ZIP／"))
+}
+
+impl Notebook {
+    pub(crate) fn create_collection_from_notion_csv(
+        &mut self, source_note: i64, attachment: i64, name: &str,
+    ) -> Result<(i64, usize)> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = tx.query_row(
+            "SELECT a.name,o.relative_path,a.content FROM attachments a
+             JOIN attachment_origins o ON o.attachment_id=a.id
+             JOIN notes n ON n.id=a.note_id
+             WHERE a.id=?1 AND a.note_id=?2 AND a.kind='text'
+               AND n.trash_root IS NULL AND length(a.content) BETWEEN 1 AND ?3",
+            params![attachment, source_note, MAX_FILE_BYTES as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
+        ).optional()?;
+        let (filename, origin, bytes) = source.ok_or("找不到使用中的 Notion CSV 原檔。")?;
+        if !is_notion_csv(&filename, Some(&origin)) {
+            return Err("此附件沒有可辨認的 Notion CSV 來源。".into());
+        }
+        let rows = super::csv_table::parse_csv(&bytes)?;
+        let count = rows.len() - 1;
+        if count > super::collections::MAX_ITEMS as usize {
+            return Err("每個集合最多 1000 列。原始 CSV 仍可另存。".into());
+        }
+        for header in &rows[0] {
+            if super::typed_properties::lookup(&tx, header)?.is_some() {
+                return Err(format!("「{header}」已在工作區宣告為非文字屬性。原始 CSV 已保留。").into());
+            }
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collections WHERE name=?1)", [name.trim()], |row| row.get(0),
+        )?;
+        if exists {
+            return Err("已有同名集合。請使用其他名稱，現有集合與原始 CSV 均已保留。".into());
+        }
+        let collection = super::collections::insert_collection(&tx, name)?;
+        let folder = insert(&tx, Some(source_note), name, "由上層筆記的原始 Notion CSV 建立的可編輯資料列。")?;
+        let mut member = tx.prepare_cached(
+            "INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'未分類')",
+        )?;
+        for row in &rows[1..] {
+            let note = super::csv_table::insert_row(&tx, folder, &rows[0], row)?;
+            member.execute(params![collection, note])?;
+        }
+        drop(member);
+        tx.commit()?;
+        Ok((collection, count))
+    }
 }
 
 impl CsvSources {
@@ -186,6 +240,76 @@ mod tests {
     const FIRST: &str = "\u{feff}名稱,關聯,備註\r\n鏡頭,https://example.invalid/notion/09ed986604d54ef2810781f6bc3403ec,\"第一行\r\n第二行有,\"\"引號\"\"\"\r\n";
     const SECOND: &str = "名稱,關聯\r\n不同部件,https://example.invalid/other\r\n";
     const OUTER: &str = "名稱,關聯\r\n外層同名,https://example.invalid/root\r\n";
+
+    #[test]
+    fn saved_notion_csv_builds_editable_collection_and_keeps_source_bytes() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let archive = dir.join("test-notion.zip");
+        fs::write(&archive, zip(&[
+            (TABLE_PATH, FIRST.as_bytes()),
+            ("專案.md", b"[child](project/child.md)"),
+        ])?)?;
+        let original_zip = fs::read(&archive)?;
+        let path = dir.join("test-notion.sqlite3");
+        let mut db = Notebook::open(&path, false)?;
+        let (pages, media, sources) = notion_archive_with_media(&archive)?;
+        let root = db.import_notion_with_media("匯入", pages.pages, media, sources)?;
+        let note = db.rows(View::All, "")?.into_iter().find(|r| r.title.ends_with("_all.csv")).unwrap();
+        let attachment = db.list_attachments(note.id)?[0].id;
+        let (collection, count) = db.create_collection_from_notion_csv(note.id, attachment, "書目集合")?;
+        assert_eq!(count, 1);
+        let members = db.collection_rows(collection)?;
+        assert_eq!(members.len(), 1);
+        let row = &members[0].0;
+        let fields = db.properties(row.id)?;
+        assert!(fields.iter().any(|(key, value)| key == "備註" && value == "第一行\r\n第二行有,\"引號\""));
+        assert!(fields.iter().any(|(key, value)| key == "關聯" && value.starts_with("https://example.invalid/")));
+        let folder = db.note(row.parent.unwrap())?.unwrap();
+        assert_eq!(folder.row.parent, Some(note.id));
+        assert_ne!(folder.row.id, root);
+        assert_eq!(db.connection.query_row("SELECT count(*) FROM note_relations WHERE source_id=?1", [row.id], |r| r.get::<_, i64>(0))?, 0);
+        assert!(db.create_collection_from_notion_csv(note.id, attachment, "書目集合").is_err());
+        assert!(db.create_collection_from_notion_csv(root, attachment, "錯誤來源").is_err());
+
+        db.set_property(row.id, "備註", Some("編輯後"))?;
+        drop(db);
+        let db = Notebook::open(&path, false)?;
+        assert_eq!(db.collection_rows(collection)?.len(), 1);
+        assert_eq!(db.property_rows("備註", "編輯後")?.len(), 1);
+        let copy = dir.join("copy.csv");
+        db.save_attachment_copy(attachment, &copy)?;
+        assert_eq!(fs::read(copy)?, FIRST.as_bytes());
+        assert_eq!(fs::read(archive)?, original_zip);
+        drop(db);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn saved_notion_csv_refuses_invalid_collisions_and_rolls_back() -> Result<()> {
+        use crate::store::typed_properties::PropertyType;
+        let mut db = Notebook::open(Path::new(":memory:"), false)?;
+        let mut csv = CsvSources::default();
+        csv.capture(None, "a.csv", b"Name,Id\na,0001\nb,0002".to_vec())?;
+        csv.capture(None, "b.csv", b"Name,Id\na,0001\nb".to_vec())?;
+        db.import_notion_with_media("來源", Vec::new(), Default::default(), csv)?;
+        let inputs = db.rows(View::All, "")?.into_iter().filter(|row| row.title.ends_with(".csv"))
+            .map(|row| Ok((row.id, db.list_attachments(row.id)?[0].id)))
+            .collect::<Result<Vec<_>>>()?;
+        let before = db.rows(View::All, "")?.len();
+        db.compare_set_property_type("Id", None, Some(PropertyType::Number))?;
+        assert!(db.create_collection_from_notion_csv(inputs[0].0, inputs[0].1, "拒絕").unwrap_err().to_string().contains("非文字"));
+        db.compare_set_property_type("Id", Some(PropertyType::Number), None)?;
+        assert!(db.create_collection_from_notion_csv(inputs[1].0, inputs[1].1, "拒絕").unwrap_err().to_string().contains("欄位數"));
+        db.connection.execute_batch("CREATE TEMP TRIGGER reject_csv_member BEFORE INSERT ON collection_notes
+            WHEN (SELECT title FROM notes WHERE id=NEW.note_id)='b'
+            BEGIN SELECT RAISE(ABORT,'test membership failure'); END;")?;
+        assert!(db.create_collection_from_notion_csv(inputs[0].0, inputs[0].1, "拒絕").is_err());
+        assert!(db.collections()?.is_empty());
+        assert_eq!(db.rows(View::All, "")?.len(), before);
+        assert_eq!(db.list_attachments(inputs[0].0)?[0].id, inputs[0].1);
+        Ok(())
+    }
 
     #[test]
     fn notion_csv_handoff_keeps_namespaces_relative_media_and_exact_saved_bytes() -> Result<()> {

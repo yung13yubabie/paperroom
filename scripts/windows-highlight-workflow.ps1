@@ -970,7 +970,7 @@ function Open-SortCollection {
 function Open-SortNamedView([int]$Index, [string]$Name) {
     Native-Menu 120 11 '集合檢視…'
     Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
-    Native-Menu 120 $Index "$Name（表格）" -MenuOpen
+    Native-Menu 120 $Index "${Name}（表格）" -MenuOpen
 }
 function Assert-RankedRows([string[]]$Expected) {
     Native-Menu 120 3 '開啟資料列…'
@@ -981,9 +981,10 @@ function Assert-RankedRows([string[]]$Expected) {
             throw "Wrong order in the actual row picker: $($labels -join ' | ')."
         }
     }
-    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
-    $null = Wait-For 'close the row picker without editing' {
-        !( [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0) )
+    Native-Menu 120 1 "待處理　$($Expected[0])  (" -MenuOpen -CaptionPrefix
+    $null = Wait-For 'the first ranked row opens its original note' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq $Expected[0] -and
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟集合資料列'
     }
     Write-Host "Observed ordered collection rows through the actual menu: $($Expected -join ', ')."
 }
@@ -1648,6 +1649,8 @@ Lookup-Low,2
     Set-SortColumn 'rollup'
     Native-Menu 120 5 '儲存變更' -MenuOpen
     Assert-RankedRows @('Rank-B','Rank-A','Rank-Zero','Rank-Bad','Rank-Empty')
+    Open-SortCollection
+    Open-SortNamedView 1 'Ranked'
     Native-Menu 120 11 '集合檢視…'
     Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
     Native-Menu 120 9 '查看衍生欄位的篩選或排序錯誤…' -MenuOpen

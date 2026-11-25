@@ -1,7 +1,7 @@
 name: Verify pinned draft Windows candidate
 on:
   push:
-    branches: ['dev/offline-workspace-handoff']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/collection-derived-sort']
     paths:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   acceptance:
-    if: github.repository == 'yung13yubabie/paperroom'
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/offline-workspace-handoff'
     runs-on: windows-2022
     timeout-minutes: 18
     defaults:
@@ -153,9 +153,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: c08ff78daefae72f93fd09e421b0f3e616e1d230
-      PINNED_EXE_SHA: ae33a30d36ee2ef62c5197ecd13482cc5b6a88ea193e0c3ff525c4cf29c13d22
-      PINNED_ZIP_SHA: cce012ff858427540fe05421a54503ac3498040061dff4c43d588b4e2213ef82
+      PINNED_SOURCE: 45643593b94886ac0da80a3058fb5ad7a6f79714
+      PINNED_EXE_SHA: ed275fa6840c35846ebf00f005697c7743e8ed232e17ab62a740bca2f34c84ec
+      PINNED_ZIP_SHA: a668f64ab06d4ee594886a3cdf35ab4424542d7e7877dab3a777b0a1b8f180b6
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -180,11 +180,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15016141093"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15028288619"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45600579227 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45625728886 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'

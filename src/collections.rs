@@ -157,6 +157,7 @@ impl Notebook {
         )?;
         if !exists { return Err("找不到集合。".into()); }
         if count >= MAX_ITEMS { return Err("集合最多 1000 篇筆記，含垃圾桶中的筆記。".into()); }
+        let track_history = matches!(entry, CollectionEntry::Existing(_));
         let note = match entry {
             CollectionEntry::Existing(note) => {
                 let (active, member): (bool, bool) = tx.query_row(
@@ -172,7 +173,7 @@ impl Notebook {
         };
         tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,?3)",
                    params![collection,note,status])?;
-        apply_on_admission(&tx, collection, note, input)?;
+        apply_on_admission(&tx, collection, note, input, track_history)?;
         tx.commit()?;
         Ok(note)
     }

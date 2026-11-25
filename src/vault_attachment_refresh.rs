@@ -180,6 +180,13 @@ impl Notebook {
             return Err("更新會超過工作區附件總容量 128 MiB。".into());
         }
         {
+            let mut captured = std::collections::BTreeSet::new();
+            for copy in &local.copies {
+                let note: i64 = tx.query_row("SELECT note_id FROM attachments WHERE id=?1", [copy.id], |r| r.get(0))?;
+                if captured.insert(note) {
+                    super::super::note_history_state::checkpoint(&tx, note)?;
+                }
+            }
             let mut update = tx.prepare("UPDATE attachments SET content=?2 WHERE id=?1")?;
             for copy in &local.copies {
                 update.execute(params![copy.id, disk])?;

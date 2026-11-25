@@ -340,7 +340,7 @@ impl Notebook {
         let note = insert(&tx, None, title, &saved.body)?;
         for field in &saved.fields { write_value(&tx, note, &field.key, &field.value, true)?; }
         tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,?3)", params![collection, note, status])?;
-        super::super::collection_field_rules::apply_on_admission(&tx, collection, note, None)?;
+        super::super::collection_field_rules::apply_on_admission(&tx, collection, note, None, false)?;
         if options.resources {
             resources::apply(&tx, collection, note, &saved.resources)?;
         }

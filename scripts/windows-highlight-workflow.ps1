@@ -3056,6 +3056,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     . (Join-Path $PSScriptRoot 'windows-canvas-local-assets.ps1')
     . (Join-Path $PSScriptRoot 'windows-joint-notion-canvas.ps1')
     . (Join-Path $PSScriptRoot 'windows-canvas-vault-root.ps1')
+    . (Join-Path $PSScriptRoot 'windows-note-history-state.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

@@ -1124,6 +1124,7 @@ impl Notebook {
         if edit.kind == PropertyType::Date {
             validate_collection_field_dates(&tx, note_id, [(key, edit.value.and_then(CalendarDay::parse)), ("", None)])?;
         }
+        super::note_history_state::checkpoint(&tx, note_id)?;
         if let Some(value) = edit.value {
             write_value(&tx, note_id, key, value, previous.is_none())?;
         } else {
@@ -1214,7 +1215,9 @@ impl Notebook {
             };
             if !unchanged { updates[index] = (key, values[index]); }
         }
+        if updates.iter().all(|(key, _)| key.is_empty()) { return Ok(()); }
         validate_collection_field_dates(&tx, note_id, updates)?;
+        super::note_history_state::checkpoint(&tx, note_id)?;
         for (key, value) in updates {
             if !key.is_empty() && value.is_none() {
                 super::properties::delete_value(&tx, note_id, key)?;

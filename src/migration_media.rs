@@ -1,6 +1,6 @@
 //! Bind explicit local attachment references to source notes during a Vault import.
 use super::{Result, attachments::{MAX_FILE_BYTES, MAX_PER_NOTE, MAX_STORAGE_BYTES, file_kind, has_expected_signature}};
-use crate::{output::windows_output_name, vault::{Vault, hidden, open_entry}};
+use crate::{output::windows_output_name, vault::{MarkdownTarget, NoteLinkPaths, Vault, hidden, open_entry}};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use rusqlite::{Transaction,OptionalExtension,params};
 use std::{collections::{BTreeSet,HashMap,HashSet}, ffi::OsStr, fs::File, io::Read, path::Path};
@@ -204,7 +204,7 @@ impl MediaPlan {
     pub(crate) fn check_notes(&mut self,notes:&[(&crate::archive::ImportedPage,String)],vault:bool) {
         let paths:HashSet<_>=notes.iter().map(|(_,s)|s.as_str()).collect();
         let indexed:Vec<_>=notes.iter().enumerate().map(|(i,(_,s))|(i as i64,s.clone())).collect();
-        let wiki_index=crate::vault::WikiIndex::new(&indexed);
+        let index=NoteLinkPaths::new(&indexed);
         let mut basenames=HashMap::<&str,usize>::new();
         for path in &paths {
             let file=path.rsplit('/').next().unwrap_or(path);
@@ -225,11 +225,23 @@ impl MediaPlan {
                     if !vault || leaf.parse::<i64>().is_ok() || (!md && Path::new(leaf).extension().is_some()) {continue;}
                 } else if !md {continue;}
                 let norm=normalized(&parts,target,wiki);
-                let matched=if wiki {wiki_index.resolve(source,target).is_some()} else {norm.as_ref().is_some_and(|n|paths.contains(n.as_str()))};
+                let (matched, ambiguous) = if wiki {
+                    (index.wiki.resolve(source, target).is_some(),
+                     !target.contains('/') && basenames.get(target).copied().unwrap_or(0) > 1)
+                } else if vault {
+                    match index.markdown_resolution(&parts, target) {
+                        MarkdownTarget::Found(_) => (true, false),
+                        MarkdownTarget::Ambiguous => (false, true),
+                        MarkdownTarget::Missing => (false, false),
+                    }
+                } else {
+                    (norm.as_ref().is_some_and(|n| paths.contains(n.as_str())), false)
+                };
                 if matched {self.note_matches+=1;continue;}
                 self.note_misses+=1;
                 let why=if norm.is_none() {"無效或超出來源範圍的路徑"}
-                    else if wiki && !target.contains('/') && basenames.get(target).copied().unwrap_or(0)>1 {"多篇筆記同名"}
+                    else if ambiguous && wiki {"多篇筆記同名"}
+                    else if ambiguous {"相對於筆記與相對於 Vault 根目錄時指向不同筆記"}
                     else {"找不到可匯入的來源筆記"};
                 self.issue(source,&dest_url,"筆記",why);
             }
@@ -263,6 +275,29 @@ impl MediaPlan {
         self.files.entry(relative.to_owned()).or_insert_with(||bytes.to_vec());
         self.bytes+=bytes.len();
         Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn append_review_fingerprints(&self, summary: &mut Vec<u8>) {
+        use super::snapshot_sha256::sha256;
+
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        summary.extend_from_slice(&(files.len() as u64).to_le_bytes());
+        for (path, bytes) in files {
+            summary.extend_from_slice(&sha256(path.as_bytes()));
+            summary.extend_from_slice(&sha256(bytes));
+        }
+        let mut bindings: Vec<_> = self.bindings.iter().collect();
+        bindings.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        summary.extend_from_slice(&(bindings.len() as u64).to_le_bytes());
+        for (source, targets) in bindings {
+            summary.extend_from_slice(&sha256(source.as_bytes()));
+            summary.extend_from_slice(&(targets.len() as u64).to_le_bytes());
+            for target in targets {
+                summary.extend_from_slice(&sha256(target.as_bytes()));
+            }
+        }
     }
 
     pub(crate) fn file_count(&self)->usize {self.files.len()}

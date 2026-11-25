@@ -673,7 +673,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         [PaperroomHighlightGui]::RestoreCursor($original, $point)
     }
 }
-function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
+function Open-VaultFolderReview([string]$Folder) {
     Native-Menu 109 6 '匯入 Obsidian Markdown 資料夾…'
     $picker = Wait-For 'native Vault folder picker' {
         [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1)
@@ -687,6 +687,16 @@ function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
     $ok = Control $picker 1
     $point = [PaperroomHighlightGui]::ButtonPoint($picker, $process.Id, $ok)
     [PaperroomHighlightGui]::MouseAction($window, $process.Id, $ok, $point, 0)
+    Wait-For 'read-only Vault folder import preview' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','預覽 Vault 資料夾匯入',1)
+    }
+}
+function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
+    $review = Open-VaultFolderReview $Folder
+    if (![PaperroomHighlightGui]::Read((Control $review 101)).Contains($ReportLine)) {
+        throw 'The read-only Vault folder preview has an unexpected attachment count.'
+    }
+    Finish-Revision $review 1
     $report = Wait-For 'Vault import report' {
         [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '匯入報告', 1)
     }
@@ -695,6 +705,17 @@ function Native-VaultFolder([string]$Folder, [string]$ReportLine) {
     }
     Finish-Revision $report 1
     Write-Host "Native folder picker and import report verified: $ReportLine"
+}
+function Get-VaultReviewStamp([string]$Database) {
+    $state = @'
+from contextlib import closing
+from pathlib import Path
+import hashlib,sqlite3,sys
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    print(hashlib.sha256("\n".join(db.iterdump()).encode()).hexdigest())
+'@ | python - $Database
+    if ($LASTEXITCODE -ne 0 -or $state -notmatch '^[0-9a-f]{64}$') { throw 'Failed to read logical workspace state.' }
+    return $state
 }
 function Vault-ChoiceIndex([string]$Database, [string]$Title) {
     $number = @'
@@ -1158,7 +1179,11 @@ try {
     $stamp = Read-HistoryStamp $liveDb $title
     Replace-EditorText $historyTitle $tooLong
     $null = Wait-For 'invalid unsaved draft stayed in the editor' {
-        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗')
+        try { [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('儲存失敗') }
+        catch {
+            if (!$_.Exception.Message.Contains('Native text missing or truncated.')) { throw }
+            return $false
+        }
     }
     $preview = Open-Revision 1
     $report = [PaperroomHighlightGui]::Read((Control $preview 101))
@@ -1516,6 +1541,103 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $process.Dispose()
     $process = $null
     Write-Host 'PASS: native workspace search shortcut and menu, indexed CJK and emoji, short terms, exact folder and tag filters, context, precise source selection, invalid filter, trash exclusion after reopen, and restore.'
+    $reviewHome = Join-Path $root 'folder-review-workspace'
+    $reviewFolder = Join-Path $root 'ReviewFixture'
+    $reviewNotes = Join-Path $reviewFolder '場'
+    $reviewMedia = Join-Path $reviewFolder '素材'
+    foreach ($dir in @($reviewHome,$reviewNotes,$reviewMedia)) { [void][IO.Directory]::CreateDirectory($dir) }
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $reviewHome 'Paperroom.exe')
+    $reviewA = Join-Path $reviewNotes 'ReviewA.md'
+    $reviewB = Join-Path $reviewNotes 'ReviewB.md'
+    $otherB = Join-Path $reviewFolder 'ReviewB.md'
+    $reviewAsset = Join-Path $reviewMedia '卡.txt'
+    $enc = [Text.UTF8Encoding]::new($false)
+    $reviewMarkdown = "[相對頁](./ReviewB.md#review)" + [Environment]::NewLine + "[雙義頁](ReviewB.md#review)" +
+        [Environment]::NewLine + "[附件](../素材/卡.txt)" + [Environment]::NewLine + "[缺檔](../素材/缺.txt)"
+    [IO.File]::WriteAllText($reviewA,$reviewMarkdown,$enc)
+    [IO.File]::WriteAllText($reviewB,"# Review" + [Environment]::NewLine + "場內的精確內容",$enc)
+    [IO.File]::WriteAllText($otherB,"# Review" + [Environment]::NewLine + "根目錄同名頁",$enc)
+    [IO.File]::WriteAllText($reviewAsset,'asset one',$enc)
+    $checks = @{}
+    foreach ($file in @($reviewA,$reviewB,$otherB,$reviewAsset)) { $checks[$file]=(Get-FileHash -LiteralPath $file).Hash }
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    $reviewDb = Join-Path $reviewHome 'paperroom-data/notes.sqlite3'
+    $before = Get-VaultReviewStamp $reviewDb
+    $review = Open-VaultFolderReview $reviewFolder
+    $preview = [PaperroomHighlightGui]::Read((Control $review 101))
+    foreach ($expected in @('附件綁定 1 筆，未解析 1 筆','相符 1 筆，未解析 1 筆',
+                            '相對於筆記與相對於 Vault 根目錄時指向不同筆記','找不到可匯入的來源檔案')) {
+        if (!$preview.Contains($expected)) { throw "Expected warning '$expected' in the real preview." }
+    }
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'The preview changed persisted tables.' }
+    Finish-Revision $review 2
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'Cancel wrote to the workspace.' }
+    $review = Open-VaultFolderReview $reviewFolder
+    [IO.File]::WriteAllText($reviewAsset,'asset two',$enc)
+    Finish-Revision $review 1
+    $errorDialog = Wait-For 'changed attachment refused after consent' {
+        [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+    }
+    if (![PaperroomHighlightGui]::DialogContains($errorDialog,$process.Id,'預覽後 Vault 來源已有變更')) {
+        throw 'The changed-file error did not explain how to re-open the preview.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'changed-file alert closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
+    if ((Get-VaultReviewStamp $reviewDb) -cne $before) { throw 'A stale preview changed the workspace.' }
+    [IO.File]::WriteAllText($reviewAsset,'asset one',$enc)
+    Native-VaultFolder $reviewFolder '附件綁定 1 筆，未解析 1 筆'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $reviewHome
+    $window = $process.MainWindowHandle
+    $dialog = Open-WorkspaceSearch -Menu
+    Type-SearchFilter $dialog 101 'ReviewA'
+    Type-SearchFilter $dialog 103 '場'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'opened the imported source note after restart' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewA'
+    }
+    Native-Menu 120 2 '前往　相對頁' -CaptionPrefix
+    $heading = Wait-For 'native relative heading preview' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','#review',1)
+    }
+    if (![PaperroomHighlightGui]::Read((Control $heading 101)).Contains('場內的精確內容')) {
+        throw 'The relative heading preview opened the wrong same-name note.'
+    }
+    Finish-Revision $heading 1
+    $null = Wait-For 'relative link opened the exact target by body, not title alone' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'ReviewB' -and
+        ([PaperroomHighlightGui]::Read((Control $window 104))).Contains('場內的精確內容') -and
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('標題連結：第 1 行，Review',[StringComparison]::Ordinal)
+    }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    @'
+from contextlib import closing
+from pathlib import Path
+import sqlite3,sys
+folder=Path(sys.argv[2])
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("PRAGMA integrity_check").fetchone()==("ok",)
+    rows=db.execute("SELECT n.body,p.relative_path,p.import_root FROM notes n JOIN vault_paths p ON p.note_id=n.id").fetchall()
+    assert len(rows)==3 and len({root for _,_,root in rows})==1
+    for body,path,_ in rows:
+        assert body.encode("utf-8")== (folder/path).read_bytes(), path
+    path,data,source=db.execute("SELECT o.relative_path,a.content,p.relative_path FROM attachments a "
+                                "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id").fetchone()
+    assert path=="\u7d20\u6750/\u5361.txt" and source=="\u5834/ReviewA.md"
+    assert data== (folder/path).read_bytes()
+    assert db.execute("SELECT count(*) FROM attachments").fetchone()==(1,)
+print("Verified original Markdown paths and bytes, one fresh import root, exact attachment binding and integrity after restart.")
+'@ | python - $reviewDb $reviewFolder
+    if ($LASTEXITCODE -ne 0) { throw 'The real import failed its original-byte and SQLite checks.' }
+    foreach ($file in $checks.Keys) {
+        if ((Get-FileHash -LiteralPath $file).Hash -cne $checks[$file]) { throw 'A Vault source file was changed by the application.' }
+    }
+    Write-Host 'PASS: native read-only Vault import preview, missing attachment and ambiguous path report, cancellation and changed-file refusal without writes, successful fresh batch, exact attachment and relative-note navigation after reopening.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

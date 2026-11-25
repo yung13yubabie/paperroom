@@ -400,6 +400,18 @@ jobs:
           "PAPERROOM_EXE=$exe" >> $env:GITHUB_ENV
           Write-Host "Verified the same downloadable ZIP $env:PACKAGE_HASH and extracted EXE $env:EXE_HASH on Windows Server."
 
+      - name: Verify the public v0.1.1 upgrade with the downloaded candidate EXE
+        if: ${{ github.ref == 'refs/heads/dev/integration/pr1-8-rc-20261125' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $legacy = Join-Path $env:PAPERROOM_DOWNLOAD_ROOT 'Paperroom-v0.1.1.exe'
+          Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $legacy -TimeoutSec 45
+          $sha = '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82'
+          if ((Get-FileHash -LiteralPath $legacy -Algorithm SHA256).Hash -ine $sha) {
+            throw 'Public v0.1.1 baseline digest differs.'
+          }
+          ./scripts/windows-storage.ps1 -Exe $env:PAPERROOM_EXE -UpgradeBaseline $legacy
+
       - name: Open the actual downloaded EXE and read About
         run: ./scripts/windows-about-notices.ps1 -Exe $env:PAPERROOM_EXE -ExeSha256 $env:EXE_HASH
 

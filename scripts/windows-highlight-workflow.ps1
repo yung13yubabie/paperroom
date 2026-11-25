@@ -1139,6 +1139,97 @@ function Set-SortColumn([string]$Column) {
         Native-Menu 120 1 '升冪' -MenuOpen
     }
 }
+
+function Rule-Prompt([string]$Caption, [string]$Expected, [string]$Value, [switch]$Cancel) {
+    $dialog = Wait-For "native collection prompt $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    $edit = Control $dialog 101
+    if ([PaperroomHighlightGui]::Read($edit) -cne $Expected) {
+        throw "Unexpected initial text in collection prompt '$Caption', expected '$Expected'."
+    }
+    if ($Value -cne $Expected) {
+        try {
+            if ($Value.Length -gt 0) {
+                Type-SearchFilter $dialog 101 $Value
+            } else {
+                $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
+                [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+                $null = Wait-For "focused field $Caption" {
+                    [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)
+                }
+                [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+                [PaperroomHighlightGui]::TapKey($window,$process.Id,0x2E)
+                $null = Wait-For "cleared field $Caption" { [PaperroomHighlightGui]::Read($edit) -ceq '' }
+            }
+        } catch {
+            throw "Native test field '$Caption' contained '$([PaperroomHighlightGui]::Read($edit))' after entering '$Value'. $($_.Exception.Message)"
+        }
+    }
+    if ($Cancel) { Finish-Revision $dialog 2 } else { Finish-Revision $dialog 1 }
+}
+function Rule-Error([string]$Caption, [string]$Contains) {
+    $dialog = Wait-For "native rule rejection $Caption" {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770',$Caption,1)
+    }
+    $reason = [PaperroomHighlightGui]::Read((Control $dialog 101))
+    if (!$reason.Contains($Contains)) { throw "Unexpected rule rejection: $reason" }
+    Finish-Revision $dialog 1
+}
+function Open-RuleBoard {
+    Native-Menu 109 10 '資料集合與看板…'
+    Native-Menu 109 1 '開啟集合看板…' -MenuOpen
+    Native-Menu 109 1 'Rule Fixture' -MenuOpen
+    $null = Wait-For 'visible collection operations' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+}
+function Set-Rule([string]$Key, [string]$Default) {
+    Native-Menu 120 23 '集合欄位規則…'
+    Choose-CollectionRow "${Key}　"
+    Native-Menu 120 2 '必填' -MenuOpen
+    Rule-Prompt '欄位預設值' '' $Default
+    $null = Wait-For "rule saved for $Key" { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存集合欄位規則。' }
+}
+function Start-RuleRow([string]$Name) {
+    Native-Menu 120 22 '新增資料列…'
+    Rule-Prompt '新增資料列' '' $Name
+    Rule-Prompt '加入集合' '待處理' '待處理'
+}
+function Check-RuleRows([string]$Database, [string]$Phase) {
+    @'
+import sqlite3, sys
+from pathlib import Path
+db = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True)
+phase = sys.argv[2]
+def note(name):
+    return db.execute("SELECT id, body FROM notes WHERE title=?", (name,)).fetchall()
+def props(name):
+    return dict(db.execute("SELECT key,value FROM note_properties JOIN notes ON notes.id=note_id WHERE title=?", (name,)))
+members = dict(db.execute("SELECT title,status FROM collection_notes JOIN notes ON notes.id=note_id JOIN collections ON collections.id=collection_id WHERE name='Rule Fixture'"))
+assert len(note('Legacy')) == 1 and note('Legacy')[0][1] == 'preserved body' and props('Legacy') == {}
+assert members.pop('Legacy') == '\u5f85\u8655\u7406'
+assert not note('Cancelled')
+expected = {}
+if phase not in ('before', 'reject-new'):
+    expected['New row'] = {'A-check':'true', 'B-hours':('9' if phase in ('edited','restored','new-restored') else '7')}
+if phase in ('edited','restored','new-restored'):
+    expected['External'] = {'A-check':'true', 'B-hours':'0'}
+else:
+    assert props('External') == {'A-check':'true'}
+if phase == 'new-restored':
+    expected['Restored row'] = {'A-check':'false', 'B-hours':'0'}
+for name in ('New row', 'Restored row'):
+    assert len(note(name)) == int(name in expected), (phase,name)
+assert members == {name:'\u5f85\u8655\u7406' for name in expected}, (phase, members)
+for name, values in expected.items():
+    assert props(name) == values, (phase,name,props(name),values)
+assert note('External')[0][1] == 'keep this prior body'
+assert db.execute('PRAGMA integrity_check').fetchall() == [('ok',)]
+assert not db.execute('PRAGMA foreign_key_check').fetchall()
+print("Read-only collection checks passed:", phase)
+'@ | python - $Database $Phase
+    if ($LASTEXITCODE -ne 0) { throw "Collection state differs at $Phase." }
+}
+
 function Search-Workspace([IntPtr]$Dialog, [string]$Status, [int]$Count, [string]$Context = '') {
     $go = Control $Dialog 1
     $point = [PaperroomHighlightGui]::ButtonPoint($Dialog,$process.Id,$go)
@@ -2392,14 +2483,25 @@ print("Verified original Markdown paths and bytes, one fresh import root, exact 
     Native-Menu 109 2 '新增集合…' -MenuOpen
     Collection-Prompt '新增集合' 'IntegratedReview'
     $null = Wait-For 'integrated collection opened' { [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' }
+    Set-Rule '工時' '0'
     foreach ($pair in @(@('ReviewA','3'),@('ReviewedB','7'))) {
+        $beforeAdmission = Get-VaultReviewStamp $reviewDb
         Native-Menu 120 1 '加入筆記…'
         Choose-CollectionRow "$($pair[0])  ("
         Collection-Prompt '加入集合'
-        Native-Menu 120 18 '編輯資料列的型別欄位…'
-        Choose-CollectionRow "待處理　$($pair[0])  ("
-        Native-Menu 120 1 '工時　' -MenuOpen -CaptionPrefix
-        Collection-Prompt '工時' $pair[1]
+        if ($pair[0] -ceq 'ReviewA') {
+            Rule-Prompt '工時' '0' ''
+            Rule-Error '欄位值無效' '必填'
+            if ((Get-VaultReviewStamp $reviewDb) -cne $beforeAdmission) {
+                throw 'Rejected admission changed the source workspace.'
+            }
+            Rule-Prompt '工時' '' '3'
+        } else {
+            Rule-Prompt '工時' '0' $pair[1]
+        }
+        $null = Wait-For 'collection admission completed' {
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將筆記加入集合。'
+        }
     }
     Native-Menu 120 4 '新增公式…'
     Collection-Prompt '新增公式' '審閱順位'
@@ -2415,13 +2517,29 @@ print("Verified original Markdown paths and bytes, one fresh import root, exact 
     Set-SortColumn 'formula'
     Native-Menu 120 5 '儲存變更' -MenuOpen
     Assert-RankedRows @('ReviewedB','ReviewA')
+    Open-SortCollection 'IntegratedReview'
+    Open-SortNamedView 1 'IntegratedOrder'
+    $beforeEdit = Get-VaultReviewStamp $reviewDb
+    Native-Menu 120 18 '編輯資料列的型別欄位…'
+    Choose-CollectionRow '待處理　ReviewA  ('
+    Choose-CollectionRow '工時　'
+    Rule-Prompt '工時' '3' ''
+    Rule-Error '欄位未儲存' '必填'
+    if ((Get-VaultReviewStamp $reviewDb) -cne $beforeEdit) {
+        throw 'Rejected field edit changed the source workspace.'
+    }
+    Rule-Prompt '工時' '' '8'
+    $null = Wait-For 'corrected required property changes live sorting' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已更新資料列欄位。'
+    }
+    Assert-RankedRows @('ReviewA','ReviewedB')
     Close-Notebook $process
     $process.Dispose()
     $process = Start-Notebook $reviewHome
     $window = $process.MainWindowHandle
     Open-SortCollection 'IntegratedReview'
     Open-SortNamedView 1 'IntegratedOrder'
-    Assert-RankedRows @('ReviewedB','ReviewA')
+    Assert-RankedRows @('ReviewA','ReviewedB')
     Open-LinkedFixture 'ReviewA' '場'
     Locate-NoteOnCanvas 1 'IntegratedResearch' 1 2 2 'second' @(18,164,116)
     Open-LocationSource 'ReviewA' '相對頁'
@@ -2527,6 +2645,7 @@ with ZipFile(archive) as z, closing(sqlite3.connect(destination.as_uri() + "?mod
                       "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id").fetchall() == [(media, z.read(media), a)]
     assert db.execute("SELECT COUNT(*) FROM saved_canvases").fetchone() == (0,)
     assert db.execute("SELECT COUNT(*) FROM collection_views").fetchone() == (0,)
+    assert db.execute("SELECT COUNT(*) FROM collection_field_rules").fetchone() == (0,)
 with closing(sqlite3.connect(origin.as_uri() + "?mode=ro", uri=True)) as db:
     assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     assert db.execute("SELECT source FROM saved_canvases WHERE title='IntegratedResearch'").fetchone()[0].encode() == canvas.read_bytes()
@@ -2580,7 +2699,7 @@ print("Integrated workspace: ZIP rebinds only the stable identity, includes the 
     }
     Open-SortCollection 'IntegratedReview'
     Open-SortNamedView 1 'IntegratedOrder'
-    Assert-RankedRows @('ReviewedB','ReviewA')
+    Assert-RankedRows @('ReviewA','ReviewedB')
     Close-Notebook $process
     $process.Dispose()
     $process = $null
@@ -2612,12 +2731,13 @@ def snapshot(path):
             "JOIN note_properties p ON p.note_id=c.note_id ORDER BY c.note_id,p.key",
             "SELECT p.relative_path,o.relative_path,a.content FROM attachments a "
             "JOIN attachment_origins o ON o.attachment_id=a.id JOIN vault_paths p ON p.note_id=a.note_id",
+            "SELECT collection_id,key,required,default_value FROM collection_field_rules ORDER BY collection_id,key",
         )
         return [db.execute(query).fetchall() for query in queries]
 
 expected = snapshot(origin)
 assert snapshot(archive) == snapshot(restored) == expected
-notes, canvases, views, ranks, media = expected
+notes, canvases, views, ranks, media, field_rules = expected
 by_path = {row[2]: row for row in notes}
 a, b, decoy = (by_path[path] for path in ("\u5834/ReviewA.md", "\u5834/ReviewB.md", "ReviewB.md"))
 assert b[3] == "ReviewedB" and decoy[3] == "ReviewB"
@@ -2626,7 +2746,8 @@ assert len(canvases) == 1 and canvases[0][1] == "IntegratedResearch" and canvase
 assert [n["id"] for n in json.loads(canvases[0][2])["nodes"]] == ["first", "second"]
 assert len(views) == 1 and views[0][1] == "IntegratedOrder" and views[0][4] == 'typed("\u5de5\u6642")'
 assert json.loads(views[0][2]) == [False, [], [["\u5be9\u95b1\u9806\u4f4d", "formula-number", True]]]
-assert {row[1]: row[4] for row in ranks} == {a[1]: "3", b[1]: "7"}
+assert {row[1]: row[4] for row in ranks} == {a[1]: "8", b[1]: "7"}
+assert field_rules == [(views[0][0], "\u5de5\u6642", 1, "0")]
 assert media == [(a[2], "\u7d20\u6750/\u5361.txt", b"asset one")]
 
 # Drop a full page from the real backup while preserving its SQLite-format header.
@@ -2689,6 +2810,31 @@ print("Full backup has the original stable note identity and attachment, exact C
         throw 'Restore testing modified a backup input or the original workspace, or left a sidecar.'
     }
     Write-Host 'PASS: native full-workspace backup and isolated restore retained the exact renamed identity, both Canvas occurrences and formula-based order after restart. The truncated backup showed a native corruption error, exited with code 1 and triggered no workspace writes.'
+    $process = Start-Notebook $fullRestore
+    $window = $process.MainWindowHandle
+    Open-SortCollection 'IntegratedReview'
+    Open-SortNamedView 1 'IntegratedOrder'
+    $beforeRestoredAdmission = Get-VaultReviewStamp $fullDb
+    Start-RuleRow 'RestoredDefault'
+    Rule-Prompt '工時' '0' ''
+    Rule-Error '欄位值無效' '必填'
+    if ((Get-VaultReviewStamp $fullDb) -cne $beforeRestoredAdmission) {
+        throw 'Rejecting a missing required value changed the restored collection.'
+    }
+    Rule-Prompt '工時' '' '0'
+    $null = Wait-For 'restored rule admits a valid zero' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已新增集合資料列。'
+    }
+    Assert-RankedRows @('ReviewA','ReviewedB','RestoredDefault')
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    if ((Get-FileHash -LiteralPath $jointBackup).Hash -cne $backupHash -or
+        (Get-FileHash -LiteralPath $reviewDb).Hash -cne $originHash) {
+        throw 'An edit in the restored clone changed the source or backup.'
+    }
+    Write-Host 'PASS: integrated required fields rejected admission and clearing without writes, a retained correction changed live formula order, and backup preserved rule behavior alongside the same Vault and Canvas.'
+
 
     $locationHome = Join-Path $root 'canvas-locations-workspace'
     $vaultA = Join-Path $root 'LocationVaultA'
@@ -2795,6 +2941,105 @@ print("Verified all original Canvas bytes, no saved camera edits, and only the e
 '@ | python - $locationDb $north $south $other
     if ($LASTEXITCODE -ne 0) { throw 'The exact Canvas and workspace round-trip verification failed.' }
     Write-Host 'PASS: native note-to-Canvas locations find repeated nodes in separate canvases, center each painted occurrence, reopen the exact note and persist across restart, refuse an unbound selected node, and keep Canvas content and camera settings unchanged.'
+
+    $ruleHome = Join-Path $root 'collection-rules'
+    $ruleRestore = Join-Path $root 'restored-collection-rules'
+    $ruleDb = Join-Path $ruleHome 'paperroom-data\notes.sqlite3'
+    $ruleRestoreDb = Join-Path $ruleRestore 'paperroom-data\notes.sqlite3'
+    $ruleBackup = Join-Path $root 'rule-backup.sqlite3'
+    foreach ($folder in $ruleHome,$ruleRestore) {
+        [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
+        Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
+    }
+    $process = Start-Notebook $ruleHome
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    # A synthetic existing collection, a member without properties and an outside note
+    # with an explicit true. All rule and row changes below go through Paperroom.exe.
+    @'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('PRAGMA foreign_keys=ON')
+    cid = db.execute("INSERT INTO collections(name) VALUES('Rule Fixture')").lastrowid
+    legacy = db.execute("INSERT INTO notes(title,body) VALUES('Legacy','preserved body')").lastrowid
+    ext = db.execute("INSERT INTO notes(title,body) VALUES('External','keep this prior body')").lastrowid
+    db.execute("INSERT INTO collection_notes VALUES(?,?,?)",(cid,legacy,'\u5f85\u8655\u7406'))
+    db.executemany("INSERT INTO property_definitions VALUES(?,?)",[('A-check','checkbox'),('B-hours','number')])
+    db.execute("INSERT INTO note_properties VALUES(?,'A-check','true')",(ext,))
+'@ | python - $ruleDb
+    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the synthetic pre-rule workspace.' }
+    $process = Start-Notebook $ruleHome
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Set-Rule 'A-check' 'false'
+    Set-Rule 'B-hours' '0'
+    Check-RuleRows $ruleDb before
+
+    Start-RuleRow 'Cancelled'
+    Rule-Prompt 'A-check' 'false' 'true'
+    Rule-Prompt 'B-hours' '0' '0' -Cancel
+    Check-RuleRows $ruleDb before
+
+    Start-RuleRow 'New row'
+    Rule-Prompt 'A-check' 'false' 'true'
+    Rule-Prompt 'B-hours' '0' ''
+    Rule-Error '欄位值無效' '必填'
+    Check-RuleRows $ruleDb reject-new
+    Rule-Prompt 'B-hours' '' '7'
+    $null = Wait-For 'new row saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已新增集合資料列。' }
+    Check-RuleRows $ruleDb created
+
+    Native-Menu 120 18 '編輯資料列的型別欄位…'
+    Choose-CollectionRow '待處理　New row  ('
+    Choose-CollectionRow 'B-hours　'
+    Rule-Prompt 'B-hours' '7' ''
+    Rule-Error '欄位未儲存' '必填'
+    Check-RuleRows $ruleDb created
+    Rule-Prompt 'B-hours' '' 'bad-number'
+    Rule-Error '欄位未儲存' 'bad-number'
+    Check-RuleRows $ruleDb created
+    Rule-Prompt 'B-hours' 'bad-number' '9'
+    $null = Wait-For 'corrected edit saved' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已更新資料列欄位。' }
+
+    Native-Menu 120 1 '加入筆記…'
+    Choose-CollectionRow 'External  ('
+    Rule-Prompt '加入集合' '待處理' '待處理'
+    Rule-Prompt 'B-hours' '0' '0'
+    $null = Wait-For 'existing note joined the same collection' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已將筆記加入集合。'
+    }
+    Check-RuleRows $ruleDb edited
+    Close-Notebook $process
+    $process.Dispose()
+    $process = Start-Notebook $ruleHome
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Check-RuleRows $ruleDb edited
+    Native-File 4 '備份工作區…' $ruleBackup '工作區備份已完成'
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    $sourceStamp = (Get-FileHash -LiteralPath $ruleDb).Hash
+    $backupStamp = (Get-FileHash -LiteralPath $ruleBackup).Hash
+    Copy-Item -LiteralPath $ruleBackup -Destination $ruleRestoreDb
+    $process = Start-Notebook $ruleRestore
+    $window = $process.MainWindowHandle
+    Open-RuleBoard
+    Check-RuleRows $ruleRestoreDb restored
+    Start-RuleRow 'Restored row'
+    Rule-Prompt 'A-check' 'false' 'false'
+    Rule-Prompt 'B-hours' '0' ''
+    Rule-Error '欄位值無效' '必填'
+    Rule-Prompt 'B-hours' '' '0'
+    $null = Wait-For 'restored board applied rules' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已新增集合資料列。' }
+    Close-Notebook $process
+    $process.Dispose()
+    $process = $null
+    Check-RuleRows $ruleRestoreDb new-restored
+    if ((Get-FileHash -LiteralPath $ruleDb).Hash -cne $sourceStamp -or
+        (Get-FileHash -LiteralPath $ruleBackup).Hash -cne $backupStamp) { throw 'Isolated restore changed source or backup.' }
+    Write-Host "PASS: collection rules, actual native creation and edits, rejected input and cancel without writes, legacy properties, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

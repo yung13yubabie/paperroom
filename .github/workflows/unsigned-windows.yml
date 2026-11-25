@@ -1,7 +1,7 @@
 name: Build unsigned Windows artifact
 on:
   push:
-    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/**', 'dev/integration/pr1-7-20261125', 'dev/integration/pr1-8-rc-20261125']
     paths-ignore:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'
@@ -424,7 +424,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Archive the four exact handoff files and verify readback
+      - name: Archive the five handoff files and verify readback
         run: |
           git archive --format=zip --prefix=Paperroom-Windows-Offline-QA/ \
             -o "$RUNNER_TEMP/Paperroom-Windows-Offline-QA.zip" HEAD:qa/windows-client-offline
@@ -438,7 +438,7 @@ jobs:
           with ZipFile(archive) as z:
               assert z.testzip() is None
               assert {n for n in z.namelist() if not n.endswith("/")} == {
-                  root + n for n in ("README.md", "EVIDENCE.md", "fixture.md", "checkpoint.ps1")
+                  root + n for n in ("README.md", "EVIDENCE.md", "fixture.md", "checkpoint.ps1", "RC-CHECKLIST.md")
               }
               fixture = z.read(root + "fixture.md")
               assert hashlib.sha256(fixture).hexdigest() == "27e9aed88fe0db6037d303e8e830270926b8222acfd0e6c6b387ab20b1af1ad4"

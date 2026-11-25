@@ -519,3 +519,12 @@ REA 6.10.1 靜態辨識最終候選為 PE，記錄 ID 為 `ev_743952dfa063ef2b8e
 - `hayro-cmap 0.1.1/assets/cmaps.brotli` 由 `src/bcmap/embedded.rs` 引入；`assets/LICENSE.txt` 列 Adobe 1990–2023，要求來源保留通知、二進位文件或其他材料重現通知與免責，且限制以 Adobe 或貢獻者名義背書。`assets/README.md` 記錄壓縮資料的製作來源。
 - `hayro-interpret 0.9.0/assets/CGATS001Compat-v2-micro.icc` 和 `LAB.icc` 由色彩模組引入；同目錄 `assets/README.md` 說明 LAB.icc 由 LCMS2 產生且兩種 profile 可用 CC0 1.0，`CGATS_LICENSE.txt` 為 CC0 原文。`hayro-jpeg2000 0.5.0/assets/` 的 `CGATS001Compat-v2-micro.icc`、`ProPhoto-v2-micro.icc`、`LAB.icc` 被程式引用，其 `assets/README.md` 說明 CGATS／ProPhoto 來源且表示所有 profiles 採 CC0 1.0，`assets/LICENSE.txt` 為原文。兩套件的 LAB.icc SHA-256 均為 `a6efc5c30ece826eba2a83ddf5aa7026289b0c5ffa90acb129bc59ab8d7f5c59`，CGATS001Compat-v2-micro.icc 均為 `73e1ba37d2bad5bab2a964f40a9eed96209666efc067c3322626214bbef234a0`。
 - Hayro 各 crate 根目錄另附 `LICENSE-MIT` 與 `LICENSE-APACHE`；其他新鎖定的轉遞依賴也須重新盤點，不能僅以這三類素材代替完整第三方通知。尚未取得可公開發行的完整新依賴通知集，本節只記錄待辦。
+
+
+## 集合欄位預設值與必填規則
+
+1. 從「檔案 → 屬性型別」宣告數字、核取方塊或日期。開啟集合後，從「看板操作 → 集合欄位規則」選擇欄位，設定選填或必填。預設值可留白。核取方塊可輸入 `true` 或 `false`，日期使用 `YYYY-MM-DD`。
+2. 用「看板操作 → 新增資料列」建立筆記，或選「加入筆記」沿用現有筆記。沒有值的欄位會顯示預設值，可先修改。已有的值會保留，包含零和未勾選。選填欄位可清空預設，必填欄位留白則會返回輸入畫面。取消便不新增資料列或筆記。
+3. 規則設定不回填已在集合內的筆記。加入集合前，現有的空白或無效必填欄位須從筆記修正。型別欄位編輯失敗時，原值仍在，對話框會保留這次輸入供修改。欄位值由同一篇筆記的所有集合共用，因此一般筆記屬性、集合欄位和排程編輯也會拒絕清除必填值。
+4. 由範本新增時，範本明確設定的欄位優先，剩餘缺值可使用集合預設。若仍缺必填項，先更新範本或集合規則再重試。更改屬性型別前須移除使用該欄位的集合規則。
+5. 「備份工作區」會保存規則及資料。舊工作區開啟時會升級為第 30 版，既有筆記及欄位保持原樣。需回到只能讀取第 29 版工作區的候選時，請用升級前的備份另開。

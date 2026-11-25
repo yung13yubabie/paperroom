@@ -83,6 +83,10 @@ mod attachments;
 pub use attachments::{MAX_PDF_SEARCH_QUERY, PdfAnnotationHit};
 #[path = "collections.rs"]
 mod collections;
+#[cfg(windows)]
+pub(crate) use collections::CollectionEntry;
+#[path = "collection_field_rules.rs"]
+pub(crate) mod collection_field_rules;
 #[path = "collection_views.rs"]
 pub(crate) mod collection_views;
 #[path = "groups.rs"]
@@ -113,7 +117,7 @@ pub use boards::DEFAULT_BOARD_ID;
 #[cfg(any(windows, test))]
 pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 
-const SCHEMA_VERSION: i32 = 29;
+const SCHEMA_VERSION: i32 = 30;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -361,6 +365,9 @@ impl Notebook {
         }
         if version < 29 {
             tx.execute_batch(workspace_search::SCHEMA)?;
+        }
+        if version < 30 {
+            tx.execute_batch(collection_field_rules::SCHEMA)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -744,7 +751,13 @@ mod tests {
         Ok(())
     }
 
+    pub(super) fn remove_v29_schema(connection: &Connection) -> Result<()> {
+        connection.execute_batch("DROP TABLE collection_field_rules; DROP INDEX collection_notes_by_note;")?;
+        Ok(())
+    }
+
     pub(super) fn remove_v28_schema(connection: &Connection) -> Result<()> {
+        remove_v29_schema(connection)?;
         connection.execute_batch(
             "DROP TRIGGER search_note_insert;
              DROP TRIGGER search_note_change;

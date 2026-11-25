@@ -14,6 +14,8 @@ mod pdf_search_ui;
 mod note_graph_ui;
 #[path = "collection_view_ui.rs"]
 mod collection_view_ui;
+#[path = "collection_field_ui.rs"]
+mod collection_field_ui;
 #[path = "board_group_ui.rs"]
 mod board_group_ui;
 pub(super) use pdf_view_ui::PDF_TIMER;
@@ -532,17 +534,17 @@ impl App {
                 (11, "集合檢視…"), (12, "編輯集合公式…"), (13, "切換資料列核取方塊…"),
                 (14, previous), (15, next), (16, open_date), (17, edit_dates),
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
-                (21, "資料列範本…"),
+                (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
             ]);
             match action {
                 1 => {
                     let notes = self.notebook.rows(View::All, "")?;
-                    if let Some(index) = choose(hwnd, anchor, &notes, |note| format!("{}  ({})", note.title, note.id))
-                        && let Some(status) = crate::dialog::prompt(hwnd, "加入集合", "狀態欄名稱", "待處理", 256)?
-                    {
-                        self.notebook.add_to_collection(id, notes[index].id, &status)?;
-                    }
+                    let Some(index) = choose(hwnd, anchor, &notes, |note| format!("{}  ({})", note.title, note.id))
+                    else { return Ok(()); };
+                    return self.add_collection_row_ui(id, title, Some(&notes[index]));
                 }
+                22 => return self.add_collection_row_ui(id, title, None),
+                23 => return self.collection_rule_menu(id),
                 2 | 3 | 6 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = choose(hwnd, anchor, &rows, |(row, status)| {

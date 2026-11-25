@@ -169,7 +169,7 @@ pub(crate) struct NoteReference {
     pub offset: usize,
 }
 
-/// Return parsed WikiLinks and Markdown heading links, excluding literal code.
+/// Return parsed WikiLinks and Markdown links, excluding literal code.
 pub(crate) fn note_references(body: &str) -> Vec<NoteReference> {
     let mut active = None::<NoteReference>;
     let mut references = Vec::new();
@@ -179,7 +179,6 @@ pub(crate) fn note_references(body: &str) -> Vec<NoteReference> {
                 let syntax = if matches!(link_type, LinkType::WikiLink { .. }) {
                     AnchorSyntax::Wiki
                 } else {
-                    if !dest_url.contains('#') { continue; }
                     AnchorSyntax::Markdown
                 };
                 active = Some(NoteReference {

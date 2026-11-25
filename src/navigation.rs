@@ -4,7 +4,11 @@ use crate::markdown::block_anchors::{BlockLookup, resolve_block, unique_block_so
 use rusqlite::{OptionalExtension, params};
 use super::vault_search::{MAX_SCAN, TagFilter, TagMatch, matches_alias, matches_tag};
 
-pub(crate) struct SwitchHit { pub id:i64, pub label:String }
+pub(crate) struct SwitchHit {
+    pub id: i64,
+    pub label: String,
+    token: String,
+}
 
 impl Notebook {
     pub(crate) fn quick_notes(&self,query:&str)->Result<Vec<SwitchHit>> {
@@ -21,8 +25,9 @@ impl Notebook {
         let mut stmt=self.connection.prepare("SELECT n.id,n.title,r.title,r.id,p.relative_path,
             CASE WHEN ?2 THEN n.body
                  WHEN p.note_id IS NOT NULL AND ?1<>'' AND (substr(n.body,1,3)='---' OR substr(n.body,1,4)=char(65279)||'---')
-                 THEN substr(n.body,1,65544) ELSE '' END
-            FROM notes n LEFT JOIN vault_paths p ON p.note_id=n.id LEFT JOIN notes r ON r.id=p.import_root
+                 THEN substr(n.body,1,65544) ELSE '' END, i.token
+            FROM notes n JOIN note_link_identities i ON i.note_id=n.id
+            LEFT JOIN vault_paths p ON p.note_id=n.id LEFT JOIN notes r ON r.id=p.import_root
             WHERE n.trash_root IS NULL AND r.trash_root IS NULL
             AND (NOT ?2 OR p.note_id IS NOT NULL) ORDER BY n.id")?;
         let mut rows=stmt.query(rusqlite::params![query, tag.is_some()])?;
@@ -45,10 +50,19 @@ impl Notebook {
             let label=if let Some(path)=path {
                 format!("{title}　{} (#{}) / {path}　[#{id}]",row.get_ref(2)?.as_str()?,row.get::<_,i64>(3)?)
             } else {format!("{title}　[#{id}]")};
-            hits.push((rank,SwitchHit{id,label}));
+            hits.push((rank,SwitchHit{id,label,token:row.get(6)?}));
         }
         hits.sort_by(|a,b|a.0.cmp(&b.0).then_with(||a.1.label.cmp(&b.1.label)));
         Ok(hits.into_iter().map(|(_,hit)|hit).collect())
+    }
+
+    pub(crate) fn markup_for_picked_note(&self, hit: &SwitchHit) -> Result<String> {
+        let title = self.connection.query_row(
+            "SELECT n.title FROM notes n JOIN note_link_identities i ON n.id=i.note_id
+             WHERE n.id=?1 AND i.token=?2 AND n.trash_root IS NULL",
+            params![hit.id, hit.token], |row| row.get::<_, String>(0),
+        ).optional()?.ok_or("選取的目標已不存在或在垃圾桶，請重新搜尋。")?;
+        Ok(super::note_links::note_link_markup(hit.id, &hit.token, &title))
     }
 }
 
@@ -248,6 +262,32 @@ impl BlockNoteSnapshot {
 mod tests {
     use super::*;
     use crate::archive::ImportedPage;
+    #[test]
+    fn picked_identities_survive_renames_and_refuse_reused_or_trashed_ids() -> Result<()> {
+        let mut db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let source = db.add(None, "來源", "")?;
+        let target = db.add(None, "同名", "甲")?;
+        let duplicate = db.add(None, "同名", "乙")?;
+        let hits = db.quick_notes("同名")?;
+        assert_eq!(hits.len(), 2);
+        let picked = hits.iter().find(|h| h.id == duplicate).unwrap();
+        let stable = db.markup_for_picked_note(picked)?;
+        db.save(source, 1, "來源", &stable)?;
+        db.save(duplicate, 1, "已改名", "乙")?;
+        assert_eq!(db.related(&db.note(source)?.unwrap())?.0[0].id, duplicate);
+        db.trash(duplicate)?;
+        assert!(db.markup_for_picked_note(picked).is_err());
+        assert!(db.related(&db.note(source)?.unwrap())?.0.is_empty());
+        db.restore(duplicate)?;
+        assert_eq!(db.related(&db.note(source)?.unwrap())?.0[0].id, duplicate);
+        db.connection.execute("DELETE FROM notes WHERE id=?1", [duplicate])?;
+        assert_eq!(db.add(None, "同名", "乙")?, duplicate);
+        assert!(db.markup_for_picked_note(picked).is_err());
+        assert!(db.related(&db.note(source)?.unwrap())?.0.is_empty());
+        assert_eq!(db.note(target)?.unwrap().body, "甲");
+        assert_eq!(db.note(source)?.unwrap().body, stable);
+        Ok(())
+    }
     #[test]
     fn block_jump_snapshot_rejects_stale_positions_and_unavailable_origins() -> Result<()> {
         let mut db = Notebook::open(std::path::Path::new(":memory:"), false)?;

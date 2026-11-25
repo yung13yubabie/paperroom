@@ -1892,19 +1892,26 @@ impl App {
                     return Ok(());
                 };
                 let source = note.row.id;
-                let (outgoing, incoming) = app.notebook.related(note)?;
+                let (outgoing, incoming) = app.notebook.graph_neighbors(note)?;
+                let targets = outgoing.iter().map(|(id, title, detail)| (*id, (title, detail)))
+                    .collect::<HashMap<_, _>>();
                 let mut labels = vec![(1, "插入筆記連結…".to_owned())];
                 let links = app.notebook.vault_note_links(note)?;
                 let handled = links.iter().map(|target| target.note_id).collect::<HashSet<_>>();
                 let mut related = links.into_iter().map(|link| {
                     let anchor = link.anchor.as_deref().unwrap_or("");
                     let action = if anchor.starts_with("#^") { "預覽" } else { "前往" };
-                    let label = format!("{action}　{} {anchor}", link.label);
+                    let mut label = format!("{action}　{}", link.label);
+                    if !anchor.is_empty() { label.push_str(&format!(" {anchor}")); }
+                    if let Some((title, detail)) = targets.get(&link.note_id) {
+                        label.push_str(&format!("　｜ {title}　｜ {detail}"));
+                    }
                     (link.note_id, label, link.anchor, link.anchor_syntax)
                 }).collect::<Vec<_>>();
-                related.extend(outgoing.iter().filter(|row| !handled.contains(&row.id))
-                    .map(|row| (row.id, format!("前往　{}", row.title), None, AnchorSyntax::Wiki)));
-                related.extend(incoming.iter().map(|row| (row.id, format!("反向連結　{}", row.title), None, AnchorSyntax::Wiki)));
+                related.extend(outgoing.iter().filter(|(id, _, _)| !handled.contains(id))
+                    .map(|(id, title, detail)| (*id, format!("前往　{title}　｜ {detail}"), None, AnchorSyntax::Wiki)));
+                related.extend(incoming.iter().map(|(id, title, detail)|
+                    (*id, format!("反向連結　{title}　｜ {detail}"), None, AnchorSyntax::Wiki)));
                 for (index, (_, title, _, _)) in related.iter().enumerate() {
                     labels.push((index + 2, title.clone()));
                 }
@@ -1917,21 +1924,7 @@ impl App {
                 match popup(app.hwnd, app.widgets.links, None, &items) {
                     0 => {}
                     1 => {
-                        let choices = app.notebook.rows(View::All, "")?;
-                        let items = choices
-                            .iter()
-                            .enumerate()
-                            .map(|(i, row)| (i + 1, row.title.as_str()))
-                            .collect::<Vec<_>>();
-                        let selection = popup(app.hwnd, app.widgets.links, None, &items);
-                        if selection > 0 {
-                            let target = &choices[selection - 1];
-                            if !app.editing {
-                                app.toggle_edit();
-                            }
-                            let name = target.title.replace(['[', ']', '|'], " ");
-                            app.replace_selection(&format!("[[paperroom:note:{}|{name}]]", target.id));
-                        }
+                        app.insert_note_link()?;
                     }
                     index if index == graph => app.open_note_graph(source)?,
                     index => {

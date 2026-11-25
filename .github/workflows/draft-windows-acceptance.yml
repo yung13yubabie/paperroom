@@ -37,13 +37,22 @@ jobs:
         run: |
           $allowed = @(
             '.github/workflows/draft-windows-acceptance.yml',
-            '.github/workflows/windows.yml',
             '.github/workflows/unsigned-windows.yml',
+            '.github/workflows/windows.yml',
+            'docs/REDISTRIBUTION.md',
             'docs/WINDOWS-DRAFT-QA.md',
+            'scripts/test_windows_link_inventory.py',
+            'scripts/test_windows_notice_bundle.py',
+            'scripts/test_windows_registry_notices.py',
+            'scripts/test_windows_reviewed_notice_package.py',
+            'scripts/verify-windows-notice-bundle.py',
             'scripts/windows-about-notices.ps1',
             'scripts/windows-highlight-workflow.ps1',
-            'scripts/verify-windows-notice-bundle.py',
-            'scripts/test_windows_notice_bundle.py'
+            'scripts/windows-link-capture.cs',
+            'scripts/windows-link-collect.ps1',
+            'scripts/windows-link-inventory.py',
+            'scripts/windows-registry-notices.py',
+            'scripts/windows-reviewed-notice-package.py'
           )
           $head = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong QA checkout.' }

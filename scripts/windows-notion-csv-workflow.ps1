@@ -10,13 +10,15 @@ function Open-NotionCsvCollectionPrompt([string]$AttachmentName) {
 }
 
 function Assert-NotionCsvWorkspace([string]$Phase) {
-    @'
+    $baseline = if ($Phase -eq 'baseline') { '-' } else { $notionBaseline }
+    $snapshot = @'
 from contextlib import closing
+from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile
 import sqlite3, sys
 
-path, archive, phase = sys.argv[1:]
+path, archive, phase, baseline = sys.argv[1:]
 parent = "Project 11111111111111111111111111111111"
 child = "Child 22222222222222222222222222222222"
 table = "Catalog 33333333333333333333333333333333_all.csv"
@@ -34,10 +36,22 @@ with ZipFile(archive) as source, closing(sqlite3.connect(Path(path).as_uri() + '
         (table, source.read(parent + '/' + table)),
     ]
     collections = db.execute("SELECT id,name FROM collections").fetchall()
-    if phase in ('canceled', 'invalid'):
-        assert not collections
-        assert db.execute("SELECT count(*) FROM note_properties").fetchone() == (0,)
-        assert db.execute("SELECT count(*) FROM notes").fetchone() == (6,)
+    tables = (
+        ("notes", "id,parent,title,body,version,trash_root"),
+        ("collections", "id,name"),
+        ("collection_notes", "collection_id,note_id,status"),
+        ("note_properties", "note_id,key,value"),
+        ("note_relations", "source_id,name,target_id"),
+        ("attachments", "id,note_id,name,kind,content"),
+        ("attachment_origins", "attachment_id,relative_path"),
+    )
+    state = tuple(db.execute(f"SELECT {columns} FROM {table} ORDER BY 1,2").fetchall()
+                  for table, columns in tables)
+    snapshot = sha256(repr(state).encode("utf-8")).hexdigest()
+    if phase in ('baseline', 'canceled', 'invalid'):
+        assert not collections and not state[2] and not state[3]
+        if phase != 'baseline':
+            assert snapshot == baseline, f"{phase} changed notes, collections, properties, relations or attachments"
     else:
         assert len(collections) == 1 and collections[0][1] == '書目集合'
         members = db.execute("""SELECT n.id,n.title,f.parent FROM collection_notes c JOIN notes n ON n.id=c.note_id
@@ -51,9 +65,13 @@ with ZipFile(archive) as source, closing(sqlite3.connect(Path(path).as_uri() + '
         assert fields['關聯文字'] == 'https://example.invalid/notion/item'
         assert fields['備註'] == ('第一行\r\n第二行,引文' if phase == 'created' else '編輯後仍保留原始 CSV')
         assert db.execute("SELECT count(*) FROM note_relations").fetchone() == (0,)
-    print(f'Notion CSV real-workspace verification: {phase}')
-'@ | python - $notionDb $notionArchive $Phase
-    if ($LASTEXITCODE -ne 0) { throw "The Notion ZIP workspace check failed during $Phase." }
+    print(snapshot)
+'@ | python - $notionDb $notionArchive $Phase $baseline
+    if ($LASTEXITCODE -ne 0 -or $snapshot -cnotmatch '^[a-f0-9]{64}$') {
+        throw "The Notion ZIP workspace check failed during $Phase."
+    }
+    Write-Host "Notion CSV real-workspace verification: $Phase"
+    if ($Phase -eq 'baseline') { return $snapshot }
 }
 
 $notionFolder = Join-Path $root 'NotionCsvReview'
@@ -103,6 +121,7 @@ if ([PaperroomHighlightGui]::Read((Control $dialog 101)) -cne 'Project 111111111
 }
 Finish-Revision $dialog 1
 
+$notionBaseline = Assert-NotionCsvWorkspace 'baseline'
 $catalog = 'Catalog 33333333333333333333333333333333_all.csv'
 Select-Note "2｜$catalog"
 $dialog = Open-NotionCsvCollectionPrompt $catalog

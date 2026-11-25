@@ -15,12 +15,13 @@ jobs:
         shell: pwsh
     env:
       BASE_SHA: f5e4d577087c22b4620c9fc9517558aced3fdd93
+      PROBE_PARENT_SHA: e6643c9cd3e6f9f728cf6d65fc1908b657c0367d
       RUSTUP_TOOLCHAIN: 1.100.0
       TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Compare dynamic and static CRT using one native toolchain
         run: |
@@ -29,7 +30,9 @@ jobs:
           $head = git rev-parse --verify HEAD
           if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong checkout SHA.' }
           $parent = git rev-parse --verify 'HEAD^'
-          if ($LASTEXITCODE -ne 0 -or $parent -cne $env:BASE_SHA) { throw 'Probe must be one commit from the pinned source.' }
+          if ($LASTEXITCODE -ne 0 -or $parent -cne $env:PROBE_PARENT_SHA) { throw 'Wrong immediate probe parent.' }
+          $appBase = git rev-parse --verify 'HEAD~2'
+          if ($LASTEXITCODE -ne 0 -or $appBase -cne $env:BASE_SHA) { throw 'Wrong unchanged application base.' }
           $changed = @(git diff --name-only --no-renames $env:BASE_SHA $head)
           if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/paperroom-crt-probe.yml') {
             throw 'Application source or another file differs from the approved base.'
@@ -48,8 +51,7 @@ jobs:
             $linker = (Get-Command link.exe -CommandType Application).Source
             $cc = (Get-Command cl.exe -CommandType Application).Source
           } catch { throw 'Native Visual Studio tools could not be initialized.' }
-          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $linker
-          $env:CC_x86_64_pc_windows_msvc = $cc
+          $cargoExe = (Get-Command cargo.exe -CommandType Application).Source
 
           $bootstrap = @(rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target $env:TARGET 2>&1)
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain provisioning failed.' }
@@ -72,7 +74,45 @@ jobs:
           $env:CARGO_NET_OFFLINE = 'true'
           $env:CARGO_TERM_COLOR = 'never'
           $env:CARGO_INCREMENTAL = '0'
-          $env:CC_ENABLE_DEBUG_OUTPUT = '1'
+          function RunCargo([string[]] $Arguments) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $cargoExe
+            $info.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+            $process = [Diagnostics.Process]::Start($info)
+            try {
+              $out = $process.StandardOutput.ReadToEndAsync()
+              $err = $process.StandardError.ReadToEndAsync()
+              if (-not $process.WaitForExit(900000)) {
+                $process.Kill($true)
+                $process.WaitForExit()
+                throw 'Cargo subprocess timed out.'
+              }
+              [pscustomobject]@{
+                Code = $process.ExitCode
+                Text = ($out.GetAwaiter().GetResult() + [Environment]::NewLine + $err.GetAwaiter().GetResult())
+              }
+            } finally { $process.Dispose() }
+          }
+          function CargoCategories([string] $Body) {
+            $rules = [ordered]@{
+              'offline-cache' = '(?i)attempting to make an HTTP request, but --offline|no matching package named|failed to download'
+              'cargo-config' = '(?i)could not load Cargo configuration|failed to parse manifest|could not find .?Cargo\.toml|unexpected argument'
+              'driver-probe' = '(?i)failed to run .?rustc|could not execute process|failed to learn about target-specific information'
+              'missing-compiler' = '(?i)ToolNotFound|linker .+ not found|not recognized as an internal or external command'
+              'native-link' = '(?i)linking with .+ failed|fatal error LNK|mismatch detected for .?RuntimeLibrary'
+              'build-script' = '(?i)failed to run custom build command'
+              'test-failure' = '(?i)test result: FAILED|test failed|thread .+ panicked'
+              'resource' = '(?i)not enough space|access is denied|filename or extension is too long|environment option'
+            }
+            $labels = @($rules.GetEnumerator() | Where-Object { $Body -match $_.Value } | ForEach-Object { $_.Key })
+            $codes = @([regex]::Matches($Body, '\b(?:E[0-9]{4}|LNK[0-9]{4})\b') |
+              ForEach-Object { $_.Value } | Sort-Object -Unique | Select-Object -First 8)
+            "categories=$($labels -join ','); compiler_codes=$($codes -join ',')"
+          }
 
           function DllNames($lines) {
             @($lines | ForEach-Object {
@@ -92,27 +132,36 @@ jobs:
             try {
               if (Test-Path -LiteralPath $env:CARGO_TARGET_DIR) { throw 'Target dir is not fresh.' }
               $phase = 'full native Rust suite'
-              $log = @(cargo test --offline --locked --target $env:TARGET 2>&1)
-              $exitCode = $LASTEXITCODE
-              $testLines = @($log | ForEach-Object { "$_" } | Where-Object { $_ -match '^test result:' })
-              if ($exitCode -ne 0 -or $testLines.Count -ne 1 -or
-                  $testLines[0] -notmatch '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
-                throw 'Full native suite did not finish with zero failed, ignored and filtered tests.'
+              Remove-Item Env:CC_ENABLE_DEBUG_OUTPUT -ErrorAction SilentlyContinue
+              $run = RunCargo @('test','--offline','--locked','--target',$env:TARGET)
+              $testMarkers = @([regex]::Matches($run.Text, '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out;'))
+              $summary += "$mode Cargo test exit=$($run.Code); result_markers=$($testMarkers.Count); $(CargoCategories $run.Text)"
+              if ($testMarkers.Count -eq 1) {
+                $g = $testMarkers[0].Groups
+                $summary += "$mode parsed libtest: state=$($g[1].Value), pass=$($g[2].Value), fail=$($g[3].Value), ignored=$($g[4].Value), measured=$($g[5].Value), filtered=$($g[6].Value)"
               }
-              $summary += "$mode test: $($testLines[0])"
+              if ($run.Code -ne 0) { throw 'Cargo test exited nonzero.' }
+              if ($testMarkers.Count -ne 1) { throw 'Cargo exited zero but the test report was not verified.' }
+              if ($g[1].Value -cne 'ok' -or [int]$g[2].Value -lt 1 -or
+                  [int]$g[3].Value -ne 0 -or [int]$g[4].Value -ne 0 -or [int]$g[5].Value -ne 0 -or [int]$g[6].Value -ne 0) {
+                throw 'The real unfiltered suite did not pass all tests.'
+              }
 
               $phase = 'candidate link and map'
               $map = Join-Path $env:RUNNER_TEMP "paperroom-$mode.map"
-              $build = @(cargo rustc --offline --locked --release --target $env:TARGET -vv -- -C "link-arg=/MAP:$map" -C 'link-arg=/VERBOSE:LIB' 2>&1)
-              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $map -PathType Leaf)) { throw 'Native build or map capture failed.' }
+              $env:CC_ENABLE_DEBUG_OUTPUT = '1'
+              $release = RunCargo @('rustc','--offline','--locked','--release','--target',$env:TARGET,'-vv','--','-C',"link-arg=/MAP:$map",'-C','link-arg=/VERBOSE:LIB')
+              $summary += "$mode Cargo build exit=$($release.Code); $(CargoCategories $release.Text)"
+              if ($release.Code -ne 0 -or -not (Test-Path -LiteralPath $map -PathType Leaf)) { throw 'Native build or map capture failed.' }
               $phase = 'bundled SQLite compiler flag'
               $flag = if ($mode -ceq 'static') { 'MT' } else { 'MD' }
-              $cRows = @($build | ForEach-Object { "$_" } | Where-Object {
+              $cRows = @($release.Text -split '\r?\n' | Where-Object {
                 $_ -match 'sqlite3\.c' -and $_ -match ('(?:^|["\s])[-/]{0}(?:["\s]|$)' -f $flag)
               })
               $otherFlag = if ($flag -ceq 'MT') { 'MD' } else { 'MT' }
               $mixed = @($cRows | Where-Object { $_ -match ('(?:^|["\s])[-/]{0}(?:["\s]|$)' -f $otherFlag) })
-              if ($cRows.Count -lt 1 -or $mixed.Count) { throw "Bundled SQLite compiler flag $flag was not evidenced unambiguously." }
+              $cWitness = ($cRows.Count -ge 1 -and $mixed.Count -eq 0)
+              if (-not $cWitness) { $errors += "$mode C flag $flag remains unverified; smoke still runs." }
 
               $phase = 'PE imports and CRT map markers'
               $exe = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release\paperroom.exe"
@@ -133,7 +182,7 @@ jobs:
               if ($mode -ceq 'static' -and $hints.Count -eq 0) { throw 'No static CRT map markers: attribution remains blocked.' }
               $summary += "$mode EXE SHA-256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
               $summary += "$mode imports (direct + parsed /IMPORTS): $($all -join ', ')"
-              $summary += "$mode SQLite C flag: $flag; linker-map CRT markers (not a legal inventory): $($hints -join ', ')"
+              $summary += "$mode SQLite C flag $flag witnessed=$cWitness; linker-map CRT markers (not a legal inventory): $($hints -join ', ')"
               $summary += "$mode map SHA-256: $((Get-FileHash -LiteralPath $map -Algorithm SHA256).Hash)"
 
               $phase = 'native three-profile storage smoke'
@@ -144,8 +193,11 @@ jobs:
               }
               $summary += "$mode real storage/recovery smoke passed in default, portable, and portable-marker modes."
             } catch {
-              # Do not print arbitrary compiler/PowerShell diagnostic text or runner-local paths.
-              $errors += "$mode failed in phase: $phase"
+              # Exception numbers and fixed labels only: no message, path, stack or child logs.
+              $reason = $_.Exception
+              while ($reason.InnerException) { $reason = $reason.InnerException }
+              $code = if ($reason -is [ComponentModel.Win32Exception]) { $reason.NativeErrorCode } else { $reason.HResult }
+              $errors += "$mode failed in phase: $phase (exception code $code)"
             }
           }
           $dirty = git status --porcelain=v1 --untracked-files=all

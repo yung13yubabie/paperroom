@@ -1150,6 +1150,7 @@ impl App {
                 (9, "匯入 CSV 表格…"),
                 (10, "資料集合與看板…"),
                 (11, "匯入 JSON Canvas…"),
+                (38, "匯入 JSON Canvas 與同資料夾附件…"),
                 (12, "開啟已匯入的 Canvas…"),
                 (13, "搜尋 PDF 標註…"),
                 (14, "屬性型別…"),
@@ -1186,6 +1187,10 @@ impl App {
                 if let Err(error) = notion_preview_ui::run(self.hwnd) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if action == 38 {
+                if let Err(error) = self.import_local_canvas_ui() { self.show_error(error); }
                 return;
             }
             if action == 25 {

@@ -1,7 +1,12 @@
 # Requires PowerShell 7, a Windows desktop session and Python 3 with sqlite3.
-param([Parameter(Mandatory)][string]$Exe, [string]$Screenshot, [string]$UpgradeBaseline)
+param([Parameter(Mandatory)][string]$Exe, [string]$Screenshot, [string]$UpgradeBaseline, [switch]$RequireGuideScreenshot)
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
+if ($RequireGuideScreenshot -and (!$Screenshot -or
+    [IO.Path]::GetExtension($Screenshot) -ine '.png' -or
+    (Test-Path -LiteralPath $Screenshot))) {
+    throw 'The strict guide capture requires a new PNG path.'
+}
 Add-Type @'
 using System;
 using System.Text;
@@ -10,6 +15,9 @@ public static class PaperroomWindow {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
@@ -96,17 +104,34 @@ function Read-Control($Window, $Id) {
     return $text.ToString()
 }
 
-function Save-FirstWindow($Window, $Path) {
+function Save-FirstWindow($Window, $Path, [uint32]$ExpectedProcess = 0) {
     Add-Type -AssemblyName System.Drawing
     $rect = [PaperroomWindow+Rect]::new()
-    if (![PaperroomWindow]::GetWindowRect($Window, [ref]$rect)) { throw 'Could not measure window.' }
-    $bitmap = [Drawing.Bitmap]::new($rect.Right - $rect.Left, $rect.Bottom - $rect.Top)
+    $mode = 2
+    if ($ExpectedProcess -ne 0) {
+        [uint32]$owner = 0
+        if ([PaperroomWindow]::GetWindowThreadProcessId($Window, [ref]$owner) -eq 0 -or
+            $owner -ne $ExpectedProcess -or ![PaperroomWindow]::IsWindowVisible($Window) -or
+            (Read-Control $Window 103) -cne '歡迎使用紙間') {
+            throw 'Guide capture expected the new Paperroom process and its built-in welcome note.'
+        }
+        if (![PaperroomWindow]::GetClientRect($Window, [ref]$rect)) { throw 'Could not measure the app client area.' }
+        $mode = 1 # PW_CLIENTONLY; the app renders into the bitmap, not a desktop capture.
+    } elseif (![PaperroomWindow]::GetWindowRect($Window, [ref]$rect)) {
+        throw 'Could not measure window.'
+    }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($ExpectedProcess -ne 0 -and ($width -lt 600 -or $height -lt 300 -or $width -gt 3840 -or $height -gt 2160)) {
+        throw 'Guide capture has unexpected client dimensions.'
+    }
+    $bitmap = [Drawing.Bitmap]::new($width, $height)
     try {
         $graphics = [Drawing.Graphics]::FromImage($bitmap)
         try {
             $dc = $graphics.GetHdc()
             try {
-                if (![PaperroomWindow]::PrintWindow($Window, $dc, 2)) { throw 'PrintWindow failed.' }
+                if (![PaperroomWindow]::PrintWindow($Window, $dc, $mode)) { throw 'PrintWindow failed.' }
             } finally { $graphics.ReleaseHdc($dc) }
         } finally { $graphics.Dispose() }
         $colors = [Collections.Generic.HashSet[int]]::new()
@@ -328,8 +353,14 @@ try {
                 Start-Sleep -Milliseconds 50
             }
             if ($Screenshot -and $mode -eq 'default') {
-                try { Save-FirstWindow $process.MainWindowHandle $Screenshot }
-                catch { Write-Warning "Optional first-window capture: $_" }
+                if ($RequireGuideScreenshot) {
+                    Save-FirstWindow $process.MainWindowHandle $Screenshot $process.Id
+                    if (!(Test-Path -LiteralPath $Screenshot -PathType Leaf)) { throw 'No client PNG was written.' }
+                    Write-Host 'Captured the new Paperroom client area displaying the built-in welcome note.'
+                } else {
+                    try { Save-FirstWindow $process.MainWindowHandle $Screenshot }
+                    catch { Write-Warning "Optional first-window capture: $_" }
+                }
             }
             $events.SetPhase('normal close')
             Close-Notebook $process

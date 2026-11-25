@@ -291,6 +291,12 @@ Linux 資料層測試通過 169 項。Astra 在只有 loopback 的 QEMU 客體�
 2. 從「Canvas 操作 → 編輯 Canvas」新增或刪除連線。要復原最近一次編輯，可使用「Canvas 操作 → 復原上一次 Canvas 修改」，也可在畫布有焦點時按 Ctrl+Z。同一工作區重開後仍可復原。整批移動算一次。每份畫布最多保存一步，工作區的復原資料有 64 MiB 上限，超出時清除最舊的紀錄。若 Vault 路徑更新改寫了同一畫布，該畫布的舊復原紀錄會失效。
 3. 從「Canvas 操作」匯出 `.canvas`，再到另一個工作區用「檔案 → 匯入 JSON Canvas」開啟。匯出檔含節點、位置、連線及擴充欄位。復原紀錄由來源工作區保存。若從含附件的 Canvas ZIP 匯入，請使用「匯出 JSON Canvas ZIP」一併攜帶封裝內的附件。
 
+### Canvas 具名群組
+
+1. 從空白處框選要組在一起的節點，再選「Canvas 操作 → 編輯 Canvas → 從選取建立群組」，輸入名稱。紙間在選取外加 24 個畫布單位的留白，並將群組放在內容下層。如果這個範圍也會包進未選取的節點，調整框選再試。
+2. 拖群組上方的名稱或外框，會等距移動群組和完整落在框內的節點，包括內層群組。只與外框相交的節點仍留在原位。拖右下角只調整外框大小。拖曳時按 Esc 取消，或在儲存與重開後用 Ctrl+Z 復原最近一次移動。
+3. 匯出原始 `.canvas` 後，可用「匯入 JSON Canvas」開啟。群組依 JSON Canvas 1.0 的 `group` 節點、名稱和位置保存。成員由當時的幾何範圍判定，檔案不需要紙間專用欄位。帶有背景圖的封裝請用 Canvas ZIP 一起攜帶附件。[JSON Canvas 1.0](https://jsoncanvas.org/spec/1.0/#group-type-nodes)
+
 本次唯讀核對所見，公開 `main` 指向 `a519f1561f35786e12707e41112c298eac1a6084`，唯一已發佈版本為 v0.1.1。較早的 Windows Server 2022 管理員結果用於對應舊版。配對的桌面端仍離線，原生 Windows 10／11 標準帳戶、注音及 SmartScreen 尚待實測。[公開儲存庫](https://github.com/yung13yubabie/paperroom) · [v0.1.1 Release](https://github.com/yung13yubabie/paperroom/releases/tag/v0.1.1)
 
 下一次公開發佈前，仍須對最終 commit 與實際建置產物核對版本、測試及雜湊，檢查完整待公開歷史與資產沒有私人資料或憑據，確認第三方通知與授權來源，並釐清簽章、Windows 標準帳戶、實體中文 IME 及 SmartScreen 的實測狀態。以上是既有交付條件的記錄，不代表已執行發佈。

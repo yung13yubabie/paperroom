@@ -29,11 +29,40 @@ pub struct Projection {
     scale: f64,
 }
 
+fn geometry(node: &Value) -> Option<Geometry> {
+    let (x, y, width, height) = canvas::geometry_for_preview(node)?;
+    Some([x as i64, y as i64, width as i64, height as i64])
+}
+
 pub fn nodes(doc: &Document) -> impl Iterator<Item = (&Value, Geometry)> {
-    doc.json()["nodes"].as_array().into_iter().flatten().take(500).filter_map(|node| {
-        let (x, y, width, height) = canvas::geometry_for_preview(node)?;
-        Some((node, [x as i64, y as i64, width as i64, height as i64]))
-    })
+    doc.json()["nodes"].as_array().into_iter().flatten().take(500)
+        .filter_map(|node| Some((node, geometry(node)?)))
+}
+
+pub(crate) fn all_geometry(doc: &Document) -> impl Iterator<Item = (&Value, Geometry)> {
+    doc.json()["nodes"].as_array().into_iter().flatten()
+        .filter_map(|node| Some((node, geometry(node)?)))
+}
+
+pub(crate) fn encloses_geometry([x, y, w, h]: Geometry, [nx, ny, nw, nh]: Geometry) -> bool {
+    x <= nx && y <= ny && nx + nw <= x + w && ny + nh <= y + h
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn move_nodes(
+    doc: &Document, selection: &std::collections::HashSet<String>,
+) -> (std::collections::HashSet<String>, Vec<Geometry>) {
+    let mut nodes = all_geometry(doc).filter_map(|(node, rect)| {
+        Some((node["id"].as_str()?, node["type"].as_str() == Some("group"), rect))
+    }).collect::<Vec<_>>();
+    let groups = nodes.iter().filter_map(|(id, group, rect)| {
+        (selection.contains(*id) && *group).then_some(*rect)
+    }).collect::<Vec<_>>();
+    nodes.retain(|(id, group, rect)| selection.contains(*id) || groups.iter().any(|frame| {
+        // Coincident group frames are peers, not nested groups.
+        (!group || frame != rect) && encloses_geometry(*frame, *rect)
+    }));
+    nodes.into_iter().map(|(id, _, rect)| (id.to_owned(), rect)).unzip()
 }
 
 impl Projection {

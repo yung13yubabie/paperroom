@@ -681,7 +681,11 @@ function Native-VaultExport([string]$Title, [string]$Path, [string]$ExpectedErro
     Native-File 34 '匯出 Vault ZIP（含來源附件）…' $Path '已匯出 2 篇 Markdown 與 2 個來源附件。' -AlreadyOpened -ExpectedError $ExpectedError
 }
 function Read-CanvasInk {
-    $area = [PaperroomHighlightGui]::CanvasArea($window, $process.Id)
+    try { $area = [PaperroomHighlightGui]::CanvasArea($window, $process.Id) }
+    catch {
+        if ($_.Exception.Message.Contains('The synthetic Canvas is obscured.')) { return $null }
+        throw
+    }
     $w = $area.Right - $area.Left
     $h = $area.Bottom - $area.Top
     $bitmap = [Drawing.Bitmap]::new($w,$h,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -1173,6 +1177,7 @@ print('Reopened SQLite preserves the two original imports and the independent re
     }
     $savedView = Read-CanvasStamp $liveDb $canvasFile
     if ($savedView -ceq '[null, null, null]') { throw 'Pan and zoom did not store a view.' }
+    Write-Host "Actual Canvas accent checks: pan +$($moved.L-$before.L), +$($moved.T-$before.T) pixels; width $($moved.W) → $($zoom.W) at the mouse anchor."
     Pan-Canvas $zoom 29 23 -Cancel
     if ((Read-CanvasStamp $liveDb $canvasFile) -cne $savedView) { throw 'Canceled pan changed persisted state.' }
     Close-Notebook $process
@@ -1181,6 +1186,10 @@ print('Reopened SQLite preserves the two original imports and the independent re
     $window = $process.MainWindowHandle
     Native-Menu 109 12 '開啟已匯入的 Canvas…'
     Native-Menu 109 1 'CanvasViewFixture' -MenuOpen
+    $null = Wait-For 'reopened Canvas controls became ready' {
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq 'Canvas 操作' -and
+        [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('中鍵拖曳平移')
+    }
     $reopened = Wait-For 'reopened painted Canvas view' { Read-CanvasInk }
     if ($reopened.L -ne $zoom.L -or $reopened.T -ne $zoom.T -or $reopened.W -ne $zoom.W -or
         (Read-CanvasStamp $liveDb $canvasFile) -cne $savedView) { throw 'Reopening changed the saved view.' }

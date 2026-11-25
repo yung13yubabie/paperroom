@@ -227,7 +227,7 @@ impl App {
                         }
                     }
                 }
-                WM_LBUTTONDOWN if view.drag.is_none() && view.pan.is_none() => {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK if view.drag.is_none() && view.pan.is_none() => {
                     if let Some(projection) = visible.filter(|_| projection::contains(area, point)) {
                         SetFocus(self.hwnd);
                         SetCapture(self.hwnd);

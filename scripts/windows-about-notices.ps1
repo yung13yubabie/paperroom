@@ -28,14 +28,7 @@ public static class PaperroomAbout {
     [StructLayout(LayoutKind.Sequential)] struct Mouse {
         public int x,y; public uint data,flags,time; public UIntPtr extra;
     }
-    [StructLayout(LayoutKind.Sequential)] struct Key {
-        public ushort code,scan; public uint flags,time; public UIntPtr extra;
-    }
-    [StructLayout(LayoutKind.Explicit)] struct Payload {
-        [FieldOffset(0)] public Mouse mouse;
-        [FieldOffset(0)] public Key key;
-    }
-    [StructLayout(LayoutKind.Sequential)] struct Input { public uint type; public Payload data; }
+    [StructLayout(LayoutKind.Sequential)] struct Input { public uint type; public Mouse mouse; }
     [StructLayout(LayoutKind.Sequential)] struct Pt { public int x,y; }
     [StructLayout(LayoutKind.Sequential)] struct Rect {
         public int left,top,right,bottom;
@@ -43,6 +36,8 @@ public static class PaperroomAbout {
         public override string ToString() { return left+","+top+".."+right+","+bottom; }
     }
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr w,out Rect rect);
+    [DllImport("user32.dll")] static extern bool GetMenuItemRect(IntPtr owner,IntPtr menu,uint index,out Rect rect);
+    [DllImport("user32.dll")] static extern int MenuItemFromPoint(IntPtr owner,IntPtr menu,Pt point);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out Pt point);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Pt point);
@@ -76,22 +71,11 @@ public static class PaperroomAbout {
             if(GetAsyncKeyState(k)<0) throw new Exception("Mouse button or modifier already held.");
         var input=new Input[flags.Length];
         for(int i=0;i<flags.Length;i++){
-            input[i].data.mouse.flags=flags[i];
+            input[i].mouse.flags=flags[i];
+            if(flags[i]==0x800) input[i].mouse.data=unchecked((uint)-120);
         }
         if(SendInput((uint)input.Length,input,Marshal.SizeOf(typeof(Input)))!=input.Length)
             throw new Exception("Mouse SendInput failed: "+Marshal.GetLastWin32Error());
-    }
-    static void TapMenuKey(IntPtr popup, ushort key) {
-        if(!IsWindowVisible(popup) || ProcessOf(popup)!=ProcessOf(GetForegroundWindow()))
-            throw new Exception("The verified menu lost foreground before keyboard navigation.");
-        foreach(int k in new int[]{16,17,18,91,92})
-            if(GetAsyncKeyState(k)<0) throw new Exception("A modifier is held.");
-        var input = new Input[] {
-            new Input { type=1, data=new Payload { key=new Key { code=key } } },
-            new Input { type=1, data=new Payload { key=new Key { code=key, flags=2 } } }
-        };
-        if(SendInput((uint)input.Length,input,Marshal.SizeOf(typeof(Input)))!=input.Length)
-            throw new Exception("Menu keyboard input failed: "+Marshal.GetLastWin32Error());
     }
     public static void ClickFile(IntPtr w) {
         Rect r;
@@ -125,21 +109,27 @@ public static class PaperroomAbout {
         for(uint i=0;i<count;i++){
             var text=new StringBuilder(256); GetMenuString(menu,i,text,256,0x400);
             if(text.ToString()!=label) continue;
-            uint state=GetMenuState(menu,i,0x400);
-            if(state==0xffffffff || (state&3)!=0 || count-i>8)
-                throw new Exception("The reviewed About item is unavailable or outside the menu tail.");
-            TapMenuKey(popup,0x23); // End reveals the last native menu item.
-            System.Threading.Thread.Sleep(100);
-            for(uint later=i+1; later<count; later++){
-                uint item=GetMenuState(menu,later,0x400);
-                if(item==0xffffffff || (item&0x0803)!=0) continue;
-                TapMenuKey(popup,0x26); // Up.
+            int pid=ProcessOf(popup);
+            Rect bounds, row;
+            int lastHit=-1;
+            for(int attempt=0; attempt<24; attempt++){
+                if(!GetWindowRect(popup,out bounds) || !GetMenuItemRect(IntPtr.Zero,menu,i,out row))
+                    throw new Exception("Cannot read popup or About row bounds. "+State(pid));
+                var point=row.Center;
+                lastHit=MenuItemFromPoint(IntPtr.Zero,menu,point);
+                uint state=GetMenuState(menu,i,0x400);
+                if(lastHit==(int)i && state!=0xffffffff && (state&3)==0 && Aim(popup,point) &&
+                   MenuItemFromPoint(IntPtr.Zero,menu,point)==(int)i){
+                    MouseInput(2,4);
+                    return;
+                }
+                // Scroll the live popup only, never another foreground window.
+                if(row.bottom<bounds.bottom || !Aim(popup,bounds.Center))
+                    throw new Exception("About row not hittable: index="+i+" hit="+lastHit+" row="+row+" popup="+bounds+" "+State(pid));
+                MouseInput(0x800);
                 System.Threading.Thread.Sleep(100);
             }
-            if((GetMenuState(menu,i,0x400)&0x80)==0)
-                throw new Exception("The named About item did not receive native menu focus. "+State(ProcessOf(popup)));
-            TapMenuKey(popup,0x0d);
-            return;
+            throw new Exception("About remained outside the hittable popup after bounded scrolling. Last hit="+lastHit+" "+State(pid));
         }
         throw new Exception("Could not select the named About item from the native popup.");
     }

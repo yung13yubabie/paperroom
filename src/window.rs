@@ -1136,6 +1136,8 @@ impl App {
     unsafe fn file_menu(&mut self) {
         unsafe {
             let items = [
+                (35, "全域搜尋筆記…"),
+                (33, "關於紙間／第三方補充通知…"),
                 (1, "匯入 Markdown…"),
                 (2, "匯入 Notion Markdown ZIP…"),
                 (3, "匯出目前筆記為 Markdown…"),
@@ -1169,8 +1171,6 @@ impl App {
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
-                (33, "關於紙間／第三方補充通知…"),
-                (35, "全域搜尋筆記…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
             if action == 33 {

@@ -47,7 +47,8 @@ public static class PaperroomHighlightGui {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect region);
-    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint relation);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
@@ -162,6 +163,35 @@ public static class PaperroomHighlightGui {
             Left = Math.Max(rect.Left, monitor.Monitor.Left), Top = Math.Max(rect.Top, monitor.Monitor.Top),
             Right = Math.Min(rect.Right, monitor.Monitor.Right), Bottom = Math.Min(rect.Bottom, monitor.Monitor.Bottom)
         };
+    }
+    public static Rect PreviewArea(IntPtr owner, uint pid, IntPtr preview) {
+        if (!ForegroundIsOwned(owner, pid) || !IsWindowVisible(preview) ||
+            GetParent(preview) != owner || GetDlgCtrlID(preview) != 121 ||
+            GetWindowThreadProcessId(preview, out uint controlPid) == 0 || controlPid != pid ||
+            !String.Equals(Kind(preview), "RichEdit50W", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Expected the isolated foreground app's visible RichEdit preview.");
+        if (!GetClientRect(preview, out Rect client) || client.Right < 108 || client.Bottom < 108)
+            throw new InvalidOperationException("The RichEdit client is too small.");
+        var start = new Point { X = 4, Y = 4 };
+        var end = new Point { X = Math.Min(client.Right - 4, 1104), Y = Math.Min(client.Bottom - 4, 424) };
+        if (!ClientToScreen(preview, ref start) || !ClientToScreen(preview, ref end))
+            throw new InvalidOperationException("Unable to map the preview from client to screen coordinates.");
+        var outside = VisibleRect(preview);
+        var last = new Point { X = end.X - 1, Y = end.Y - 1 };
+        if (end.X - start.X < 100 || end.Y - start.Y < 100 ||
+            end.X - start.X > 1100 || end.Y - start.Y > 420 ||
+            !Contains(outside, start) || !Contains(outside, last))
+            throw new InvalidOperationException("The mapped preview region is clipped or outside its monitor.");
+        for (int y = 0; y <= 6; y++)
+            for (int x = 0; x <= 6; x++) {
+                var point = new Point {
+                    X = start.X + x * (last.X - start.X) / 6,
+                    Y = start.Y + y * (last.Y - start.Y) / 6
+                };
+                if (WindowFromPoint(point) != preview)
+                    throw new InvalidOperationException("An unrelated window obscures the RichEdit sampling area.");
+            }
+        return new Rect { Left = start.X, Top = start.Y, Right = end.X, Bottom = end.Y };
     }
     public static Point Cursor() {
         if (!GetCursorPos(out Point point)) throw new InvalidOperationException("Could not read the pointer.");
@@ -376,29 +406,34 @@ function Open-Editor {
     $null = Wait-For 'native source editor visible' { [PaperroomHighlightGui]::IsWindowVisible($field) }
     return $field
 }
-function Read-PreviewMark([bool]$Expected) {
+function Read-PreviewMark([bool]$Expected, [string]$Phase) {
     $preview = Control $window 121
     $null = Wait-For 'native RichEdit preview visible' { [PaperroomHighlightGui]::IsWindowVisible($preview) }
     if (![PaperroomHighlightGui]::Read($preview).Contains($selected)) { throw 'The RichEdit preview does not contain the selected text.' }
-    $rect = [PaperroomHighlightGui+Rect]::new()
-    if (![PaperroomHighlightGui]::GetClientRect($preview, [ref]$rect) -or
-        $rect.Right -lt 100 -or $rect.Bottom -lt 100 -or $rect.Right -gt 3840 -or $rect.Bottom -gt 2160) {
-        throw 'Unexpected RichEdit client dimensions.'
-    }
-    $bitmap = [Drawing.Bitmap]::new($rect.Right, $rect.Bottom)
+    $priorDpi = [IntPtr]::Zero
+    $bitmap = $null
     try {
+        $priorDpi = [PaperroomHighlightGui]::SetThreadDpiAwarenessContext([IntPtr](-4)) # Per-monitor-v2 coordinates.
+        if ($priorDpi -eq [IntPtr]::Zero) { throw 'Could not enter per-monitor DPI awareness for capture.' }
+        # Capture only the verified client rectangle once the compositor has
+        # had a turn to repaint following the editor/reader transition.
+        Start-Sleep -Milliseconds 100
+        $rect = [PaperroomHighlightGui]::PreviewArea($window, $process.Id, $preview)
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        $bitmap = [Drawing.Bitmap]::new($width, $height)
         $graphics = [Drawing.Graphics]::FromImage($bitmap)
         try {
-            $dc = $graphics.GetHdc()
-            try {
-                if (![PaperroomHighlightGui]::PrintWindow($preview, $dc, 1)) { throw 'RichEdit client capture failed.' }
-            } finally { $graphics.ReleaseHdc($dc) }
+            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, [Drawing.Size]::new($width, $height))
         } finally { $graphics.Dispose() }
+        if (!$rect.Equals([PaperroomHighlightGui]::PreviewArea($window, $process.Id, $preview))) {
+            throw 'The RichEdit area changed during the capture.'
+        }
         $mark = [Drawing.Color]::FromArgb(255,232,131).ToArgb() -band 0xFFFFFF
         $colors = [Collections.Generic.HashSet[int]]::new()
         $hits = 0
-        for ($y = 1; $y -lt $rect.Bottom; $y += 3) {
-            for ($x = 1; $x -lt $rect.Right; $x += 3) {
+        for ($y = 1; $y -lt $height; $y += 3) {
+            for ($x = 1; $x -lt $width; $x += 3) {
                 $value = $bitmap.GetPixel($x, $y).ToArgb() -band 0xFFFFFF
                 if ($value -eq $mark) { $hits++ }
                 [void]$colors.Add($value)
@@ -407,8 +442,15 @@ function Read-PreviewMark([bool]$Expected) {
         if ($colors.Count -lt 3 -or ($Expected -and $hits -lt 5) -or (!$Expected -and $hits -ne 0)) {
             throw "Unexpected RichEdit capture (colors=$($colors.Count), highlight pixels=$hits, expected=$Expected)."
         }
-        Write-Host "RichEdit screenshot samples: $hits highlight pixels; expected visible=$Expected."
-    } finally { $bitmap.Dispose() }
+        Write-Host "Foreground RichEdit samples for $Phase (${width}x${height}): $hits highlight pixels; expected visible=$Expected."
+    } catch {
+        $report = "$Phase - $($_.Exception.Message)"
+        $previewFailures.Add($report)
+        Write-Warning "RichEdit capture check failed: $report"
+    } finally {
+        if ($bitmap) { $bitmap.Dispose() }
+        if ($priorDpi -ne [IntPtr]::Zero) { [void][PaperroomHighlightGui]::SetThreadDpiAwarenessContext($priorDpi) }
+    }
 }
 
 function Assert-Database([string]$Database, [bool]$Marked, [string]$ExportZip = '') {
@@ -458,6 +500,7 @@ $title = 'QA Window Highlight'
 $selected = '選取📝'
 $process = $null
 $window = [IntPtr]::Zero
+$previewFailures = [Collections.Generic.List[string]]::new()
 try {
     foreach ($folder in $live,$restored) {
         [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
@@ -479,7 +522,7 @@ try {
     $null = Wait-For 'mark acknowledgment' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已加上螢光標記。切換閱讀可查看。' }
     if ([PaperroomHighlightGui]::Read($field) -cne $editor) { throw 'Mark action changed editor text.' }
     Command $window 110
-    Read-PreviewMark $true
+    Read-PreviewMark $true 'after mark'
     Close-Notebook $process
     $process.Dispose()
     $process = $null
@@ -488,7 +531,7 @@ try {
     $process = Start-Notebook $live
     $window = $process.MainWindowHandle
     Select-Note $title
-    Read-PreviewMark $true
+    Read-PreviewMark $true 'reopened original'
     Native-File 3 '匯出目前筆記為 Markdown…' $markdown 'Markdown 已匯出'
     if ((Get-FileHash -LiteralPath $markdown).Hash -cne (Get-FileHash -LiteralPath $source).Hash) {
         throw 'Standalone Markdown export changed the original bytes.'
@@ -505,7 +548,7 @@ try {
     $process = Start-Notebook $restored
     $window = $process.MainWindowHandle
     Select-Note $title
-    Read-PreviewMark $true
+    Read-PreviewMark $true 'restored backup'
     Native-File 30 '匯出工作區 HTML ZIP…' $html '已匯出 '
     $null = Open-Editor
     Native-Menu 113 26 '清除本篇螢光標記…'
@@ -513,14 +556,14 @@ try {
     Command $cancel 7
     $null = Wait-For 'clear canceled' { ![PaperroomHighlightGui]::IsWindowVisible($cancel) }
     Command $window 110
-    Read-PreviewMark $true
+    Read-PreviewMark $true 'after cancel clear'
     $null = Open-Editor
     Native-Menu 113 26 '清除本篇螢光標記…'
     $confirm = Wait-For 'clear-highlight confirmation' { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '清除螢光標記', 6) }
     Command $confirm 6
     $null = Wait-For 'clear acknowledgment' { [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已清除 1 個螢光標記。' }
     Command $window 110
-    Read-PreviewMark $false
+    Read-PreviewMark $false 'after confirmed clear'
     Close-Notebook $process
     $process.Dispose()
     $process = $null
@@ -528,6 +571,10 @@ try {
     Assert-Database $backup $true $html
     Assert-Database $liveDb $true
     if ((Get-FileHash -LiteralPath $backup).Hash -cne $originalBackupHash) { throw 'Backup bytes changed.' }
+    if ($previewFailures.Count -ne 0) {
+        Write-Host 'Native reopen, backup, restored HTML, exact Markdown and clear persistence checks completed.'
+        throw ("Foreground preview color checks failed: " + ($previewFailures -join ' | '))
+    }
     Write-Host 'PASS: native highlight, preview, normal reopen, exact Markdown, Backup, isolated restore, HTML and cancel/clear.'
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {

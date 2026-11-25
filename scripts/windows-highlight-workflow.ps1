@@ -657,10 +657,11 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, 
     return $result
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status,
-                     [switch]$AlreadyOpened, [string]$ExpectedError = '', [switch]$CanvasSave) {
+                     [switch]$AlreadyOpened, [string]$ExpectedError = '', [switch]$CanvasSave,
+                     [string]$NextDialog = '', [string]$SaveName = '') {
     if (!$AlreadyOpened) { Native-Menu 109 $Item $Caption }
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
-    $defaultName = if ($CanvasSave) { 'canvas.canvas' } else { switch ($Item) {
+    $defaultName = if ($SaveName) { $SaveName } elseif ($CanvasSave) { 'canvas.canvas' } else { switch ($Item) {
         3 { 'note.md' }
         4 { 'paperroom-backup.sqlite3' }
         30 { 'paperroom-html.zip' }
@@ -670,7 +671,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $CanvasSave -or $Item -notin 1, 9, 11, 37
+    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 9, 11, 31, 37, 38
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -710,6 +711,11 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
             [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
             $null = Wait-For 'native refusal dialog closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
             return
+        }
+        if ($NextDialog) {
+            return (Wait-For "native dialog after $Caption" {
+                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $NextDialog, 1)
+            })
         }
         $null = Wait-For "$Caption completed" {
             ![PaperroomHighlightGui]::IsWindowVisible($dialog) -and
@@ -3040,6 +3046,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     if ((Get-FileHash -LiteralPath $ruleDb).Hash -cne $sourceStamp -or
         (Get-FileHash -LiteralPath $ruleBackup).Hash -cne $backupStamp) { throw 'Isolated restore changed source or backup.' }
     Write-Host "PASS: collection rules, actual native creation and edits, rejected input and cancel without writes, legacy properties, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
+    . (Join-Path $PSScriptRoot 'windows-canvas-local-assets.ps1')
 } catch {
     if ($process -and !$process.HasExited -and $window -ne [IntPtr]::Zero) {
         Write-Host ("Native GUI diagnostics: " + [PaperroomHighlightGui]::DescribeWindows($window, $process.Id))

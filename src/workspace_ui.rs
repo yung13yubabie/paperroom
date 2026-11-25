@@ -273,6 +273,27 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn import_local_canvas_ui(&mut self) -> Result<()> {
+        unsafe {
+            let Some(path) = file_dialog(self.hwnd, "JSON Canvas\0*.canvas\0\0", "canvas", None)? else {
+                return Ok(());
+            };
+            let preview = crate::store::canvas_bundle::LocalCanvasBundle::read(&path)?;
+            if !crate::dialog::preview_decision(
+                self.hwnd, "預覽 Canvas 與同資料夾附件", &preview.description(),
+                "確認匯入", "取消匯入",
+            )? { return Ok(()); }
+            self.mutate(|app| {
+                let (id, title) = preview.save(&app.notebook)?;
+                let doc = app.notebook.read_canvas(id)?;
+                app.activate_canvas(id, title, doc, None)?;
+                label(app.widgets.status, "已匯入 Canvas 與同資料夾附件。");
+                Ok(())
+            });
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn import_canvas_bundle_ui(&mut self) -> Result<()> {
         unsafe {
             let Some(path) = file_dialog(self.hwnd, "JSON Canvas ZIP\0*.zip\0\0", "zip", None)? else {

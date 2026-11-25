@@ -410,6 +410,7 @@ impl App {
                         CanvasAssetState::Missing => "缺少附件",
                         CanvasAssetState::Ambiguous => "附件路徑有歧義",
                         CanvasAssetState::Unsafe => "附件路徑無效或不在封裝內",
+                        CanvasAssetState::Oversized => "附件超過單檔上限",
                     };
                     if body.bottom > body.top {
                         draw_text(dc, self.fonts[4], SOFT, badge, &mut body, DT_SINGLELINE | DT_END_ELLIPSIS);

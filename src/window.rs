@@ -1171,6 +1171,7 @@ impl App {
                 (29, "匯出 Zotero 原始 CSL JSON…"),
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
+                (38, "匯入 JSON Canvas 與同資料夾附件…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
@@ -1186,6 +1187,10 @@ impl App {
                 if let Err(error) = notion_preview_ui::run(self.hwnd) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if action == 38 {
+                if let Err(error) = self.import_local_canvas_ui() { self.show_error(error); }
                 return;
             }
             if action == 25 {

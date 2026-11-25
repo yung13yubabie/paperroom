@@ -1,7 +1,7 @@
 name: Build unsigned Windows artifact
 on:
   push:
-    branches: ['dev/offline-workspace-handoff']
+    branches: ['dev/offline-workspace-handoff', 'dev/features/notion-zip-csv-table']
     paths-ignore:
       - '.github/workflows/draft-windows-acceptance.yml'
       - 'docs/WINDOWS-DRAFT-QA.md'

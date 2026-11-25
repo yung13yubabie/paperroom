@@ -4,7 +4,7 @@ import argparse
 import contextlib
 import hashlib
 import io
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import runpy
 import struct
 import subprocess
@@ -77,6 +77,30 @@ class PreflightTest(unittest.TestCase):
 
     def test_exact_assets_pass(self):
         self.run_preflight()
+
+    def test_source_prefixes_keep_specific_paths_not_generic_parents(self):
+        prefixes = CANDIDATE["source_private_prefixes"]
+        self.assertEqual(prefixes(PurePosixPath("/tmp/checkout")), ["/tmp/checkout"])
+        self.assertEqual(
+            prefixes(PurePosixPath("/tmp/specific/checkout")),
+            ["/tmp/specific/checkout", "/tmp/specific"],
+        )
+        self.assertEqual(prefixes(PurePosixPath("/checkout")), ["/checkout"])
+        self.assertTrue(CANDIDATE["hits"](b"build from /tmp/checkout/src/main.rs", prefixes(PurePosixPath("/tmp/checkout"))))
+        self.assertFalse(CANDIDATE["hits"](b"generic example /tmp/file", prefixes(PurePosixPath("/tmp/checkout"))))
+
+    def test_source_zip_missing_static_crt_config_fails_with_matching_manifest(self):
+        path = "paperroom-0.1.2/.cargo/config.toml"
+        with ZipFile(io.BytesIO(self.source.read_bytes())) as canonical:
+            self.assertEqual(canonical.namelist().count(path), 1)
+            with ZipFile(self.source, "w") as omitted:
+                omitted.comment = canonical.comment
+                for entry in canonical.infolist():
+                    if entry.filename != path:
+                        omitted.writestr(entry, canonical.read(entry))
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, "Source ZIP does not match the specified commit"):
+            self.run_preflight()
 
     def test_unrelated_acceptance_hash_fails(self):
         with self.assertRaisesRegex(ValueError, "acceptance testing"):

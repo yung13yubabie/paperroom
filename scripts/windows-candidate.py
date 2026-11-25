@@ -65,6 +65,18 @@ def hits(data, needles):
     return len(offsets)
 
 
+def source_private_prefixes(root):
+    # A checkout may live directly in /tmp or /home. The parent then matches
+    # ordinary source text, including this checker's executable denylist.
+    # Always scan for the exact checkout and retain specific parent prefixes.
+    prefixes = [str(root)]
+    parent = str(root.parent)
+    generic = {value.lower() for path in GENERIC_PATHS for value in path_spellings(path)}
+    if parent != root.anchor and {value.lower() for value in path_spellings(parent)}.isdisjoint(generic):
+        prefixes.append(parent)
+    return prefixes
+
+
 def credential_matches(data):
     # Count known formats without including the contents in error messages.
     return len(CREDENTIAL.findall(data)) + sum(
@@ -144,6 +156,7 @@ def audit_bundle(args):
         cwd=ROOT,
     )
     source_data = args.source.read_bytes()
+    private_prefixes = source_private_prefixes(ROOT)
     with ZipFile(BytesIO(source_data)) as source, ZipFile(BytesIO(canonical)) as tracked:
         entries = archive_entries(source)
         if source.comment != args.commit.encode("ascii") or entries.keys() != set(tracked.namelist()):
@@ -163,7 +176,7 @@ def audit_bundle(args):
                 or data.startswith(b"SQLite format 3\0")
                 or credential_matches(data)
                 or BUILD_WORKSPACE.search(data.replace(b"\\", b"/"))
-                or hits(data, (str(ROOT.parent),))
+                or hits(data, private_prefixes)
             ):
                 raise ValueError("Source ZIP contains material reserved for local use")
             count += 1

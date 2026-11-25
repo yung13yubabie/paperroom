@@ -106,7 +106,7 @@ fn csv_and_exact_links_coexist_with_canvas_and_legacy_rules_through_isolated_res
             assert!(!old.prepare("SELECT 1 FROM sqlite_schema WHERE name='notion_page_paths'")?.exists([])?);
         }
         let mut db = Notebook::open(&workspace, false)?;
-        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, 32);
+        assert_eq!(db.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))?, super::SCHEMA_VERSION);
         assert_eq!(db.collection_field_rules(existing)?, [rule.clone()]);
         assert_eq!(db.note(marker)?.unwrap().body, "保留舊工作區正文");
         assert_eq!(db.connection.query_row("SELECT count(*) FROM notion_page_paths", [], |row| row.get::<_, i64>(0))?, 0);

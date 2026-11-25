@@ -25,7 +25,7 @@
 
 ## 尚待落地的主要範圍
 
-- **資料庫**：集合專屬欄位、日期相對區間的篩選、相依排程、多層分組、進階公式相容及範本。
+- **資料庫**：集合專屬欄位、含時間戳的日期篩選、相依排程、多層分組、進階公式相容及範本。
 - **Vault**：變更監看、新檔／改名／附件的增量協調、外掛相容，以及帶設定與索引中繼資料的完整 Vault 往返。
 - **白板及閱讀**：自由分區幾何、跨板巢狀結構、PDF 多欄或複雜排版文字、摘錄嵌入。
 
@@ -75,7 +75,7 @@
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
 | 分組 | 部分 | 集合表格與看板可依單一欄位分組並保存設定。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
 | 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可從同一視圖編輯已宣告的型別欄位。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
-| 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期使用週、月及前後日數條件，條件和群組可在同層複製、前後移。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
+| 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期篩選本週、未來七天、逾期，也可選其他週月或前後日數。條件和群組可在同層複製或移動。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [日期篩選操作](UI-ACCEPTANCE.md#集合相對日期篩選) |
 | 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用，支援屬性、公式結果、具名關聯的彙總筆數及加總。空值和無效值置後，關聯目標清單與自訂選項排序仍待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |
 | 資料庫範本 | 部分 | 可從現有列或空白建立範本，修改型別預設並撰寫多層 Markdown 子頁。可選根頁的關聯和附件。嵌入、子頁專屬資源與從現有筆記整棵擷取待做。 | [規格與文件](https://www.notion.com/help/database-templates) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 重複範本 | 未實作 | 未實作範本引擎。 | [官方](https://www.notion.com/help/database-templates) · [window.rs](../src/window.rs) |

@@ -67,10 +67,12 @@ pub(crate) enum FilterOperator {
     Contains, NotContains, StartsWith, EndsWith,
     Today, Yesterday, Tomorrow, PreviousDays, NextDays,
     ThisWeek, PreviousWeek, NextWeek, ThisMonth, PreviousMonth, NextMonth,
+    NextSevenDays, Overdue,
 }
 
 impl FilterOperator {
-    pub const OPTIONS: [(Self, &'static str); 23] = [
+    // Keep ordinal positions stable. Saved view rules store the option index.
+    pub const OPTIONS: [(Self, &'static str); 25] = [
         (Self::Equal, "等於"), (Self::NotEqual, "不等於"),
         (Self::Less, "小於／早於"), (Self::LessOrEqual, "小於等於／當日或更早"),
         (Self::Greater, "大於／晚於"), (Self::GreaterOrEqual, "大於等於／當日或更晚"),
@@ -81,6 +83,7 @@ impl FilterOperator {
         (Self::PreviousDays, "前 N 日（不含今天）"), (Self::NextDays, "後 N 日（不含今天）"),
         (Self::ThisWeek, "本週"), (Self::PreviousWeek, "上週"), (Self::NextWeek, "下週"),
         (Self::ThisMonth, "本月"), (Self::PreviousMonth, "上個月"), (Self::NextMonth, "下個月"),
+        (Self::NextSevenDays, "未來七天（不含今天）"), (Self::Overdue, "逾期（早於今天）"),
     ];
 
     pub fn label(self) -> &'static str {
@@ -98,7 +101,7 @@ impl FilterOperator {
         self.day_window() || matches!(self,
             Self::Today | Self::Yesterday | Self::Tomorrow |
             Self::ThisWeek | Self::PreviousWeek | Self::NextWeek |
-            Self::ThisMonth | Self::PreviousMonth | Self::NextMonth)
+            Self::ThisMonth | Self::PreviousMonth | Self::NextMonth | Self::NextSevenDays | Self::Overdue)
     }
 
     fn matches_relative(self, value: CalendarDay, today: CalendarDay, raw_count: Option<&str>) -> bool {
@@ -121,6 +124,8 @@ impl FilterOperator {
             Self::ThisMonth => months() == 0,
             Self::PreviousMonth => months() == -1,
             Self::NextMonth => months() == 1,
+            Self::NextSevenDays => (1..=7).contains(&delta()),
+            Self::Overdue => delta() < 0,
             _ => false,
         }
     }
@@ -1592,6 +1597,10 @@ fn decimal_order(a:&str,b:&str) -> std::cmp::Ordering {
     // comparison of the fraction already has the correct prefix ordering.
     if reverse { order.reverse() } else { order }
 }
+
+#[cfg(test)]
+#[path = "collection_due_filters_tests.rs"]
+mod due_filters_tests;
 
 #[cfg(test)]
 mod tests {

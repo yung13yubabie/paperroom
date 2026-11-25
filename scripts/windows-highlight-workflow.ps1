@@ -247,6 +247,11 @@ public static class PaperroomHighlightGui {
         }, IntPtr.Zero);
         return found;
     }
+    public static IntPtr ForegroundAlert(IntPtr owner, uint pid, string caption) {
+        if (!ForegroundIsOwned(owner, pid)) return IntPtr.Zero;
+        IntPtr alert = GetForegroundWindow();
+        return Kind(alert) == "#32770" && Caption(alert) == caption ? alert : IntPtr.Zero;
+    }
     public static MenuSelection PlanMenu(IntPtr owner, uint pid, IntPtr popup, uint itemId, string caption, bool prefix) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
@@ -575,11 +580,12 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         [PaperroomHighlightGui]::MouseAction($window, $process.Id, $submit, $point, 0)
         if ($ExpectedError) {
             $errorDialog = Wait-For 'native export refusal' {
-                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', '紙間', 1)
+                [PaperroomHighlightGui]::ForegroundAlert($window, $process.Id, '紙間')
             }
             if (![PaperroomHighlightGui]::DialogContains($errorDialog, $process.Id, $ExpectedError) -or
                 (Test-Path -LiteralPath $Path)) { throw 'The export refusal or its file state differs from the expected result.' }
-            Finish-Revision $errorDialog 1
+            [PaperroomHighlightGui]::TapKey($window, $process.Id, 0x0D)
+            $null = Wait-For 'native refusal dialog closed' { ![PaperroomHighlightGui]::IsWindowVisible($errorDialog) }
             return
         }
         $null = Wait-For "$Caption completed" {

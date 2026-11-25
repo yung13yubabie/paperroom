@@ -147,15 +147,15 @@ jobs:
             Remove-Item -LiteralPath $env:PAPERROOM_ACCEPTANCE_ROOT -Recurse -Force
           }
 
-  outline-replay:
-    # Opt in when only the outline QA changes and the tested EXE must stay identical.
-    if: github.repository == 'yung13yubabie/paperroom' && contains(github.event.head_commit.message, '[outline-replay]')
+  candidate-replay:
+    # Opt in for QA-only fixes that must replay the exact downloadable candidate.
+    if: github.repository == 'yung13yubabie/paperroom' && contains(github.event.head_commit.message, '[candidate-replay]')
     runs-on: windows-2022
     timeout-minutes: 12
     env:
-      PINNED_SOURCE: 4cb096c6d5de05bd130ca4e2adf3243de2073cf0
-      PINNED_EXE_SHA: 9a450d7687daacc287f0fa8198eb85a75a118869040b927bd47186ed089a7d65
-      PINNED_ZIP_SHA: e1edc4227617b769036d5ec2023664d57c4514c2ee4001a812fc7f59ed465287
+      PINNED_SOURCE: f586f8bfd997fe3a02244714551036bd4dfff99d
+      PINNED_EXE_SHA: faad48603916e94423f30de93dcaa098e5b7565417ba9d503536cf9d10971d4f
+      PINNED_ZIP_SHA: 0efd757efa0373f7a455a489f5f17ea6525a94ce3bbde73047a9c277b6cf4e97
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -180,16 +180,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15007532340"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15009549005"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45582935956 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45588280775 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'
           }
-          $root = Join-Path $env:RUNNER_TEMP ('paperroom-outline-replay-' + [guid]::NewGuid().ToString('N'))
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-candidate-replay-' + [guid]::NewGuid().ToString('N'))
           [void](New-Item -ItemType Directory -Path $root)
           try {
             $archive = Join-Path $root 'download.zip'

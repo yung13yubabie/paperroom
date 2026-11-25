@@ -1150,6 +1150,7 @@ impl App {
                 (9, "匯入 CSV 表格…"),
                 (10, "資料集合與看板…"),
                 (11, "匯入 JSON Canvas…"),
+                (38, "匯入 JSON Canvas 與同資料夾附件…"),
                 (12, "開啟已匯入的 Canvas…"),
                 (13, "搜尋 PDF 標註…"),
                 (14, "屬性型別…"),
@@ -1171,7 +1172,6 @@ impl App {
                 (29, "匯出 Zotero 原始 CSL JSON…"),
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
-                (38, "匯入 JSON Canvas 與同資料夾附件…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);

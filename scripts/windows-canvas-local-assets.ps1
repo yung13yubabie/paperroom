@@ -81,7 +81,8 @@ else:
     if ($LASTEXITCODE -ne 0) { throw "Canvas state or ZIP bytes were different at stage $Expected." }
 }
 function Canvas-LoosePreview {
-    Native-File 38 '匯入 JSON Canvas 與同資料夾附件…' $sourcePath '' -NextDialog '預覽 Canvas 與同資料夾附件'
+    Native-MenuFromKeyboard 109 38 '匯入 JSON Canvas 與同資料夾附件…'
+    Native-File 38 '匯入 JSON Canvas 與同資料夾附件…' $sourcePath '' -AlreadyOpened -NextDialog '預覽 Canvas 與同資料夾附件'
 }
 function Canvas-LocalPaint {
     $null = Wait-For 'rendered PNG pixels on the native group background' { Read-CanvasInk 172 67 133 }
@@ -122,7 +123,8 @@ Close-Notebook $process
 $process.Dispose()
 $process = Start-Notebook $destinationHome
 $window = $process.MainWindowHandle
-$zipReport = Native-File 31 '匯入 JSON Canvas ZIP…' $zipPath '' -NextDialog 'Canvas ZIP 匯入報告'
+Native-MenuFromKeyboard 109 31 '匯入 JSON Canvas ZIP…'
+$zipReport = Native-File 31 '匯入 JSON Canvas ZIP…' $zipPath '' -AlreadyOpened -NextDialog 'Canvas ZIP 匯入報告'
 Finish-Revision $zipReport 1
 Canvas-LocalPaint
 Canvas-ScopeSnapshot $reimportedCanvasDb reimported

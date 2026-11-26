@@ -426,6 +426,41 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn edit_canvas_base_card(&mut self, selected_node: &str) -> Result<()> {
+        unsafe {
+            let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_ref() else {
+                return Err("目前未開啟 Canvas。".into());
+            };
+            let id = view.id;
+            let root = self.notebook.canvas_vault(id)?.ok_or("請先將畫布綁定到匯入 Bases 時選取的 Vault。")?;
+            let (node, file, name) = crate::store::canvas_base_cards::named_nodes(&view.doc)
+                .into_iter().find(|(node, _, _)| *node == selected_node)
+                .ok_or("找不到這張 Base 卡片。")?;
+            let hwnd = self.hwnd;
+            let anchor = self.widgets.links;
+                let (pin,rows)=self.notebook.start_pin_edit(id,&view.doc,root,node)?;
+                if rows.is_empty(){return Err("這張卡片沒有可編輯的來源資料列。".into());}
+                let Some(i)=super::navigation_ui::choose_navigation_page(hwnd,anchor,rows.len(),|i|format!("{}  (#{})　{}",rows[i].title,rows[i].id,rows[i].path)) else{return Ok(());};
+                let row=&rows[i];
+                if (self.dirty || self.failed) && self.current.as_ref().is_some_and(|n|n.row.id==row.id){
+                    return Err("來源筆記仍有未儲存內容，請先處理原稿。".into());
+                }
+                let fields=self.notebook.pin_fields(&view.doc,&pin,row)?;
+                if fields.is_empty(){return Err("此列沒有可寫回的布林或數值欄位。".into());}
+                let Some(i)=super::navigation_ui::choose_navigation_page(hwnd,anchor,fields.len(),|i|format!("{}  [{}]　{}",fields[i].key,fields[i].kind,fields[i].value)) else{return Ok(());};
+                let field=&fields[i];
+                let hint=format!("{file}#{name}　{}（#{}）　{}\r\n{}",row.title,row.id,field.key,
+                    if field.kind=="boolean"{"輸入 true、false 或 null。"}else{"輸入十進位數（整數最多 15 位，小數最多 6 位）或 null。"});
+                let Some(draft)=crate::dialog::prompt(hwnd,"編輯 Bases 卡片欄位",&hint,&field.value,1024)? else{return Ok(());};
+                if let Err(err)=self.notebook.save_pin_field(&view.doc,&pin,row,field,&draft){
+                    return crate::dialog::show_text(hwnd,"欄位未儲存（可複製）",&format!("{err}\r\n\r\n{draft}"));
+                }
+                if self.current.as_ref().is_some_and(|n|n.row.id==row.id){self.current=self.notebook.note(row.id)?;}
+                label(self.widgets.status,&format!("{name}　#{}　{} = {draft}",row.id,field.key));
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn workspace_menu(&mut self) -> Result<()> {
         unsafe {
             let hwnd = self.hwnd;
@@ -456,10 +491,10 @@ impl App {
                     if selected_file.is_some() { choices.push((13, "開啟已選節點的來源筆記")); }
                     let bases = crate::store::canvas_base_cards::named_nodes(&view.doc);
                     if !companion && !bases.is_empty() {
-                        choices.extend([(15,"手動配對 Bases 檔案來源…"),(16,"預覽或開啟 Bases 具名檢視…"),(17,"撤銷 Bases 路徑配對…")]);
+                        choices.extend([(15,"手動配對 Bases 檔案來源…"),(16,"預覽或開啟 Bases 具名檢視…"),(17,"撤銷 Bases 路徑配對…"),(18,"編輯 Bases 卡片欄位…")]);
                     }
                     let action = popup(hwnd, anchor, None, &choices);
-                    if matches!(action,15..=17) {
+                    if matches!(action,15..=18) {
                         let root=initial_binding.ok_or("請先將畫布綁定到匯入 Bases 時選取的 Vault。")?;
                         let index = if view.selection.len()==1 {
                             bases.iter().position(|(node,_,_)|view.selection.contains(*node))
@@ -469,7 +504,10 @@ impl App {
                         }));
                         let Some(index)=pick else {return Ok(());};
                         let (node,file,name)=bases[index];
-                        if action==15 {
+                        if action==18 {
+                            let selected = node.to_owned();
+                            return self.edit_canvas_base_card(&selected);
+                        } else if action==15 {
                             let physical=if self.notebook.base_card_needs_file(root,file)? {
                                 let Some(folder)=folder_dialog(hwnd)? else {return Ok(());};
                                 Some(folder)

@@ -152,7 +152,7 @@ mod obsidian_base_typed;
 mod obsidian_base_dynamic;
 #[path="canvas_base_cards.rs"]
 pub(crate) mod canvas_base_cards;
-const SCHEMA_VERSION: i32 = 41;
+const SCHEMA_VERSION: i32 = 42;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -442,6 +442,7 @@ impl Notebook {
             tx.execute_batch(obsidian_base_dynamic::SCHEMA)?;
             tx.execute_batch(canvas_base_cards::SCHEMA)?;
         }
+        if version < 42 {tx.execute_batch(obsidian_base_import::scope::SCHEMA)?;}
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -1265,7 +1266,7 @@ mod tests {
         db.connection.execute_batch(
             "DROP TABLE pdf_excerpt_cards; DROP TABLE pdf_text_mark_segments; DROP TABLE vault_push_verified; DROP TABLE pdf_text_marks; DROP TABLE vault_sync_base; DROP TABLE attachment_origins; DROP TABLE board_group_sources; DROP TABLE property_definitions; DROP TABLE collection_views;
              DROP TABLE pdf_annotation_regions; DROP TABLE canvas_vault_bindings;
-             DROP TABLE obsidian_base_candidates; DROP TABLE obsidian_base_dynamic;
+             DROP TABLE IF EXISTS obsidian_base_scope; DROP TABLE obsidian_base_candidates; DROP TABLE obsidian_base_dynamic;
              DROP TABLE collection_formulas; DROP TABLE saved_canvases;
              DROP TABLE board_group_cards; DROP TABLE board_groups;
              DROP TABLE pdf_annotations; DROP TABLE attachments;

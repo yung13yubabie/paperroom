@@ -77,7 +77,7 @@ impl Relocation {
     }
 }
 
-fn safe_note_path(path: &str) -> Result<()> {
+pub(super) fn safe_note_path(path: &str) -> Result<()> {
     let mut components = path.split('/');
     if !path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md"))
         || components.clone().count() > 64
@@ -93,14 +93,14 @@ fn safe_note_path(path: &str) -> Result<()> {
 
 // Reject an exact collision, a file/directory collision, or differently cased
 // spellings of the same path component. Trash paths still reserve their names.
-fn paths_conflict(left: &str, right: &str) -> bool {
+pub(super) fn paths_conflict(left: &str, right: &str) -> bool {
     for (a, b) in left.split('/').zip(right.split('/')) {
         if a != b { return a.to_uppercase() == b.to_uppercase(); }
     }
     true
 }
 
-fn origin(conn: &Connection, note: i64) -> Result<(i64, String)> {
+pub(super) fn origin(conn: &Connection, note: i64) -> Result<(i64, String)> {
     conn.query_row(
         "SELECT p.import_root,p.relative_path FROM vault_paths p JOIN notes n ON n.id=p.note_id
          JOIN notes r ON r.id=p.import_root WHERE n.id=?1 AND n.trash_root IS NULL AND r.trash_root IS NULL",
@@ -365,6 +365,7 @@ impl Notebook {
             tx.execute("UPDATE notes SET body=?2,version=version+1 WHERE id=?1", params![edit.id, edit.body])?;
             tx.execute("UPDATE vault_sync_base SET body=?2 WHERE note_id=?1", params![edit.id, edit.body])?;
         }
+        super::super::obsidian_base_import::scope::mapped(&tx,plan.root,plan.target)?;
         tx.commit()?;
         Ok(())
     }

@@ -15,7 +15,10 @@ param(
     [switch]$VendorRichCanvasOnly,
     [switch]$PinnedBasesOnly,
     [switch]$NotionSourceOnly,
-    [switch]$NodeAssetsOnly
+    [switch]$NodeAssetsOnly,
+    [switch]$PinnedCardScopeOnly,
+    [switch]$NotionSourceReplacementOnly,
+    [switch]$NativeChildBoardOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -715,7 +718,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 20, 31, 37, 38, 39, 40
+    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 20, 31, 37, 38, 39, 40, 41
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -1445,6 +1448,18 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($PinnedCardScopeOnly) {
+        . (Join-Path $PSScriptRoot 'windows-pinned-card-live-scope.ps1')
+        return
+    }
+    if ($NotionSourceReplacementOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-source-replacement.ps1')
+        return
+    }
+    if ($NativeChildBoardOnly) {
+        . (Join-Path $PSScriptRoot 'windows-native-child-board.ps1')
+        return
+    }
     if ($PinnedBasesOnly) {
         . (Join-Path $PSScriptRoot 'windows-pinned-bases.ps1')
         return

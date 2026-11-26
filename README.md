@@ -138,3 +138,5 @@ Canvas 可用中鍵拖曳平移、以滾輪縮放，重開後接回同一份畫�
 圖為第 13 版工作區候選在無網卡 Wine 環境的實際畫面，使用合成筆記。狀態列顯示文字方塊已復原至原位置。
 
 [整合範圍、REA 證據與驗收案例](docs/INTEGRATION-COVERAGE.md) · [第二階段操作與限制](docs/WORKSPACE-SECOND-STAGE.md) · [介面入口與驗收紀錄](docs/UI-ACCEPTANCE.md) · [三款工具功能狀態](docs/FEATURE-STATUS.md)
+
+三款筆記工具的來源、可操作流程及正式發版門檻，見[互通驗收矩陣](docs/INTEROP-ACCEPTANCE.md)。

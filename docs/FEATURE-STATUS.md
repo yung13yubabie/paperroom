@@ -181,9 +181,9 @@
 | 屬性檢視 | 部分 | 本機文字屬性；匯入的 YAML 保留在原文。 | [官方](https://obsidian.md/help/plugins/properties) · [properties.rs](../src/properties.rs) |
 | 標籤面板 | 已驗證 | 可按名稱或頻率排序並切換平面或樹狀。可展開或收合單一分支及全部分支。可從標籤選單切換查詢條件並開啟正確來源，已驗同名筆記及離線重開。 | [規格與文件](https://obsidian.md/help/plugins/tags) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 巢狀標籤 | 已驗證 | 匯入 Vault 可查完全相符或含子層的標籤，能辨識內文與常見 YAML tags 欄，並從標籤樹開到原筆記。其他 YAML 語法及原廠完整查詢語言另見搜尋列。 | [官方](https://obsidian.md/help/plugins/tags) · [vault_search.rs](../src/vault_search.rs) |
-| .base 格式 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 視圖 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 公式語法 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| .base 格式 | 未實作 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 視圖 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 公式語法 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
 | 每日筆記 | 已驗證 | 日期識別碼跨改名、關閉、備份維持。 | [官方](https://obsidian.md/help/plugins/daily-notes) · [store.rs](../src/store.rs) |
 | Templates | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/web-clipper/templates) · [window.rs](../src/window.rs) |
 | Random Note | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/plugins/random-note) · [window.rs](../src/window.rs) |
@@ -222,9 +222,9 @@
 | 檔案格式與附件放置位置 | 部分 | 支援限定匯入及附件副本，資料庫位置由紙間選擇。 | [官方](https://obsidian.md/help/file-formats) · [介面驗收](UI-ACCEPTANCE.md) |
 | Web Clipper 樣板 | 未實作 | 未提供可安裝的擷取擴充套件。 | [官方](https://obsidian.md/help/web-clipper) · [介面驗收](UI-ACCEPTANCE.md) |
 | 尋找與取代 | 部分 | 可在目前筆記區分大小寫循環尋找，預覽並確認全部取代。逐筆取代與正規表示式待做。 | [官方](https://obsidian.md/help/find-and-replace) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 卡片視圖 | 未實作 | 紙間檔案交換不支援 .base。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 卡片視圖 | 未實作 | Canvas 可開啟釘選的具名 Bases 檢視；原廠 Cards 版型仍缺。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
 | Bases 地圖視圖 | 未實作 | 未實作地理位置欄位。 | [官方](https://obsidian.md/help/bases/views/map) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 清單視圖 | 未實作 | 未讀取或呈現 .base 清單。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 清單視圖 | 部分 | 可匯入支援的 .base 清單；完整選項未實作。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
 
 ## Heptabase
 

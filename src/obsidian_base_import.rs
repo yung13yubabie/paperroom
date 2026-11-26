@@ -5,6 +5,9 @@ use super::{Notebook, Result, attachments, collection_display::MAX_DISPLAY_COLUM
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 
+#[path="obsidian_base_scope.rs"]
+pub(crate) mod scope;
+
 enum Column { Filename, Folder, Path, Extension, Formula(obsidian_base::FileFormula), Front(String) }
 
 fn columns(base: &Base, view: &View) -> Result<Vec<(String,Column)>> {
@@ -69,6 +72,12 @@ impl Notebook {
     }
     pub(crate) fn import_obsidian_base_options(&self,root:i64,filename:&str,raw:Vec<u8>,live:bool,dynamic:bool)
         ->Result<(i64,Vec<(i64,String,i64,bool)>)>{
+        self.import_base_source_policy(root,filename,raw,live,dynamic,false)
+    }
+    pub(crate) fn import_vault_scope_base(&self,root:i64,filename:&str,raw:Vec<u8>)->Result<(i64,Vec<(i64,String,i64,bool)>)>{
+        self.import_base_source_policy(root,filename,raw,true,true,true)
+    }
+    fn import_base_source_policy(&self,root:i64,filename:&str,raw:Vec<u8>,live:bool,dynamic:bool,scope:bool)->Result<(i64,Vec<(i64,String,i64,bool)>)>{
         crate::output::windows_output_name(filename.as_ref())?;
         let stem = filename.rsplit_once('.').filter(|(s,e)| !s.trim().is_empty() && e.eq_ignore_ascii_case("base"))
             .map(|(s,_)|s).ok_or("請選擇 .base 原檔。")?;
@@ -77,19 +86,20 @@ impl Notebook {
         let base = obsidian_base::parse(&raw)?;
         if !dynamic && base.views.iter().any(|v|!v.sorts.is_empty()){return Err("這份 Bases 含型別排序，請選擇動態模式。".into())}
         if dynamic && (!live || base.views.iter().any(|v|v.typed_filters.len()>8)){return Err("動態模式需連結來源，每個檢視最多 8 個條件。".into())}
-        if live && !base.has_live_status() {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
+        if live && !scope && !base.has_live_status() {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
         let token:String=tx.query_row("SELECT i.token FROM notes n JOIN note_link_identities i ON i.note_id=n.id
             WHERE n.id=?1 AND n.trash_root IS NULL AND EXISTS(SELECT 1 FROM vault_paths WHERE import_root=n.id)",
             [root],|r|r.get(0)).optional()?.ok_or("請選擇仍在使用中的已匯入 Vault 根筆記。")?;
         let used:i64=tx.query_row("SELECT coalesce(sum(length(content)),0) FROM attachments",[],|r|r.get(0))?;
         if used>attachments::MAX_STORAGE_BYTES - base.raw.len() as i64 { return Err("工作區附件空間不足。".into()); }
-        let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
+        let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n{}可由集合選單開啟同名檢視。\n",text_for_receipt(filename),if scope {"集合依此 Vault 的來源路徑規則加入成員，檔案欄位隨已確認的路徑搬移更新。普通頁首快照取自成員加入時已儲存的 Markdown。"} else {"這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。"});
         let mut created=Vec::new();
         let mut named_views=Vec::new();
         let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
         if (live || !base.types.is_empty()) && normalized_handoff {return Err("此 Markdown ZIP 來源可能曾移除首行，無法核對連結欄位與型別比較的位置。".into());}
-        if dynamic{report.push_str("\n動態檢視會在開啟或重新整理時，以匯入時所選路徑的候選筆記重新篩選及排序；原檔改名或搬離該路徑即暫停入選，需重新匯入以採用新路徑。只讀取工作區已儲存的 Markdown。\n");}
+        if scope{report.push_str("\n這個集合跟隨所選 Vault 目前配對的 Markdown 路徑；新增來源、改名或搬移會重新檢查路徑和型別條件。\n");}
+        else if dynamic{report.push_str("\n動態檢視會在開啟或重新整理時，以匯入時所選路徑的候選筆記重新篩選及排序；原檔改名或搬離該路徑即暫停入選，需重新匯入以採用新路徑。只讀取工作區已儲存的 Markdown。\n");}
         else if !base.types.is_empty(){report.push_str("\n布林與數值比較篩選會在匯入時決定成員；缺少與 null 皆不符合比較。\n");}
         if live {report.push_str("\n已連結的來源欄位使用工作區目前保存的 Markdown；編輯時只更新該筆記。\n");}
         let mut remaining_front_bytes=32*1024*1024usize;
@@ -123,6 +133,7 @@ impl Notebook {
                 }
             }
             if dynamic{super::obsidian_base_dynamic::register(&tx,collection,root,view,&base)?;}
+            if scope{scope::register(&tx,root,collection,view,&base)?;}
             let mut members=Vec::new();
             {
                 let mut stmt=tx.prepare_cached("SELECT p.note_id,p.relative_path FROM vault_paths p JOIN notes n ON n.id=p.note_id

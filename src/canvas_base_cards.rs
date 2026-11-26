@@ -105,19 +105,27 @@ impl Notebook {
 
     pub(crate) fn resolve_base_card(&self,id:i64,doc:&Document,root:i64,node:&str)->Result<(i64,i64,String,CollectionView)> {
         let tx=self.connection.unchecked_transaction()?;
+        let result=self.resolve_base_card_in(id,doc,root,node)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn resolve_base_card_in(&self,id:i64,doc:&Document,root:i64,node:&str)->Result<(i64,i64,String,CollectionView)> {
         let (file,name)=self.check_base_card(id,doc,root,node)?;
         let sql=format!("SELECT s.receipt,c.id,c.name,v.view_id {ACTIVE}
             JOIN canvas_base_paths p ON p.receipt=s.receipt AND p.import_root=s.import_root
             JOIN base_card_views v ON v.receipt=s.receipt JOIN collection_views cv ON cv.id=v.view_id
             JOIN collections c ON c.id=cv.collection_id
             WHERE p.canvas_id=?1 AND p.import_root=?2 AND p.file=?3 COLLATE BINARY AND v.name=?4 COLLATE BINARY");
-        let (receipt,col,title,view):(i64,i64,String,i64)=tx.query_row(&sql,params![id,root,file,name],
+        let (receipt,col,title,view):(i64,i64,String,i64)=self.connection.query_row(&sql,params![id,root,file,name],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or("沒有這個原始具名檢視的有效配對。")?;
         let view=self.collection_views(col)?.into_iter().find(|v|v.id==view).ok_or("找不到已保存的具名檢視。")?;
-        tx.commit()?;
         Ok((receipt,col,title,view))
     }
 }
+
+#[path="canvas_base_editor.rs"]
+mod editor;
 
 #[cfg(test)]
 mod tests {

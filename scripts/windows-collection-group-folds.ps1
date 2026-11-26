@@ -44,7 +44,7 @@ from contextlib import closing
 from pathlib import Path
 import json, sqlite3, sys
 with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
-    assert db.execute('PRAGMA user_version').fetchone() == (41,)
+    assert db.execute('PRAGMA user_version').fetchone() == (42,)
     assert db.execute('PRAGMA integrity_check').fetchone() == ('ok',)
     assert not db.execute('PRAGMA foreign_key_check').fetchall()
     saved = db.execute("""

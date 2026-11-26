@@ -755,7 +755,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         Write-Host "Verified the common file dialog for command $Item ($Caption). Expected completion: $Status."
         [PaperroomHighlightGui]::TypeFilename($window, $process.Id, $dialog, $edit, $typed)
         $null = Wait-For "exact physical path entry for $Caption" {
-            [PaperroomHighlightGui]::Read($edit) -ceq $typed
+            Test-NativeEditValue $edit $typed
         }
         $submit = Control $dialog 1
         $point = [PaperroomHighlightGui]::ButtonPoint($dialog, $process.Id, $submit)
@@ -1141,17 +1141,34 @@ function Open-WorkspaceSearch([switch]$Menu) {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','全域搜尋筆記',1)
     }
 }
-function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
-    $edit = Control $Dialog $FieldId
-    $point = [PaperroomHighlightGui]::FilenamePoint($Dialog,$process.Id,$edit)
-    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
-    $null = Wait-For "workspace search field $FieldId focus" {
-        [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$Dialog,$edit)
+function Test-NativeEditValue([IntPtr]$Edit, [string]$Expected) {
+    try {
+        return [PaperroomHighlightGui]::Read($Edit) -ceq $Expected
+    } catch {
+        if (!$_.Exception.Message.Contains('Native text missing or truncated.')) { throw }
+        return $false
     }
-    [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
-    [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$ExactText)
-    $null = Wait-For "exact workspace search filter $FieldId" {
-        [PaperroomHighlightGui]::Read($edit) -ceq $ExactText
+}
+function Type-SearchFilter([IntPtr]$Dialog, [int]$FieldId, [string]$ExactText) {
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $edit = Control $Dialog $FieldId
+        $point = [PaperroomHighlightGui]::FilenamePoint($Dialog,$process.Id,$edit)
+        [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+        $null = Wait-For "workspace search field $FieldId focus" {
+            [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$Dialog,$edit)
+        }
+        [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+        [PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$edit,$ExactText)
+        try {
+            $null = Wait-For "exact workspace search filter $FieldId" {
+                Test-NativeEditValue $edit $ExactText
+            }
+            return
+        } catch {
+            if ($attempt -eq 2 -or $_.Exception.Message -cne "Timed out: exact workspace search filter $FieldId") { throw }
+            if (![PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$Dialog,$edit)) { throw }
+            Write-Host "Retrying physical text in verified native field $FieldId before submitting the dialog."
+        }
     }
 }
 function Collection-Prompt([string]$Caption, [string]$Value = '') {

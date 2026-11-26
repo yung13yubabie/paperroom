@@ -18,12 +18,14 @@ foreach ($folder in 'A','B') {
 filters: 'file.folder == "$folder"'
 formulas:
   matching: 'file.path.startsWith("A/")'
+  witness: 'if(formula.matching, "PaperroomPredicateTrue", "PaperroomPredicateFalse")'
 properties:
   formula.matching: {displayName: "ResultFor$folder"}
+  formula.witness: {displayName: "ExactPredicateText"}
 views:
   - type: table
     name: "Predicate$folder"
-    order: [file.path, formula.matching]
+    order: [file.path, formula.matching, formula.witness]
 "@
 }
 $installer = Join-Path $run 'Obsidian-1.15.1.exe'
@@ -166,12 +168,11 @@ function OpenFixture($file) {
 }
 foreach ($folder in 'A','B') {
     OpenFixture "$folder.base"
-    $literal = if ($folder -eq 'A') { 'true' } else { 'false' }
+    $literal = if ($folder -eq 'A') { 'PaperroomPredicateTrue' } else { 'PaperroomPredicateFalse' }
     $null=WaitFor "rendered $folder predicate $literal" {
         param($nodes)
-        (@(Exact $nodes "ResultFor$folder").Count -gt 0) -and
-        (@(Exact $nodes "$folder/Twin.md").Count -gt 0) -and
-        (@(Exact $nodes $literal).Count -gt 0)
+        (@($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' -and $_.Current.Name -like "$folder - PaperroomFixture -*" }).Count -gt 0) -and
+        (@($nodes | Where-Object { $_.Current.Name -like "*$literal*" }).Count -gt 0)
     }
 }
 OpenFixture 'Board.canvas'

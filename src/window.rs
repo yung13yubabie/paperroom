@@ -1350,7 +1350,7 @@ impl App {
                                 return Ok(());
                             }
                             let mode=if parsed.has_live_status() {
-                                popup(app.hwnd,app.widgets.files,None,&[(1,"固定快照"),(2,"連結工作區 status（可編輯）")])
+                                popup(app.hwnd,app.widgets.files,None,&[(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})])
                             } else {1};
                             if !matches!(mode,1|2) { return Ok(()); }
                             let (receipt, views) = app.notebook.import_obsidian_base_mode(root, filename, raw, mode==2)?;

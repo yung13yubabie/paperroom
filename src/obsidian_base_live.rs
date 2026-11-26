@@ -96,10 +96,19 @@ impl Notebook {
     pub(crate) fn edit_live_status(&self,col:i64,key:&str,note:i64,expected:i64,value:&str)->Result<()> {
         if value.len()>1024 || value.chars().any(char::is_control) {return Err("status 需要 1024 位元組內的單行文字。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
-        let (title,mut body):(String,String)=tx.query_row(&format!("SELECT n.title,n.body{ROWS} AND n.id=?3 AND n.version=?4 AND b.equals_text IS NULL"),params![col,key,note,expected],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or("來源或版本已變更，請重新開啟。")?;
+        let (title,body):(String,String)=tx.query_row(&format!("SELECT n.title,n.body{ROWS} AND n.id=?3 AND n.version=?4 AND b.equals_text IS NULL"),params![col,key,note,expected],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or("來源或版本已變更，請重新開啟。")?;
         let (range,old)=status_token(&body)?;
         if old==value {return Ok(());}
         let replacement=serde_json::to_string(value)?;
+        save_splice(&tx,note,expected,&title,body,range,&replacement,|body|{
+            if read_status(body)?!=value {return Err("新值無法依原樣保存。".into())}Ok(())
+        })?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+pub(super) fn save_splice(tx:&Transaction<'_>,note:i64,expected:i64,title:&str,mut body:String,range:Range<usize>,replacement:&str,verify:impl FnOnce(&str)->Result<()>)->Result<()> {
         let mut marks=note_highlights::read_marks(&tx,note,&body)?;
         for mark in &mut marks {
             if mark.end<=range.start {continue}
@@ -107,11 +116,9 @@ impl Notebook {
             mark.start=mark.start-range.len()+replacement.len();
             mark.end=mark.end-range.len()+replacement.len();
         }
-        body.replace_range(range,&replacement);
-        if read_status(&body)?!=value {return Err("新值無法依原樣保存。".into());}
+        body.replace_range(range,replacement);
+        verify(&body)?;
         save_in(&tx,note,expected,&title,&body)?;
         for mark in marks {tx.execute("INSERT INTO note_highlights(note_id,start_byte,end_byte) VALUES(?1,?2,?3)",params![note,mark.start as i64,mark.end as i64])?;}
-        tx.commit()?;
         Ok(())
-    }
 }

@@ -779,6 +779,7 @@ impl App {
                 }
                 if crate::store::notion_handoff::is_notion_csv(&file.name, origin.as_deref()) {
                     options.push((10, "從 Notion CSV 建立新集合…"));
+                    options.push((11, "依工作區欄位型別建立集合…"));
                 }
                 let action = popup(hwnd, anchor, None, &options);
                 match action {
@@ -846,12 +847,28 @@ impl App {
                     }
                     7 => self.open_pdf_view(file.id, 1)?,
                     8 => self.jump_pdf_annotation(file.id, anchor)?,
-                    10 => {
+                    10 | 11 => {
+                        let preview = if action == 11 {
+                            let preview = self.notebook.preview_typed_notion_csv(note, file.id)?;
+                            let detail = preview.summary();
+                            let prompt = if detail.lines().count() > 16 || detail.chars().count() > 700 {
+                                crate::dialog::show_text(hwnd, "CSV 欄位型別明細", &detail)?;
+                                "是否套用剛才預覽的完整欄位清單？"
+                            } else { &detail };
+                            if message(hwnd, "確認 CSV 欄位型別", prompt, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES {
+                                return Ok(());
+                            }
+                            Some(preview)
+                        } else { None };
                         let Some(title) = crate::dialog::prompt(
                             hwnd, "從 Notion CSV 建立新集合",
-                            "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）", "", 120,
+                            if preview.is_some() { "新集合名稱（套用已確認的欄位型別）" }
+                            else { "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）" }, "", 120,
                         )? else { return Ok(()); };
-                        let (id, count) = self.notebook.create_collection_from_notion_csv(note, file.id, &title)?;
+                        let (id, count) = match preview {
+                            Some(plan) => self.notebook.create_typed_notion_csv_collection(&title, &plan)?,
+                            None => self.notebook.create_collection_from_notion_csv(note, file.id, &title)?,
+                        };
                         self.rebuild();
                         self.open_kanban(id, title.trim().to_owned())?;
                         label(self.widgets.status, &format!("已建立集合，匯入 {count} 列。原始 CSV 已保留。"));

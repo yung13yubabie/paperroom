@@ -35,12 +35,14 @@ pub struct Import {
     unpacked_archives: u64,
     companion_canvases: Vec<(String,String)>,
     companion_warnings: Vec<String>,
+    companion_images: BTreeMap<String,Vec<u8>>,
 }
 
 pub(crate) struct HeptabaseHandoff {
     pub paths: BTreeMap<Vec<String>,String>,
     pub canvases: Vec<(String,String)>,
     pub warnings: Vec<String>,
+    pub images: BTreeMap<String,Vec<u8>>,
 }
 
 pub fn export_title(stem: &str) -> String {
@@ -122,6 +124,7 @@ impl Import {
             paths: std::mem::take(&mut self.source_paths),
             canvases: std::mem::take(&mut self.companion_canvases),
             warnings: std::mem::take(&mut self.companion_warnings),
+            images: std::mem::take(&mut self.companion_images),
         })
     }
 
@@ -181,6 +184,50 @@ impl Import {
             } else {
                 let displayed: String = name.chars().take(180).collect();
                 self.companion_warnings.push(format!("{displayed}：路徑重複、超過容量或不是 UTF-8，未匯入白板。"));
+            }
+        }
+        self.read_companion_images(snapshot)?;
+        Ok(())
+    }
+
+    fn read_companion_images(&mut self, snapshot:&[u8]) -> Result<()> {
+        let mut wanted = BTreeSet::new();
+        for (_,raw) in &self.companion_canvases {
+            if let Ok(doc) = crate::canvas::parse(raw.clone()) {
+                wanted.extend(crate::store::canvas_bundle::companion_image_paths(&doc).map(str::to_owned));
+            }
+        }
+        if wanted.is_empty() { return Ok(()); }
+        let mut archive = zip::unstable::read::ZipIterable::try_new(Cursor::new(snapshot), Default::default())?
+            .enforce_header_consistency(true);
+        let mut regular_names = BTreeSet::new();
+        let mut unique = BTreeSet::new();
+        let mut collisions = BTreeSet::new();
+        for entry in archive.files()? {
+            let entry = entry?;
+            let key = entry.name()?.trim_end_matches('/').to_lowercase();
+            if !entry.is_dir() { regular_names.insert(key.clone()); }
+            if !unique.insert(key.clone()) { collisions.insert(key); }
+        }
+        let mut input = Cursor::new(snapshot);
+        let mut remaining = 32 * 1024 * 1024u64;
+        for entry in archive.files()? {
+            let entry = entry?;
+            let name = entry.name()?.into_owned();
+            if !wanted.contains(&name) || entry.name_raw() != name.as_bytes() || !entry.is_file() || entry.encrypted()
+                || entry.unix_mode().is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000))
+                || !matches!(entry.compression(),zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated) { continue; }
+            let key = name.to_lowercase();
+            let prefix = format!("{key}/");
+            if collisions.contains(&key) || key.match_indices('/').any(|(i,_)| regular_names.contains(&key[..i]))
+                || unique.range(prefix.clone()..).next().is_some_and(|next| next.starts_with(&prefix)) { continue; }
+            if self.companion_images.len() >= 512 || entry.size() > MAX_MEDIA_BYTES.min(remaining) { continue; }
+            let size = entry.size();
+            let bytes = read_bounded(entry.with_reader(&mut input,Default::default())?, size)?;
+            remaining -= bytes.len() as u64;
+            let format = image::ImageFormat::from_path(&name).ok();
+            if format.is_some() && image::guess_format(&bytes).ok() == format {
+                self.companion_images.insert(name,bytes);
             }
         }
         Ok(())
@@ -510,6 +557,79 @@ mod tests {
                 .err()
                 .is_some_and(|error| error.to_string().contains("相同路徑"))
         );
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn heptabase_companion_images_use_exact_root_paths_and_roundtrip() -> Result<()> {
+        use crate::store::{Notebook,canvas_bundle::CanvasAssetState};
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("paperroom-image-companion-{}",std::process::id()));
+        fs::create_dir(&dir)?;
+        let source = dir.join("交接.zip");
+        let live = dir.join("live.sqlite3");
+        let backup = dir.join("backup.sqlite3");
+        let img = image::RgbImage::from_pixel(3,2,image::Rgb([30,90,175]));
+        let mut png = Cursor::new(Vec::new());
+        let mut jpeg = Cursor::new(Vec::new());
+        img.write_to(&mut png,image::ImageFormat::Png)?;
+        img.write_to(&mut jpeg,image::ImageFormat::Jpeg)?;
+        let (png,jpeg) = (png.into_inner(),jpeg.into_inner());
+        let mut nodes = vec![json!({"type":"group","id":"g","background":"圖/背景.jpg","backgroundStyle":"ratio",
+            "x":-20,"y":0,"width":600,"height":420})];
+        for (i,path) in ["圖/場景 一.png","旁景.png","同名.png","破損.png","甲.md"].into_iter().enumerate() {
+            nodes.push(json!({"type":"file","id":format!("f{i}"),"file":path,"x":40*i,"y":10,"width":100,"height":90}));
+        }
+        let raw = format!("{}\r\n",serde_json::to_string_pretty(&json!({"nodes":nodes}))?);
+        let mut zip=zip::ZipWriter::new(File::create(&source)?);
+        for (name,bytes) in [("甲.md",b"# A".as_slice()),("All-Data.json",b"{}"),("畫板/取景.canvas",raw.as_bytes()),
+            ("圖/場景 一.png",png.as_slice()),("圖/背景.jpg",jpeg.as_slice()),("畫板/旁景.png",png.as_slice()),
+            ("同名.png",png.as_slice()),("同名.PNG",png.as_slice()),("破損.png",b"text"),("無關.png",png.as_slice())] {
+            zip.start_file(name,zip::write::SimpleFileOptions::default())?;
+            zip.write_all(bytes)?;
+        }
+        drop(zip.finish()?);
+        let original=fs::read(&source)?;
+        let (mut pages,media)=archive_with_media(&source)?;
+        let handoff=pages.take_heptabase_handoff().unwrap();
+        let mut db=Notebook::open(&live,false)?;
+        let (_,report)=db.import_heptabase_handoff("工作區",pages.pages,media,handoff)?;
+        assert!(report.details.iter().any(|s|s.contains("已保存 2 份同包圖片；3 份圖片參照未取得")));
+        let id=db.saved_canvases()?[0].0;
+        db.backup(&backup)?;
+        drop(db);
+        for (idx,path) in [live,backup].iter().enumerate() {
+            let db=Notebook::open(path,false)?;
+            let view=db.canvas_bundle_view(id)?.unwrap();
+            assert_eq!(view.references["圖/場景 一.png"],CanvasAssetState::Stored("圖/場景 一.png".into()));
+            assert_eq!(view.references["旁景.png"],CanvasAssetState::Missing);
+            assert!(!view.references.contains_key("甲.md"));
+            assert_eq!(view.previews["圖/背景.jpg"].width,3);
+            assert_eq!(view.previews["圖/場景 一.png"].height,2);
+            assert!(db.resolve_canvas_file_link(id,None,"f4")?.note_id.is_some());
+            let single=dir.join(format!("單圖{idx}.png"));
+            db.save_canvas_bundle_asset(id,"圖/場景 一.png",&single)?;
+            assert_eq!(fs::read(&single)?,png);
+            let result=dir.join(format!("可攜{idx}.zip"));
+            db.export_canvas_bundle(id,&result)?;
+            assert!(db.export_canvas_bundle(id,&result).is_err());
+            let mut out=zip::ZipArchive::new(File::open(&result)?)?;
+            assert_eq!(out.len(),3);
+            for (member,expected) in [("取景.canvas",raw.as_bytes()),("圖/場景 一.png",png.as_slice()),("圖/背景.jpg",jpeg.as_slice())] {
+                let mut bytes=Vec::new();
+                out.by_name(member)?.read_to_end(&mut bytes)?;
+                assert_eq!(bytes,expected);
+            }
+            drop(out);
+            let clean = Notebook::open(&dir.join(format!("獨立{idx}.sqlite3")),false)?;
+            let imported = clean.import_canvas_bundle(&result)?;
+            assert_eq!(clean.read_canvas(imported.id)?.as_str(),raw);
+            let copied=clean.canvas_bundle_view(imported.id)?.unwrap();
+            assert_eq!(copied.previews.len(),2);
+            assert!(clean.canvas_file_links(imported.id)?.iter().all(|link|link.note_id.is_none()));
+        }
+        assert_eq!(fs::read(source)?,original);
         fs::remove_dir_all(dir)?;
         Ok(())
     }

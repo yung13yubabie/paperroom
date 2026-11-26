@@ -8,7 +8,11 @@ param(
     [switch]$UnifiedSourcesOnly,
     [switch]$UnifiedDetailsOnly,
     [switch]$BasesLiveOnly,
-    [switch]$CompanionPlacementOnly
+    [switch]$CompanionPlacementOnly,
+    [switch]$TypedBasesOnly,
+    [switch]$TypedNotionOnly,
+    [switch]$CompanionAssetsOnly,
+    [switch]$VendorRichCanvasOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1429,6 +1433,22 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($TypedBasesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-typed.ps1')
+        return
+    }
+    if ($TypedNotionOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-typed-fields.ps1')
+        return
+    }
+    if ($CompanionAssetsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-companion-assets.ps1')
+        return
+    }
+    if ($VendorRichCanvasOnly) {
+        . (Join-Path $PSScriptRoot 'windows-vendor-rich-canvas.ps1')
+        return
+    }
     if ($BasesLiveOnly) {
         . (Join-Path $PSScriptRoot 'windows-bases-live.ps1')
         return

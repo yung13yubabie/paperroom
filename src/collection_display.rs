@@ -85,17 +85,32 @@ impl Notebook {
     #[cfg(any(windows, test))]
     pub(crate) fn collection_display_snapshot(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>> {
         let tx=self.connection.unchecked_transaction()?;
+        let columns=self.collection_display_snapshot_in(collection)?;
+        tx.commit()?;
+        Ok(columns)
+    }
+    pub(crate) fn collection_display_snapshot_in(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>>{
         let columns=self.collection_display_columns(collection)?.map(|keys|keys.into_iter().map(|key|{
             let values=self.collection_display_values(collection,&key)?;
             Ok((key,values))
         }).collect::<Result<Vec<_>>>()).transpose()?;
-        tx.commit()?;
+
         Ok(columns)
+    }
+    #[cfg(any(windows,test))]
+    pub(crate) fn collection_lanes_and_display(&self,collection:i64,view:&super::collection_views::CollectionView)
+       ->Result<(Vec<(super::collection_group_folds::GroupValue,Vec<super::Row>)>,Option<Vec<(String,std::collections::HashMap<i64,String>)>>)>{
+        let tx=self.connection.unchecked_transaction()?;
+        let lanes=self.presented_collection_lanes(collection,Some(view))?;
+        let columns=self.collection_display_snapshot_in(collection)?;
+        tx.commit()?;
+        Ok((lanes,columns))
     }
     pub(crate) fn collection_display_values(
         &self, collection: i64, key: &str,
     ) -> Result<std::collections::HashMap<i64, String>> {
         let key = key_checked(key)?;
+        if let Some(typed)=super::obsidian_base_typed::display(&self.connection,collection,&key,false)? {return Ok(typed);}
         if let Some(live)=super::obsidian_base_live::display(&self.connection,collection,&key,false)? { return Ok(live); }
         let mut statement = self.connection.prepare(
             "SELECT c.note_id, CASE WHEN fc.key IS NULL THEN p.value ELSE f.value END

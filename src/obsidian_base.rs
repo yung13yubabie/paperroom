@@ -1,4 +1,5 @@
 //! Read-only subset of Obsidian Bases, projected onto imported Markdown file notes.
+use super::obsidian_base_typed::Test;
 use std::collections::{BTreeMap, BTreeSet};
 use yaml_rust2::{Yaml, parser::{Event, Parser}, scanner::TScalarStyle};
 
@@ -18,6 +19,8 @@ pub(crate) struct View {
     /// Canonical identifiers, in display order; empty means no explicit order.
     pub order: Vec<String>,
     pub folders: Vec<FolderRule>,
+    pub typed_filters: Vec<Test>,
+    pub group: Option<String>,
 }
 
 impl View {
@@ -36,6 +39,7 @@ impl View {
 pub(crate) struct Base {
     pub raw: Vec<u8>,
     pub views: Vec<View>,
+    pub types: BTreeMap<String,&'static str>,
     pub formulas: BTreeMap<String, FileFormula>,
     pub display_names: BTreeMap<String, String>,
 }
@@ -43,12 +47,12 @@ pub(crate) struct Base {
 impl Base {
     pub(crate) fn has_live_status(&self)->bool {
         self.views.iter().flat_map(|view|view.order.iter()).any(|key|key=="note.status"
-            || self.formulas.get(key).and_then(FileFormula::status_literal).is_some())
+            || self.formulas.get(key).and_then(FileFormula::status_literal).is_some()) || !self.types.is_empty()
     }
 }
 
 #[derive(Clone, Debug)]
-enum FileText { Folder, Path, Extension, Status }
+enum FileText { Folder, Path, Extension, Status, Typed(Test) }
 #[derive(Clone, Debug)]
 enum StringTest { Contains, StartsWith, EndsWith }
 
@@ -62,6 +66,7 @@ impl FileFormula {
             if literal.len()>512 || literal.chars().any(char::is_control) {return Err("公式文字過長或含控制字元。".into());}
             return Ok(Self{field:FileText::Status,test:StringTest::Contains,literal});
         }
+        if let Some(test)=Test::parse(expression){return Ok(Self{field:FileText::Typed(test),test:StringTest::Contains,literal:String::new()})}
         let (call, argument) = expression.trim().split_once('(').ok_or("公式需要單一檔案文字函式。")?;
         let (receiver, method) = call.trim_end().rsplit_once('.').ok_or("公式缺少檔案欄位。")?;
         let field = match receiver {
@@ -80,10 +85,11 @@ impl FileFormula {
         Ok(Self { field, test, literal })
     }
 
+    pub(super) fn typed(&self)->Option<&Test>{if let FileText::Typed(test)=&self.field{Some(test)}else{None}}
     pub(super) fn status_literal(&self)->Option<&str>{matches!(self.field,FileText::Status).then_some(&self.literal)}
     pub(super) fn display(&self, path: &str, folder: &str, name: &str) -> &'static str {
         let text = match self.field {
-            FileText::Status => unreachable!("status formulas use their source column"),
+            FileText::Status | FileText::Typed(_) => unreachable!("status formulas use their source column"),
             FileText::Folder => folder, FileText::Path => path,
             FileText::Extension => name.rsplit_once('.').map_or("", |(_, ext)| ext),
         };
@@ -175,6 +181,10 @@ fn skip_front_value(event: Event, next: &mut impl FnMut()->R<Event>, depth: usiz
 }
 
 pub(super) fn front_fields(prefix: &[u8], selected: &BTreeSet<&str>) -> R<BTreeMap<String,String>> {
+    parse_front(prefix,selected,false)
+}
+pub(super) fn front_fields_with_null(prefix:&[u8],selected:&BTreeSet<&str>)->R<BTreeMap<String,String>>{parse_front(prefix,selected,true)}
+fn parse_front(prefix:&[u8],selected:&BTreeSet<&str>,keep_null:bool)->R<BTreeMap<String,String>> {
     let bytes = prefix.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(prefix);
     let mut lines = bytes.split_inclusive(|&b| b == b'\n');
     fn line(bytes: &[u8]) -> &[u8] {
@@ -214,7 +224,7 @@ pub(super) fn front_fields(prefix: &[u8], selected: &BTreeSet<&str>) -> R<BTreeM
             match value {
                 Event::Scalar(s,style,0,None) if matches!(style,TScalarStyle::Plain|TScalarStyle::SingleQuoted|TScalarStyle::DoubleQuoted)
                     && s.len()<=1024 && !s.chars().any(char::is_control) => {
-                        if style!=TScalarStyle::Plain || !(s.is_empty() || matches!(Yaml::from_str(&s),Yaml::Null)) {
+                        if keep_null || style!=TScalarStyle::Plain || !(s.is_empty() || matches!(Yaml::from_str(&s),Yaml::Null)) {
                             fields.insert(key,s);
                         }
                     }
@@ -265,13 +275,13 @@ fn predicate(s: &str) -> R<FolderRule> {
     Ok(if exact { FolderRule::Exact(path) } else { FolderRule::Subtree(path) })
 }
 
-fn filters(value: Node, rules: &mut Vec<FolderRule>) -> R<()> {
+fn filters(value: Node, rules: &mut Vec<FolderRule>, typed: &mut Vec<Test>) -> R<()> {
     match value {
-        Node::Text(s) if rules.len() < 32 => { rules.push(predicate(&s)?); Ok(()) }
+        Node::Text(s) if rules.len()+typed.len() < 32 => { if let Some(test)=Test::parse(&s){typed.push(test);}else{rules.push(predicate(&s)?);} Ok(()) }
         Node::Map(mut m) if m.len() == 1 && m.contains_key("and") => {
             let terms = m.remove("and").unwrap().seq()?;
             if terms.is_empty() { return Err("不支援空的 and 條件。".into()); }
-            for term in terms { filters(term, rules)?; }
+            for term in terms { filters(term, rules,typed)?; }
             Ok(())
         }
         _ => Err("不支援這項 Bases 篩選組合，或條件超過 32 個。".into()),
@@ -316,8 +326,8 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
             if display_names.insert(property(key)?,display).is_some() { return Err("屬性名稱重複。".into()); }
         }
     }
-    let mut global = Vec::new();
-    if let Some(f) = root.remove("filters") { filters(f,&mut global)?; }
+    let mut global = Vec::new(); let mut global_typed=Vec::new();
+    if let Some(f) = root.remove("filters") { filters(f,&mut global,&mut global_typed)?; }
     let rows = root.remove("views").ok_or("Bases 缺少 views。")?.seq()?;
     supported(root)?;
     if rows.is_empty() || rows.len() > 32 { return Err("需要 1 到 32 個檢視。".into()); }
@@ -330,8 +340,8 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
         };
         let name = label(row.remove("name").ok_or("檢視缺少 name。")?.text()?)?;
         if !names.insert(name.clone()) { return Err("檢視名稱重複。".into()); }
-        let mut folders = global.clone();
-        if let Some(f) = row.remove("filters") { filters(f,&mut folders)?; }
+        let mut folders = global.clone();let mut typed_filters=global_typed.clone();
+        if let Some(f) = row.remove("filters") { filters(f,&mut folders,&mut typed_filters)?; }
         let mut order = Vec::new();
         if let Some(columns) = row.remove("order") {
             for col in columns.seq()? {
@@ -340,13 +350,32 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
                 order.push(key);
             }
         }
+        let group=if let Some(config)=row.remove("groupBy"){
+            let mut config=config.map()?;
+            let key=property(config.remove("property").ok_or("群組缺少來源屬性。")?.text()?)?;
+            if config.remove("direction").ok_or("群組缺少 ASC 方向。")?.text()? != "ASC"{
+                return Err("目前只支援 ASC 遞增型別群組。".into());
+            }
+            supported(config)?;
+            if !order.contains(&key){return Err("型別群組的來源欄必須出現在 order。".into())}
+            Some(key)
+        }else{None};
         supported(row)?;
-        views.push(View {name, layout, order, folders});
+        views.push(View {name, layout, order, folders,typed_filters,group});
     }
     for key in display_names.keys().chain(views.iter().flat_map(|view|view.order.iter())) {
         if key.starts_with("formula.") && !formulas.contains_key(key) { return Err(format!("找不到公式：{key}")); }
     }
-    Ok(Base { raw: raw.to_vec(), views, display_names, formulas })
+    let mut types=BTreeMap::new();
+    for test in formulas.values().filter_map(FileFormula::typed).chain(views.iter().flat_map(|v|&v.typed_filters)) {
+        if types.insert(test.key.clone(),test.kind).is_some_and(|prev|prev!=test.kind){return Err(format!("欄位「{}」有互相衝突的型別。",test.key))}
+    }
+    for view in &views {
+        if let Some(group)=&view.group && !group.strip_prefix("note.").is_some_and(|key|types.contains_key(key)){
+            return Err("群組來源必須是已明確比較的布林或數值筆記欄位。".into())
+        }
+    }
+    Ok(Base { types,raw: raw.to_vec(), views, display_names, formulas })
 }
 
 #[cfg(test)]

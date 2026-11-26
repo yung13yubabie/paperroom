@@ -85,8 +85,16 @@ pub(crate) struct CompanionReport {
     pub(crate) details: Vec<String>,
 }
 
+#[cfg(test)]
 pub(super) fn import_companion_boards(
     db: &Connection, import_root: i64, documents: Vec<(String, String)>, notes: &HashMap<String, i64>,
+) -> Result<CompanionReport> {
+    import_companion_with_images(db,import_root,documents,notes,&Default::default())
+}
+
+pub(super) fn import_companion_with_images(
+    db:&Connection, import_root:i64, documents:Vec<(String,String)>, notes:&HashMap<String,i64>,
+    images:&std::collections::BTreeMap<String,Vec<u8>>,
 ) -> Result<CompanionReport> {
     let mut report = CompanionReport::default();
     for (member, raw) in documents {
@@ -128,6 +136,10 @@ pub(super) fn import_companion_boards(
                 } else {
                     missing += 1;
                 }
+            }
+            let (kept,unavailable) = super::canvas_bundle::attach_companion_images(db,id,&member,&document,images)?;
+            if kept + unavailable > 0 {
+                report.details.push(format!("{member}：已保存 {kept} 份同包圖片；{unavailable} 份圖片參照未取得。"));
             }
             report.canvases += 1;
             report.details.push(format!("{member}：已保存為可編輯 Canvas（#{id}）。同包來源 {bound} 個，未對應檔案節點 {missing} 個。{reason}"));

@@ -125,7 +125,14 @@ function Confirm-RestoreRefusal([string]$Text) {
     if (![PaperroomHighlightGui]::DialogContains($errorWindow,$process.Id,$Text)) {
         throw "Missing expected portable restore error: $Text"
     }
-    Finish-Revision $errorWindow 1
+    # A native MessageBox does not always expose its default OK as child 1.
+    # Match the exact owned foreground alert before sending its real Enter key.
+    if ([PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間') -ne $errorWindow) {
+        throw 'The validated restore refusal is no longer in the foreground.'
+    }
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+    $null = Wait-For 'native restore refusal dismissed' { ![PaperroomHighlightGui]::IsWindowVisible($errorWindow) }
+    Write-Host "Verified and dismissed the native restore refusal: $Text."
 }
 function Get-LiveWorkspaceFileHash([string]$Path) {
     # SQLite's active Windows handle requires sharing reads and writes. This
@@ -212,6 +219,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreParent 'Cancelled restore')) {
         throw 'Cancelling created a portable workspace.'
     }
+    Write-Host 'Verified cancelling the native confirmation leaves the child path absent.'
     $confirm = Open-RestoreConfirmation $restoreBackup 'Occupied'
     Finish-Revision $confirm 6
     Confirm-RestoreRefusal '目的地已存在'

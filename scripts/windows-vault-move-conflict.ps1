@@ -83,7 +83,9 @@ $refusal=Wait-For 'paperroom refused uncoordinated source association' {
     [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
 }
 if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'未協調變更')) { throw 'Unexpected source reassociation refusal.' }
-Finish-Revision $refusal 1
+[PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+$null=Wait-For 'confirmed native refusal alert closed' { ![PaperroomHighlightGui]::IsWindowVisible($refusal) }
+Write-Host 'Verified native refusal reported the uncoordinated local edit.'
 $null=Witness-ScopedConflict $db $old 'true' 'false' $identity
 if (Test-Path -LiteralPath $sourceOld) { throw 'Relocation refusal wrote to the original path.' }
 if ((Get-FileHash -LiteralPath $sourceNext).Hash -cne $initialDisk) { throw 'Relocation refusal overwrote the already moved file.' }

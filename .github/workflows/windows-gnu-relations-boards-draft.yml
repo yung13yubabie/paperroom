@@ -1,4 +1,4 @@
-name: Replay official Obsidian Files-sidebar move on the exact draft EXE
+name: Replay the official Obsidian move and Paperroom coordination
 on:
   push:
     branches: ['dev/linked-collection-board-20261126']
@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
-          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-relations-boards-draft.yml' ':!scripts/windows-typed-relation-branch.ps1' ':!scripts/windows-obsidian-move-fixture.ps1'
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-relations-boards-draft.yml' ':!scripts/windows-typed-relation-branch.ps1' ':!scripts/windows-obsidian-move-fixture.ps1' ':!scripts/windows-vault-move-conflict.ps1'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: ${{ env.PAPERROOM_NAME }}

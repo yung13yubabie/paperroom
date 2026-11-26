@@ -22,6 +22,7 @@ param(
     [switch]$VaultRelocationConflictOnly,
     [switch]$TypedRelationBranchOnly,
     [switch]$RelationRollupRecoveryOnly,
+    [switch]$SharedNoteWorkflowOnly,
     [switch]$BasesDescendingOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -1452,7 +1453,7 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
-    if ($TypedRelationBranchOnly -or $RelationRollupRecoveryOnly) {
+    if ($TypedRelationBranchOnly -or $RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) {
         . (Join-Path $PSScriptRoot 'windows-typed-relation-branch.ps1')
         return
     }

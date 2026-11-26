@@ -100,7 +100,7 @@ foreach ($role in $notes27.Keys) {
             Collection-Prompt '設定文字屬性' $value
         }
     }
-    if ($RelationRollupRecoveryOnly -and $role -in 'exact','decoy') {
+    if (($RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) -and $role -in 'exact','decoy') {
         Native-Menu 113 4 '設定文字屬性…'
         Collection-Prompt '文字屬性' 'Duration'
         $value=if ($role -eq 'exact') {'8'} else {'1'}
@@ -115,7 +115,7 @@ foreach ($role in $notes27.Keys) {
         Native-File 1 '加入本機附件…' $asset '附件已保存到本機工作區。' -AlreadyOpened
     }
 }
-if ($RelationRollupRecoveryOnly) {
+if ($RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) {
     Native-Menu 109 14 '屬性型別…'
     Native-Menu 109 1 '設定屬性型別…' -MenuOpen
     Collection-Prompt '設定工作區屬性型別' 'Duration'
@@ -133,7 +133,7 @@ foreach ($name in 'Source','Target') {
         Collection-Prompt '加入集合'
     }
 }
-if (!$RelationRollupRecoveryOnly) {
+if (!$RelationRollupRecoveryOnly -and !$SharedNoteWorkflowOnly) {
     Collection27 'Source'
     Native-Menu 120 11 '集合檢視…'
     Native-Menu 120 1 '儲存新檢視…' -MenuOpen
@@ -159,7 +159,7 @@ Choose-CollectionRow '新增關聯屬性…'
 Choose-CollectionRow 'Source　[#'
 Choose-CollectionRow 'Target　[#'
 Collection-Prompt '新增集合關聯屬性' '關聯'
-if ($RelationRollupRecoveryOnly) {
+if ($RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) {
     . (Join-Path $PSScriptRoot 'windows-rollup-board-recovery.ps1')
     return
 }

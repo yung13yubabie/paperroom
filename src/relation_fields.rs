@@ -163,8 +163,45 @@ impl Notebook {
         Ok(())
     }
 
+
+    pub(crate) fn rollup_member(&self, collection:i64, note:i64)->Result<Member> {
+        member(&self.connection,collection,note)
+    }
+
+    pub(crate) fn saved_rollup_trace(&self,collection:i64,name:&str,expression:&str,owner:&Member)->Result<RollupTrace> {
+        let tx=self.connection.is_autocommit().then(||self.connection.unchecked_transaction()).transpose()?;
+        let current=self.connection.prepare_cached(
+            "SELECT 1 FROM collection_formulas WHERE collection_id=? AND name=? AND expression=?")?
+            .exists(params![collection,name,expression])?;
+        if !current || member(&self.connection,collection,owner.id)?!=*owner {
+            return Err("公式或資料列已變更，請重新選取。".into());
+        }
+        let formula=crate::formula::CompiledFormula::new(expression)?;
+        let (field,role,key)=formula.direct_field_rollup().ok_or("此公式不支援逐筆來源明細。")?;
+        let mut peers=Vec::new();
+        let total=self.compute_field_rollup(owner.id,field,role,key,Some(&mut peers))?;
+        if let Some(tx)=tx {tx.commit()?;}
+        Ok(RollupTrace { total,peers })
+    }
+
+    pub(crate) fn open_rollup_peer(&self,collection:i64,name:&str,expression:&str,owner:&Member,
+        previous:&RollupTrace,index:usize)->Result<Note> {
+        let tx=self.connection.unchecked_transaction()?;
+        let current=self.saved_rollup_trace(collection,name,expression,owner)?;
+        if &current!=previous {return Err("彙總來源或數值已變更，請重新查看明細。".into());}
+        let peer=current.peers.get(index).ok_or("找不到所選來源。")?;
+        let note=self.note(peer.id)?.ok_or("來源已不存在。")?;
+        tx.commit()?;
+        Ok(note)
+    }
+
     // Invoked inside the caller's read transaction, including scans of saved views.
     pub(super) fn relation_field_rollup(&self, note:i64, field_id:&str, role:&str, key:Option<&str>)->Result<f64> {
+        self.compute_field_rollup(note,field_id,role,key,None)
+    }
+
+    fn compute_field_rollup(&self,note:i64,field_id:&str,role:&str,key:Option<&str>,
+        mut trace:Option<&mut Vec<RollupPeer>>)->Result<f64> {
         let field = field_id.parse::<i64>().ok().filter(|n| *n>0 && n.to_string()==field_id)
             .ok_or("關聯屬性編號必須是正整數。")?;
         let (local,here,there) = match role {
@@ -179,26 +216,60 @@ impl Notebook {
         if !active {return Err(format!("找不到適用於筆記 #{note} 的關聯屬性 #{field}。").into());}
         let from=format!("FROM relation_field_values v JOIN notes n ON n.id=v.{there}");
         let condition=format!("WHERE v.field_id=?1 AND v.{here}=?2 AND n.trash_root IS NULL");
-        let Some(key)=key else {
+        if key.is_none() && trace.is_none() {
             let count:i64=self.connection.prepare_cached(&format!("SELECT count(*) {from} {condition}"))?
                 .query_row(params![field,note],|r|r.get(0))?;
             return Ok(count as f64);
+        }
+        if let Some(key)=key { self.require_rollup_numeric_key(key)?; }
+        let sql=if trace.is_some() {
+            format!("SELECT n.id,p.value,n.title,i.token {from} JOIN note_link_identities i ON i.note_id=n.id
+                     LEFT JOIN note_properties p ON p.note_id=n.id AND p.key=?3 {condition} ORDER BY n.id")
+        } else {
+            format!("SELECT n.id,p.value {from} JOIN note_properties p ON p.note_id=n.id AND p.key=?3
+                     {condition} ORDER BY n.id")
         };
-        self.require_rollup_numeric_key(key)?;
-        let mut query=self.connection.prepare_cached(&format!(
-            "SELECT n.id,p.value {from} JOIN note_properties p ON p.note_id=n.id AND p.key=?3 {condition} ORDER BY n.id"))?;
-        let mut values=query.query(params![field,note,key])?;
+        let mut query=self.connection.prepare_cached(&sql)?;
+        let mut rows=query.query(params![field,note,key])?;
         let mut sum=0.0;
-        while let Some(row)=values.next()? {
+        while let Some(row)=rows.next()? {
             let id:i64=row.get(0)?;
-            let raw:String=row.get(1)?;
-            let number=super::typed_properties::PropertyType::Number.normalized(&raw)
-                .and_then(|s|s.parse::<f64>().ok()).filter(|n|n.is_finite())
-                .ok_or_else(||format!("請修正筆記 #{id} 的數字屬性「{key}」。"))?;
+            let raw:Option<String>=row.get(1)?;
+            let number=match (key,raw.as_deref()) {
+                (None,_) => 1.0,
+                (Some(_),None) => 0.0,
+                (Some(key),Some(raw)) => super::typed_properties::PropertyType::Number.normalized(raw)
+                    .and_then(|s|s.parse::<f64>().ok()).filter(|n|n.is_finite())
+                    .ok_or_else(||format!("請修正筆記 #{id} 的數字屬性「{key}」。"))?,
+            };
             sum+=number;
             if !sum.is_finite() {return Err("數字加總超出公式範圍。".into());}
+            if let Some(peers)=trace.as_mut() {
+                let value=if key.is_none(){Some("1".to_owned())}else{raw};
+                peers.push(RollupPeer { id,title:row.get(2)?,token:row.get(3)?,value });
+            }
         }
         Ok(sum)
+    }
+}
+
+#[derive(PartialEq)]
+pub(crate) struct RollupTrace {
+    pub total:f64,
+    pub peers:Vec<RollupPeer>,
+}
+
+#[derive(PartialEq)]
+pub(crate) struct RollupPeer {
+    id:i64,
+    title:String,
+    token:String,
+    value:Option<String>,
+}
+
+impl RollupPeer {
+    pub(crate) fn label(&self)->String {
+        format!("{}　[#{}]　｜ {}",self.title,self.id,self.value.as_deref().unwrap_or("缺值（未計入）"))
     }
 }
 
@@ -206,6 +277,64 @@ impl Notebook {
 mod tests {
     use super::*;
     use std::fs;
+    #[test]
+    fn direct_rollup_trace_distinguishes_duplicate_names_missing_zero_and_stale_values()->Result<()> {
+        use super::super::typed_properties::PropertyType;
+        let dir=super::super::tests::data_dir();
+        let path=dir.join("workspace.sqlite3");
+        let mut db=Notebook::open(&path,false)?;
+        let source=db.create_collection("source")?;
+        let target=db.create_collection("target")?;
+        let a=db.add(None,"owner","owner body")?;
+        db.add_to_collection(source,a,"ready")?;
+        let owner=db.rollup_member(source,a)?;
+        db.create_relation_field(&owner,(source,"source"),(target,"target"),"Refs")?;
+        let (field,_)=db.editable_relation_fields(a)?.remove(0);
+        let key="Duration";
+        db.compare_set_property_type(key,None,Some(PropertyType::Number))?;
+        db.save_field_rollup(&field,&owner,Some(key),"Total")?;
+        let expr=db.collection_formulas(source)?.remove(0).1;
+        let empty=db.saved_rollup_trace(source,"Total",&expr,&owner)?;
+        assert_eq!(empty.total,0.0);assert!(empty.peers.is_empty());
+        let mut ids=Vec::new();
+        for (body,value) in [("first",Some("0")),("second",None),("third",Some("-1.50"))] {
+            let id=db.add(None,"same",body)?;
+            db.add_to_collection(target,id,"ready")?;
+            let peer=db.rollup_member(target,id)?;
+            db.edit_field_value(&field,&owner,&peer,true)?;
+            if let Some(raw)=value {db.compare_set_property(id,key,None,Some(raw))?;}
+            ids.push(id);
+        }
+        let valid=db.saved_rollup_trace(source,"Total",&expr,&owner)?;
+        assert_eq!(valid.total.to_string(),db.evaluate_note_formula(a,&expr)?);
+        assert_eq!(valid.total,-1.5);
+        assert_eq!(valid.peers.iter().map(|p|p.id).collect::<Vec<_>>(),ids);
+        assert_eq!(valid.peers.iter().map(|p|p.value.as_deref()).collect::<Vec<_>>(),[Some("0"),None,Some("-1.50")]);
+        assert_eq!(db.open_rollup_peer(source,"Total",&expr,&owner,&valid,1)?.body,"second");
+        let (reverse,other)=db.editable_relation_fields(ids[1])?.remove(0);
+        db.save_field_rollup(&reverse,&other,None,"Sources")?;
+        let count=db.collection_formulas(target)?.remove(0).1;
+        let incoming=db.saved_rollup_trace(target,"Sources",&count,&other)?;
+        assert_eq!(incoming.total,1.0);
+        assert_eq!(db.open_rollup_peer(target,"Sources",&count,&other,&incoming,0)?.row.id,a);
+        db.compare_set_property(ids[0],key,Some("0"),Some("3"))?;
+        assert!(db.open_rollup_peer(source,"Total",&expr,&owner,&valid,1).is_err());
+        let changed=db.saved_rollup_trace(source,"Total",&expr,&owner)?;
+        db.edit_field_value(&reverse,&other,&owner,false)?;
+        assert!(db.open_rollup_peer(source,"Total",&expr,&owner,&changed,1).is_err());
+        let current=db.saved_rollup_trace(source,"Total",&expr,&owner)?;
+        let compound=format!("{expr} + 1");
+        db.edit_collection_formula(source,"Total",&expr,&compound)?;
+        assert!(db.open_rollup_peer(source,"Total",&expr,&owner,&current,0).is_err());
+        assert!(db.saved_rollup_trace(source,"Total",&compound,&owner).is_err());
+        db.edit_collection_formula(source,"Total",&compound,&expr)?;
+        let backup=dir.join("backup.sqlite3"); db.backup(&backup)?;drop(db);
+        let copy=dir.join("isolated.sqlite3");fs::copy(backup,&copy)?;
+        let db=Notebook::open(&copy,false)?;
+        assert_eq!(db.open_rollup_peer(source,"Total",&expr,&owner,&current,1)?.body,"third");
+        drop(db);fs::remove_dir_all(dir)?;Ok(())
+    }
+
     #[test]
     fn field_rollup_drives_saved_numeric_filter_sort_and_isolated_backup()->Result<()> {
         use super::super::collection_views::{CollectionLayout,FilterKind,FilterOperator,FilterRule,SortRule,SortSource,ViewRules};

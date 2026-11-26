@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::native_board_locations::reveal_offset;
+use crate::store::native_board_locations::{NativeBoardLocation,location_labels,reveal_offset};
 
 impl App {
     pub(super) unsafe fn show_native_board_locations(&mut self, note: i64) -> Result<()> {
@@ -8,13 +8,28 @@ impl App {
             unsafe { label(self.widgets.status, "這篇筆記尚未放入原生白板。"); }
             return Ok(());
         }
+        unsafe { self.pick_card_location(note,locations,None) }
+    }
+
+    pub(super) unsafe fn show_other_card_locations(&mut self, origin:NativeBoardLocation)->Result<()> {
+        let locations = self.notebook.other_card_locations(&origin)?;
+        if locations.is_empty() {
+            unsafe { label(self.widgets.status,"這張卡片沒有其他原生白板位置。"); }
+            return Ok(());
+        }
+        unsafe { self.pick_card_location(origin.note,locations,Some(&origin)) }
+    }
+
+    unsafe fn pick_card_location(&mut self,note:i64,locations:Vec<NativeBoardLocation>,origin:Option<&NativeBoardLocation>)->Result<()> {
+        let labels=location_labels(&locations);
         let Some(index) = (unsafe {
             navigation_ui::choose_navigation_page(self.hwnd, self.widgets.links, locations.len(), |i| {
-                &locations[i].title
+                &labels[i]
             })
         }) else { return Ok(()); };
         let location = locations.into_iter().nth(index).ok_or("找不到選取的白板。")?;
-        self.notebook.note_at_native_board_location(&location)?;
+        if let Some(origin)=origin { self.notebook.check_card_jump(origin,&location)?; }
+        else { self.notebook.note_at_native_board_location(&location)?; }
         unsafe {
             self.select_board(location.board, location.title.clone())?;
             let card = self.extras.cards.iter().find(|card| card.id == note)

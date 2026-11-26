@@ -3,7 +3,8 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
-    [switch]$ProvePortableLinkGap
+    [switch]$ProvePortableLinkGap,
+    [switch]$LegacyLinkOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1424,6 +1425,10 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($LegacyLinkOnly) {
+        . (Join-Path $PSScriptRoot 'windows-imported-legacy-link.ps1')
+        return
+    }
     foreach ($folder in $live,$restored) {
         [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
         Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')

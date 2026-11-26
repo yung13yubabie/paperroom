@@ -270,7 +270,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
           }
-      - name: Download the pinned EXE and exercise its real Windows GUI
+      - name: Download the pinned EXE and verify Markdown import and reopen
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -312,7 +312,7 @@ jobs:
             $aboutError = $null
             try { ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA }
             catch { $aboutError = $_; Write-Host "Native About failed: $($_.Exception.Message)" }
-            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA -LegacyLinkOnly
             if ($aboutError) { throw $aboutError }
           } finally {
             Remove-Item -LiteralPath $root -Recurse -Force

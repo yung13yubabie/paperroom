@@ -1349,7 +1349,7 @@ impl App {
                             if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
                                 return Ok(());
                             }
-                            let dynamic=parsed.views.iter().any(|v|!v.typed_filters.is_empty() || !v.sorts.is_empty());
+                            let dynamic = parsed.has_dynamic_rules();
                             let mode=if parsed.has_live_status(){
                                 let mut options=vec![(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})];
                                 if dynamic{options.push((3,"動態篩選與排序（連結來源）"));}

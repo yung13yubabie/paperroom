@@ -47,6 +47,10 @@ pub(crate) struct Base {
 }
 
 impl Base {
+    pub(crate) fn has_dynamic_rules(&self) -> bool {
+        self.views.iter().any(|view| !view.typed_filters.is_empty() || !view.sorts.is_empty())
+    }
+
     pub(crate) fn has_live_status(&self)->bool {
         self.views.iter().flat_map(|view|view.order.iter()).any(|key|key=="note.status"
             || self.formulas.get(key).and_then(FileFormula::status_literal).is_some()) || !self.types.is_empty()

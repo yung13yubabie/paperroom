@@ -883,8 +883,12 @@ print(f"Named group {phase}: standard fields, exact bytes, preserved nested grou
 }
 
 function Locate-NoteOnCanvas([int]$CanvasIndex, [string]$CanvasName, [int]$CanvasId, [int]$Count,
-                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb) {
-    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb, [switch]$FromLinks) {
+    if ($FromLinks) {
+        Native-Menu 120 60002 '查看此筆記的 Canvas 位置…'
+    } else {
+        Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    }
     Native-Menu 113 $CanvasIndex ("$CanvasName  (#${CanvasId}，$Count 處)") -MenuOpen
     Native-Menu 113 $NodeIndex "${NodeIndex}　同一張卡 〔$NodeId〕" -MenuOpen -CaptionPrefix
     $null = Wait-For 'exact Canvas and occurrence are active' {
@@ -2888,7 +2892,25 @@ print("Full backup has the original stable note identity and attachment, exact C
     $null = Wait-For 'selected the only original card by unique body' {
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭'
     }
-    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125)
+    # The two notes share a title. Edit through the real picker (it omits the
+    # current note), then verify each destination by its distinct saved body.
+    Native-Menu 113 7 '筆記關聯…'
+    Native-Menu 113 1 '新增關聯…' -MenuOpen
+    Choose-CollectionRow '鏡頭  ('
+    Collection-Prompt '新增關聯' '取景對照'
+    function Open-TwinNamedRelation([int]$Direction, [string]$Label, [string]$Body) {
+        Native-Menu 120 60001 '具名關聯的來源與目標…'
+        Native-Menu 120 $Direction $Label -MenuOpen
+        Native-Menu 120 1 '取景對照　鏡頭' -MenuOpen -CaptionPrefix
+        $null = Wait-For "selected the exact named relation endpoint: $Body" {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟具名關聯的筆記。' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains($Body)
+        }
+    }
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' '另一本 Vault 的同名正文'
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' '場景原本的獨特引文'
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125) -FromLinks
     Open-LocationSource
     Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
     Open-LocationSource
@@ -2903,7 +2925,10 @@ print("Full backup has the original stable note identity and attachment, exact C
     Search-Workspace $dialog '找到 1 筆筆記。' 1
     Finish-Revision $dialog 111
     $null = Wait-For 'reopened the original note' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' }
-    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' '另一本 Vault 的同名正文'
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' '場景原本的獨特引文'
+    Write-Host 'PASS: native Links button followed both named-relation directions between same-titled notes by distinct body after restart.'
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116) -FromLinks
     Native-Menu 120 6 '解除 Vault 綁定'
     Native-Menu 120 13 '開啟已選節點的來源筆記'
     $refusal = Wait-For 'selected node cannot open an unbound file' {

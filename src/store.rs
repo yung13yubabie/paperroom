@@ -87,6 +87,9 @@ mod attachments;
 pub use attachments::{MAX_PDF_SEARCH_QUERY, PdfAnnotationHit};
 #[path = "collections.rs"]
 mod collections;
+#[cfg(any(windows, test))]
+#[path = "named_relation_navigation.rs"]
+pub(crate) mod named_relation_navigation;
 #[cfg(windows)]
 pub(crate) use collections::CollectionEntry;
 #[path = "collection_display.rs"]

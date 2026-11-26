@@ -28,6 +28,8 @@ mod note_tools_ui;
 mod duplicate_note_ui;
 #[path = "note_history_ui.rs"]
 mod note_history_ui;
+#[path = "named_relation_navigation_ui.rs"]
+mod named_relation_navigation_ui;
 #[path = "note_highlight_ui.rs"]
 mod note_highlight_ui;
 #[path = "board_objects_ui.rs"]
@@ -805,18 +807,22 @@ impl App {
                 return;
             }
             match self.notebook.note(id) {
-                Ok(note) => {
-                    self.cancel_workspace_drag();
-                    self.current = note;
-                    self.extras.board = false;
-                    self.extras.workspace = None;
-                    self.dirty = false;
-                    self.failed = false;
-                    self.present();
-                    self.select_tree();
-                }
+                Ok(note) => self.set_current_note(note),
                 Err(error) => self.show_error(error),
             }
+        }
+    }
+
+    unsafe fn set_current_note(&mut self, note: Option<Note>) {
+        unsafe {
+            self.cancel_workspace_drag();
+            self.current = note;
+            self.extras.board = false;
+            self.extras.workspace = None;
+            self.dirty = false;
+            self.failed = false;
+            self.present();
+            self.select_tree();
         }
     }
 
@@ -1526,7 +1532,7 @@ impl App {
                     21 => app.note_word_count_ui()?,
                     23 => app.restore_pdf_excerpt_ui(id)?,
                     24 => app.duplicate_note_ui(id)?,
-                    27 => app.show_note_canvas_locations(id)?,
+                    27 => app.show_note_canvas_locations(id, app.widgets.more)?,
                     _ => {}
                 }
                 Ok(())
@@ -1957,6 +1963,10 @@ impl App {
                 }
                 let graph = related.len() + 2;
                 labels.push((graph, "開啟筆記關聯圖…".to_owned()));
+                let named = (graph + 1).max(60001);
+                let canvas = named + 1;
+                labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
+                labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
                 let items = labels
                     .iter()
                     .map(|(id, label)| (*id, label.as_str()))
@@ -1967,6 +1977,8 @@ impl App {
                         app.insert_note_link()?;
                     }
                     index if index == graph => app.open_note_graph(source)?,
+                    index if index == named => app.show_named_relation_navigation(source)?,
+                    index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
                     index => {
                         if let Some((id, _, heading, syntax)) = related.get(index - 2) {
                             app.open_anchored_link(*id, heading.as_deref(), *syntax)?;

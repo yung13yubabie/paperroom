@@ -241,7 +241,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) unsafe fn show_note_canvas_locations(&mut self, note: i64) -> Result<()> {
+    pub(super) unsafe fn show_note_canvas_locations(&mut self, note: i64, anchor: HWND) -> Result<()> {
         unsafe {
             use super::navigation_ui::choose_navigation_page;
             let placements = self.notebook.canvas_note_placements(note)?;
@@ -249,7 +249,7 @@ impl App {
                 label(self.widgets.status, "這篇筆記未出現在已綁定的 Canvas。");
                 return Ok(());
             }
-            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, placements.len(), |i| {
+            let Some(index) = choose_navigation_page(self.hwnd, anchor, placements.len(), |i| {
                 let entry = &placements[i];
                 format!("{}  (#{}，{} 處)", entry.title, entry.canvas_id, entry.occurrences)
             }) else { return Ok(()); };
@@ -262,7 +262,7 @@ impl App {
             let compact = |value: &str| -> String {
                 value.chars().take(64).map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
             };
-            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, occurrences.len(), |i| {
+            let Some(index) = choose_navigation_page(self.hwnd, anchor, occurrences.len(), |i| {
                 let entry = &occurrences[i];
                 let link = &entry.link;
                 let name = link.label.as_deref().unwrap_or(&link.file);

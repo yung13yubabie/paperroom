@@ -69,7 +69,7 @@
 | 資料來源 | 部分 | 具名集合、成員與狀態，並非任意資料來源。 | [官方](https://www.notion.com/help/intro-to-databases) · [collections.rs](../src/collections.rs) |
 | 屬性模型 | 部分 | 集合內可寫入或清除已宣告的數字、核取方塊與日期，其他檢視會讀到相同的值。日期編輯會檢查既有起訖設定，下拉選項等型別仍待做。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
 | 文字欄位 | 已驗證 | 中文值可寫入、查詢、重開。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
-| 關聯 | 部分 | 從集合的可見資料列新增、移除或開啟同集合內的具名關聯。使用穩定筆記 ID，可辨認不同路徑的同名筆記。跨集合關聯欄位配置仍待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
+| 關聯 | 部分 | 可在同集合或不同集合間新增、移除或開啟具名關聯。從筆記的「連結」可看傳入及傳出方向。以穩定筆記 ID 區分同名筆記。固定目標集合的欄位配置及可雙向編輯的配對欄位待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [跨視圖導覽](UNIFIED-WORKSPACE.md) |
 | 彙總 | 部分 | 集合內可從同一資料列操作入口查看關聯和彙總。公式可依具名關聯計數或合計最新欄位值，顯示來源有問題的筆記 ID。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
 | 公式運算 | 部分 | 可編輯既有集合公式並在保存後重算。支援數字／布林／日期型別值、條件和關聯計數／加總。錯誤顯示在結果，完整語法待做。 | [官方](https://www.notion.com/help/formulas) · [formula.rs](../src/formula.rs) |
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |

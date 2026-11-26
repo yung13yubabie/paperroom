@@ -123,7 +123,7 @@ impl Import {
 
     pub(crate) fn markdown_zip_import_notice(&self) -> Option<&'static str> {
         if self.is_flat_heptabase_backup() {
-            Some("ZIP 含有 All-Data.json，可能是 Heptabase 備份。紙間會匯入 Markdown、可比對的相對附件和同包筆記連結。只有另外提供且可對應的標準 JSON Canvas 能轉成紙間白板。不會讀取 All-Data.json 或還原其中的白板配置、關聯或中繼資料。仍要繼續？")
+            Some("ZIP 含有 All-Data.json，可能是 Heptabase 備份。紙間會匯入 Markdown、可比對的相對附件和同包筆記連結。另外提供的標準 JSON Canvas 若能對應會轉成紙間白板，其餘可讀取的圖將保存為未綁定的可編輯 Canvas。不會讀取 All-Data.json 或還原其中的白板配置、關聯或中繼資料。仍要繼續？")
         } else {
             self.has_all_data_json.then_some(
                 "ZIP 含有 All-Data.json 及內嵌 ZIP。紙間只會匯入 Markdown 與可辨識的附件，不會跨 ZIP 配對筆記或白板。仍要繼續？"
@@ -520,6 +520,15 @@ mod tests {
         let mut wrong = drawing(10);
         wrong["nodes"][0]["file"] = "鏡頭.md".into();
         let wrong = wrong.to_string();
+        let mut rich = drawing(-90);
+        rich["nodes"][0]["file"] = "乙/鏡頭.md".into();
+        rich["nodes"][0]["subpath"] = "#取景".into();
+        rich["nodes"][0]["custom"] = json!({"保留":true});
+        rich["nodes"].as_array_mut().unwrap().insert(0,json!({"id":"g","type":"group","label":"全景","x":-240,"y":-90,"width":900,"height":550}));
+        rich["edges"][0]["toEnd"] = "arrow".into();
+        rich["edges"][0]["fromSide"] = "right".into();
+        rich["edges"][0]["label"] = "先後".into();
+        let raw = format!("{}\r\n", serde_json::to_string_pretty(&rich)?);
         let a_body = "甲正文。\n[乙卡](../乙/鏡頭.md)\n[附件](../媒體/來源.txt)\n[缺件](根目錄候選.md) [[根目錄候選]]";
         for (name, contents) in [
             ("甲/鏡頭.md", format!("# 鏡頭\n\n{a_body}")),
@@ -530,6 +539,8 @@ mod tests {
             ("白板/分鏡.canvas", canvas_a),
             ("白板/參考.canvas", canvas_b),
             ("白板/名稱無法確認.canvas", wrong),
+            ("白板/構圖.canvas", raw.clone()),
+            ("白板/壞圖.canvas", "{bad".into()),
         ] {
             zip.start_file(name, zip::write::SimpleFileOptions::default())?;
             zip.write_all(contents.as_bytes())?;
@@ -539,10 +550,21 @@ mod tests {
         let (mut imported, media) = archive_with_media(&zip_path)?;
         let handoff = imported.take_heptabase_handoff().ok_or("expected identified export")?;
         let mut db = Notebook::open(&workspace, false)?;
-        let (root, boards, warnings) = db.import_heptabase_handoff("工作區", imported.pages, media, handoff)?;
-        assert_eq!(boards, 2);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("名稱無法確認.canvas"));
+        let (root, drawings) = db.import_heptabase_handoff("工作區", imported.pages, media, handoff)?;
+        assert_eq!(drawings.boards, 2);
+        assert_eq!((drawings.canvases, drawings.skipped), (2,1));
+        assert_eq!(drawings.details.len(), 3);
+        assert_eq!(db.saved_canvases()?.len(), 2);
+        let (id, _) = db.saved_canvases()?.into_iter().find(|(_, title)| title=="白板/構圖.canvas").unwrap();
+        assert!(db.canvas_vault(id)?.is_none());
+        let before = db.read_canvas(id)?;
+        assert_eq!(before.as_str(), raw);
+        let output = dir.join("已匯出.canvas");
+        crate::canvas::export(&output, &before)?;
+        assert_eq!(fs::read(&output)?, raw.as_bytes());
+        let after = db.edit_canvas(id, &before, crate::store::canvas_edit::CanvasEdit::Geometry {id:"a",geometry:[-99,88,310,190]})?;
+        for (key,value) in [("x",-99),("y",88),("width",310),("height",190)] { rich["nodes"][1][key] = value.into(); }
+        assert_eq!(after.json(), &rich);
         let inspect = rusqlite::Connection::open_with_flags(&workspace, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let find = |path: &str| inspect.query_row(
             "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
@@ -563,6 +585,8 @@ mod tests {
 
         for path in [&workspace, &backup] {
             let reopened = Notebook::open(path, false)?;
+            assert!(reopened.canvas_vault(id)?.is_none());
+            assert_eq!(reopened.read_canvas(id)?.json(), &rich);
             let readback = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let check = readback.prepare("SELECT b.title,c.x,c.y FROM board_cards c
                  JOIN boards b ON b.id=c.board_id WHERE c.note_id=?1 ORDER BY b.title")?
@@ -582,7 +606,18 @@ mod tests {
             assert_eq!(reopened.note(a)?.unwrap().row.title, "甲已改名");
             assert_eq!(reopened.note(b)?.unwrap().body, "乙正文。");
         }
+        let full = dir.join("quota.sqlite3");
+        let mut tight = Notebook::open(&full,false)?;
+        let empty = crate::canvas::parse("{}".to_owned())?;
+        for _ in 0..127 { tight.save_canvas("既有", &empty)?; }
+        let (mut pages, media) = archive_with_media(&zip_path)?;
+        let handoff = pages.take_heptabase_handoff().unwrap();
+        let old_rows = tight.rows(View::All, "")?.len();
+        assert!(tight.import_heptabase_handoff("超額匯入", pages.pages, media, handoff).is_err());
+        assert_eq!(tight.saved_canvases()?.len(),127);
+        assert_eq!(tight.rows(View::All, "")?.len(), old_rows);
         assert_eq!(fs::read(&zip_path)?, original_zip);
+        drop(tight);
         fs::remove_dir_all(dir)?;
         Ok(())
     }

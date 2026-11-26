@@ -207,7 +207,13 @@ impl App {
                 (id, crate::store::clean_title(title), doc)
             } else {
                 let choices = self.notebook.saved_canvases()?;
-                let Some(index) = choose(self.hwnd, self.widgets.files, &choices, |item| item.1.clone()) else {
+                let Some(index) = choose(self.hwnd, self.widgets.files, &choices, |(id, title)| {
+                    if choices.iter().filter(|(_, name)| name == title).take(2).count() > 1 {
+                        format!("{title}　(#{id})")
+                    } else {
+                        title.clone()
+                    }
+                }) else {
                     if choices.is_empty() { label(self.widgets.status, "目前沒有匯入的 Canvas。"); }
                     return Ok(());
                 };

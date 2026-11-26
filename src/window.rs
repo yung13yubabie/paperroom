@@ -1424,12 +1424,18 @@ impl App {
                             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Markdown ZIP");
                             let folder = format!("匯入：{name}");
                             let id = if let Some(handoff) = imported.take_heptabase_handoff() {
-                                let (id, boards, warnings) = app.notebook.import_heptabase_handoff(
+                                let (id, drawings) = app.notebook.import_heptabase_handoff(
                                     &folder, imported.pages, media, handoff,
                                 )?;
-                                status.push_str(&format!("已建立 {boards} 張紙間白板。"));
-                                report.push_str(&format!("\r\n\r\n已建立 {boards} 張紙間白板。只採用可確認路徑的標準 JSON Canvas 檔案卡與相容連線。All-Data.json 的原廠白板與中繼資料沒有還原，請保留原 ZIP。"));
-                                for warning in warnings {
+                                let counts = format!("已建立 {} 張原生白板、保存 {} 份可編輯 Canvas，已讀取的圖檔中有 {} 份未匯入。", drawings.boards, drawings.canvases, drawings.skipped);
+                                status.push_str(&counts);
+                                report.push_str("\r\n\r\n");
+                                report.push_str(&counts);
+                                if drawings.canvases > 0 {
+                                    report.push_str("請從「檔案 → 開啟已匯入的 Canvas」開啟。這些 Canvas 保留檔案路徑，未綁定筆記來源。");
+                                }
+                                report.push_str("All-Data.json 的原廠白板與中繼資料沒有還原，請保留原 ZIP。");
+                                for warning in drawings.details {
                                     report.push_str("\r\n");
                                     report.push_str(&warning);
                                 }

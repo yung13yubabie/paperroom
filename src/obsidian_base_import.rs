@@ -5,7 +5,7 @@ use super::{Notebook, Result, attachments, collection_display::MAX_DISPLAY_COLUM
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 
-enum Column { Filename, Folder }
+enum Column { Filename, Folder, Path, Extension, Front(String) }
 
 fn columns(base: &Base, view: &View) -> Result<Vec<(String,Column)>> {
     let ordered: Vec<&str> = if view.order.is_empty() { vec!["file.name"] }
@@ -19,6 +19,9 @@ fn columns(base: &Base, view: &View) -> Result<Vec<(String,Column)>> {
         let (name,column) = match key {
             "file.name" => (alias.unwrap_or(key), Column::Filename),
             "file.folder" => (alias.unwrap_or(key), Column::Folder),
+            "file.path" => (alias.unwrap_or(key), Column::Path),
+            "file.ext" => (alias.unwrap_or(key), Column::Extension),
+            key if key.starts_with("note.") => (alias.unwrap_or(&key[5..]), Column::Front(key[5..].to_owned())),
             _ => return Err(format!("無法從 Vault 原始資料確認欄位「{key}」。").into()),
         };
         if name.trim() != key_checked(name)? || name.trim()!=name
@@ -61,10 +64,12 @@ impl Notebook {
             [root],|r|r.get(0)).optional()?.ok_or("請選擇仍在使用中的已匯入 Vault 根筆記。")?;
         let used:i64=tx.query_row("SELECT coalesce(sum(length(content)),0) FROM attachments",[],|r|r.get(0))?;
         if used>attachments::MAX_STORAGE_BYTES - base.raw.len() as i64 { return Err("工作區附件空間不足。".into()); }
-        let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
+        let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
         let mut created=Vec::new();
-        if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder")) {
-            return Err("只支援檔名與資料夾欄位的顯示名稱。".into());
+        let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
+        let mut remaining_front_bytes=32*1024*1024usize;
+        if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.")) {
+            return Err("只支援檔案與筆記頁首欄位的顯示名稱。".into());
         }
         for view in &base.views {
             let name=format!("{stem}／{}",view.name);
@@ -85,11 +90,28 @@ impl Notebook {
                     members.push((row.get::<_,i64>(0)?,path.to_owned()));
                 }
             }
+            let selected: std::collections::BTreeSet<_>=cols.iter().filter_map(|(_,col)|match col { Column::Front(key)=>Some(key.as_str()), _=>None }).collect();
             for (note,path) in &members {
+                let fields=if !selected.is_empty() {
+                    let prefix:Vec<u8>=tx.prepare_cached("SELECT substr(CAST(body AS BLOB),1,?2) FROM notes WHERE id=?1 AND trash_root IS NULL")?
+                        .query_row(params![note,(obsidian_base::FRONT_LIMIT+4) as i64],|r|r.get(0))?;
+                    let start=prefix.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(&prefix);
+                    if normalized_handoff && (start.starts_with(b"---\n") || start.starts_with(b"---\r\n") || start==b"---") {
+                        return Err(format!("「{path}」的 Markdown ZIP 可能已移除首行標題，無法核對頁首位置。").into());
+                    }
+                    remaining_front_bytes=remaining_front_bytes.checked_sub(prefix.len()).ok_or("頁首資料讀取量超過 32 MiB，請縮小檢視範圍。")?;
+                    obsidian_base::front_fields(&prefix,&selected).map_err(|err|format!("「{path}」：{err}"))?
+                }else{Default::default()};
                 let (folder,file)=path.rsplit_once('/').unwrap_or(("",path));
                 tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'已匯入')",params![collection,note])?;
                 for (label,col) in &cols {
-                    let value=match col { Column::Filename=>file, Column::Folder=>folder };
+                    let value=match col {
+                        Column::Filename => file,
+                        Column::Folder => folder,
+                        Column::Path => path,
+                        Column::Extension => file.rsplit_once('.').map_or("", |(_, ext)| ext),
+                        Column::Front(key) => match fields.get(key) { Some(value) => value, None => continue },
+                    };
                     snapshot_field(&tx,collection,*note,label,value)?;
                 }
             }
@@ -122,15 +144,17 @@ mod tests {
         let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
         let root=db.import_vault("甲庫",vec![page("甲"),page("乙")])?;
         db.import_vault("另庫",vec![page("甲")])?;
-        let raw=b"views:\r\n  - type: list\r\n    name: Shots\r\n    filters: 'file.folder == \"A\"'\r\n    order: [file.folder, file.name]\r\n";
+        let raw=b"views:\r\n  - type: list\r\n    name: Shots\r\n    filters: 'file.folder == \"A\"'\r\n    order: [file.folder, file.name, file.path, file.ext]\r\n";
         let raw=String::from_utf8(raw.to_vec())?.replace("\"A\"","\"甲\"").into_bytes();
         let (receipt,views)=db.import_obsidian_base(root,"研究.base",raw.clone())?;
         let col=views[0].0;
         assert_eq!((views[0].2,views[0].3),(1,true));
-        assert_eq!(db.collection_display_columns(col)?.unwrap(),["file.folder","file.name"]);
+        assert_eq!(db.collection_display_columns(col)?.unwrap(),["file.folder","file.name","file.path","file.ext"]);
         let (note,path):(i64,String)=db.connection.query_row("SELECT c.note_id,p.relative_path FROM collection_notes c JOIN vault_paths p ON p.note_id=c.note_id WHERE c.collection_id=?1 AND p.import_root=?2",params![col,root],|r|Ok((r.get(0)?,r.get(1)?)))?;
         assert_eq!(path,"甲/鏡頭.md");
         assert_eq!(db.connection.query_row("SELECT value FROM obsidian_base_file_values WHERE note_id=?1 AND collection_id=?2 AND key='file.name'",params![note,col],|r|r.get::<_,String>(0))?,"鏡頭.md");
+        assert_eq!(db.collection_display_values(col, "file.path")?.get(&note).map(String::as_str),Some("甲/鏡頭.md"));
+        assert_eq!(db.collection_display_values(col, "file.ext")?.get(&note).map(String::as_str),Some("md"));
         assert_eq!(db.connection.query_row("SELECT content FROM attachments WHERE note_id=?1 AND name='研究.base'",[receipt],|r|r.get::<_,Vec<u8>>(0))?,raw);
         Ok(())
     }
@@ -162,6 +186,30 @@ views:
         Ok(())
     }
     #[test]
+    fn scalar_frontmatter_uses_saved_markdown_and_preserves_missing_false_zero() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let mut source=page("甲");
+        let updated="\u{feff}---\r\nflag: false\r\nn: 0\r\nref: '[[鏡頭]]'\r\nunset: null\r\ntags: [one, two]\r\nextra: {meta: [a, b]}\r\n---\r\n原文";
+        source.body="---\nflag: true\nn: 3\n---\n初稿".into();
+        let root=db.import_vault("庫",vec![source])?;
+        let note:i64=db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1",[root],|r|r.get(0))?;
+        let version:i64=db.connection.query_row("SELECT version FROM notes WHERE id=?1",[note],|r|r.get(0))?;
+        db.save(note,version,"已編輯",updated)?;
+        db.set_property(note,"缺值",Some("私人屬性"))?;
+        let raw="properties: {unset: {displayName: 缺值}}\nviews: [{type: table, name: A, order: [flag, note.n, ref, unset]}]";
+        let (_,views)=db.import_obsidian_base(root,"scalar.base",raw.as_bytes().to_vec())?;
+        let collection=views[0].0;
+        for (key,expected) in [("flag",Some("false")),("n",Some("0")),("ref",Some("[[鏡頭]]")),("缺值",None)] {
+            assert_eq!(db.collection_display_values(collection,key)?.get(&note).map(String::as_str),expected);
+        }
+        for invalid in ["---\nflag: [x]\n---","---\nextra: [{deep: {x: a, x: b}}]\n---","---\na: b\na: c\n---","---\na: b","---\na: [broken\n---"] {
+            db.connection.execute("UPDATE notes SET body=?1 WHERE id=?2",params![invalid,note])?;
+            assert!(db.import_obsidian_base(root,"bad.base",raw.as_bytes().to_vec()).is_err());
+        }
+        assert_eq!(db.collections()?.len(),1);
+        Ok(())
+    }
+    #[test]
     fn existing_note_field_is_preserved_and_unverified_frontmatter_rolls_back() -> Result<()> {
         let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
         let root=db.import_vault("庫",vec![page("甲")])?;
@@ -170,6 +218,10 @@ views:
         let (_,first)=db.import_obsidian_base(root,"safe.base",b"views: [{type: table, name: Safe, order: [file.folder]}]".to_vec())?;
         assert_eq!(db.connection.query_row("SELECT value FROM obsidian_base_file_values WHERE collection_id=?1 AND note_id=?2 AND key='file.folder'",params![first[0].0,note],|r|r.get::<_,String>(0))?,"甲");
         assert_eq!(db.connection.query_row("SELECT value FROM note_properties WHERE note_id=?1 AND key='file.folder'",[note],|r|r.get::<_,String>(0))?,"私人值");
+        db.connection.execute("INSERT INTO heptabase_import_roots(import_root) VALUES(?1)",[root])?;
+        db.connection.execute("UPDATE notes SET body='---
+title: 誤認頁首
+---' WHERE id=?1",[note])?;
         let before=db.collections()?;
         let raw=b"views: [{type: table, name: A, order: [file.name]}, {type: list, name: B, order: [note.title]}]";
         assert!(db.import_obsidian_base(root,"x.base",raw.to_vec()).is_err());

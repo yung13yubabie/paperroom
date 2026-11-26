@@ -80,6 +80,96 @@ fn node(events: &mut std::iter::Peekable<std::vec::IntoIter<Event>>, depth: usiz
     }
 }
 
+/// Only a bounded prefix of the stored Markdown is needed.
+pub(super) const FRONT_LIMIT: usize = 65536;
+
+fn front_key(event: Event) -> R<String> {
+    match event {
+        Event::Scalar(s,TScalarStyle::Plain,0,None) if s=="<<"=>Err("不支援頁首 YAML 合併鍵。".into()),
+        Event::Scalar(s,_,0,None) if !s.is_empty() && s.len()<=128 && !s.chars().any(char::is_control)=>Ok(s),
+        _=>Err("頁首含不支援的鍵名、錨點或標籤。".into()),
+    }
+}
+
+fn skip_front_value(event: Event, next: &mut impl FnMut()->R<Event>, depth: usize) -> R<()> {
+    if depth>12 {return Err("頁首 YAML 超過 12 層。".into())}
+    match event {
+        Event::Scalar(_,_,0,None)=>Ok(()),
+        Event::SequenceStart(0,None)=>{
+            loop {
+                let child=next()?;
+                if child==Event::SequenceEnd {break}
+                skip_front_value(child,next,depth+1)?;
+            }
+            Ok(())
+        }
+        Event::MappingStart(0,None)=>{
+            let mut keys=BTreeSet::new();
+            loop {
+                let key=next()?;
+                if key==Event::MappingEnd {break}
+                if keys.len()>=256 || !keys.insert(front_key(key)?) {return Err("頁首欄位重複或超過 256 個。".into())}
+                skip_front_value(next()?,next,depth+1)?;
+            }
+            Ok(())
+        }
+        _=>Err("頁首含不支援的錨點、別名或標籤。".into()),
+    }
+}
+
+pub(super) fn front_fields(prefix: &[u8], selected: &BTreeSet<&str>) -> R<BTreeMap<String,String>> {
+    let bytes = prefix.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(prefix);
+    let mut lines = bytes.split_inclusive(|&b| b == b'\n');
+    fn line(bytes: &[u8]) -> &[u8] {
+        let s=bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        s.strip_suffix(b"\r").unwrap_or(s)
+    }
+    let mut fields=BTreeMap::new();
+    let Some(first)=lines.next() else {return Ok(fields)};
+    if line(first)!=b"---" {return Ok(fields)}
+    let mut end=first.len();
+    for chunk in lines {
+        if end+chunk.len()>FRONT_LIMIT {break}
+        if line(chunk)!=b"---" {end+=chunk.len();continue}
+        let header=std::str::from_utf8(&bytes[first.len()..end]).map_err(|_|"YAML 頁首不是 UTF-8。")?;
+        if header.trim().is_empty() {return Ok(fields)}
+        let mut parser=Parser::new_from_str(header);
+        let mut events=0;
+        let mut next=|| -> R<Event> {
+            events+=1;
+            if events>4096 {return Err("頁首超過 4096 個 YAML 事件。".into())}
+            parser.next_token().map(|(e,_)|e).map_err(|_|"YAML 頁首格式錯誤。".into())
+        };
+        if next()?!=Event::StreamStart || next()?!=Event::DocumentStart || next()?!=Event::MappingStart(0,None) {
+            return Err("頁首必須是單層 YAML 欄位表。".into());
+        }
+        let mut seen=BTreeSet::new();
+        loop {
+            let event=next()?;
+            if event==Event::MappingEnd {break}
+            let key=front_key(event)?;
+            if seen.len()>=256 || !seen.insert(key.clone()) {return Err("頁首欄位重複或超過 256 個。".into())}
+            let value=next()?;
+            if !selected.contains(key.as_str()) {
+                skip_front_value(value,&mut next,1)?;
+                continue;
+            }
+            match value {
+                Event::Scalar(s,style,0,None) if matches!(style,TScalarStyle::Plain|TScalarStyle::SingleQuoted|TScalarStyle::DoubleQuoted)
+                    && s.len()<=1024 && !s.chars().any(char::is_control) => {
+                        if style!=TScalarStyle::Plain || !(s.is_empty() || matches!(Yaml::from_str(&s),Yaml::Null)) {
+                            fields.insert(key,s);
+                        }
+                    }
+                _=>return Err(format!("選取的頁首欄位「{key}」需要單行純量。")),
+            }
+        }
+        if next()?!=Event::DocumentEnd || next()?!=Event::StreamEnd {return Err("頁首只能包含一份 YAML 文件。".into())}
+        return Ok(fields);
+    }
+    Err("頁首缺少結尾分隔線，或超過 64 KiB。".into())
+}
+
 fn supported(map: BTreeMap<String, Node>) -> R<()> {
     match map.into_keys().next() {
         Some(k) => Err(format!("不支援的 Bases 設定：{k}")),
@@ -93,7 +183,7 @@ fn label(s: String) -> R<String> {
 }
 
 fn property(s: String) -> R<String> {
-    if matches!(s.as_str(), "file.name" | "file.folder" | "file.path" | "file.ext" | "file.basename") {
+    if matches!(s.as_str(), "file.name" | "file.folder" | "file.path" | "file.ext") {
         return Ok(s);
     }
     let key = s.strip_prefix("note.").unwrap_or(&s);

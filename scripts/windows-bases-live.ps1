@@ -145,6 +145,11 @@ Read-LiveColumn '進度' '待辦' 'false'
 Edit-LiveColumn '進度' '完成'
 $null=Assert-LiveDatabase $baseDb '完成' $noteId
 Click-WorkspaceButton 119
+$null=Wait-For 'the note and Edit button are visible before clicking Edit' {
+    [PaperroomHighlightGui]::IsWindowVisible((Control $window 110)) -and
+    [PaperroomHighlightGui]::IsWindowVisible((Control $window 121)) -and
+    [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+}
 Click-WorkspaceButton 110
 $null=Wait-For 'returning directly to the cached note loads the new source' {
     [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) -and

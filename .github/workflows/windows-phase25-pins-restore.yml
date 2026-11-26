@@ -1,0 +1,81 @@
+name: Verify the exact candidate through the pinned Bases restore
+on:
+  push:
+    branches: ['dev/qa/phase25-pins-restore']
+permissions:
+  contents: read
+  actions: read
+env:
+  PAPERROOM_SOURCE: add644ae7927d6f7e95d257a98a83fa920ad0ed6
+  EXE_SHA: 3ea1ecf8d31d5ef4fce454b0c017e2467dd4894f9f944fb6c0c5ba2df81c985f
+  ZIP_SHA: c77091efa1f5d191848bee50d0db48ad8d513787af5d1f587200923648d5ccf7
+  ARCHIVE_NAME: Paperroom-pinned-bases-windows-x64-gnu-draft
+jobs:
+  native:
+    name: Verify ${{ matrix.flow }} on the original EXE
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        flow: [official-pins, dynamic-bases]
+    timeout-minutes: 14
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      FLOW: ${{ matrix.flow }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the GUI setup to the reviewed fixed source
+        run: |
+          git merge-base --is-ancestor $env:PAPERROOM_SOURCE HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate is not an ancestor.' }
+          $actual=@(git diff --name-only 64d6fe432b57440ea33438b02ae6134f6ab015a5 HEAD)
+          $expected=@('.github/workflows/windows-phase25-pins-restore.yml','scripts/windows-pinned-bases.ps1')
+          if ($LASTEXITCODE -ne 0 -or $actual.Count -ne $expected.Count -or @($actual | Where-Object { $_ -cnotin $expected }).Count) {
+            throw 'The test replay differs outside the two QA files.'
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-pinned-bases-windows-x64-gnu-draft
+          path: ${{ runner.temp }}/pinned-original
+          run-id: 45765855523
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-pinned-bases-GNU-draft-exe
+          path: ${{ runner.temp }}/pinned-original-exe
+          run-id: 45765855523
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: obsidian-1.15.1-independent-base-pins
+          path: ${{ runner.temp }}/original-obsidian-pins
+          run-id: 45764058913
+          github-token: ${{ github.token }}
+      - name: Verify matching original downloads and run native pin acceptance
+        run: |
+          $ErrorActionPreference='Stop'
+          $folder=Join-Path $env:RUNNER_TEMP 'pinned-original'
+          $zip=Join-Path $folder "$env:ARCHIVE_NAME.zip"
+          python -B scripts/package-windows-gnu-audit.py verify --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXE_SHA --zip-sha256 $env:ZIP_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Draft ZIP failed fixed-source verification.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $folder 'verified')
+          $exe=Join-Path $folder 'verified/Paperroom.exe'
+          $standalone=Join-Path $env:RUNNER_TEMP 'pinned-original-exe/Paperroom.exe'
+          if ((Get-FileHash -LiteralPath $standalone).Hash -ine $env:EXE_SHA -or
+              (Get-FileHash -LiteralPath $exe).Hash -ine $env:EXE_SHA) {
+            throw 'Both downloads were expected to contain the original verified EXE.'
+          }
+          $env:PAPERROOM_OBSIDIAN_PINS=Join-Path $env:RUNNER_TEMP 'original-obsidian-pins'
+          $env:PAPERROOM_UNIFIED_RECEIPT=Join-Path $folder 'restore.json'
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXE_SHA -PinnedBasesOnly
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) { throw 'The native restore receipt is missing.' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-pinned-bases-same-exe-restore-${{ matrix.flow }}
+          path: ${{ runner.temp }}/pinned-original/restore.json
+          if-no-files-found: error

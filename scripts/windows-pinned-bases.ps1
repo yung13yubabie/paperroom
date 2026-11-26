@@ -248,12 +248,12 @@ $restoredDb=Join-Path $restored 'paperroom-data/notes.sqlite3'
 [void][IO.Directory]::CreateDirectory((Split-Path $restoredDb -Parent))
 Copy-Item -LiteralPath $backupPath -Destination $restoredDb
 Copy-Item -LiteralPath $Exe -Destination (Join-Path $restored 'Paperroom.exe')
-foreach ($home in @(@($appRoot,$dbPath),@($restored,$restoredDb))) {
-    $process=Start-Notebook $home[0]
+foreach ($workspaceCase in @(@($appRoot,$dbPath),@($restored,$restoredDb))) {
+    $process=Start-Notebook $workspaceCase[0]
     $window=$process.MainWindowHandle
     Read-PinThroughCanvas $pinA $idA $setA
     Read-PinThroughCanvas $pinB $idB $setB
-    $null=Read-PersistedPins $home[1] 'changed' $stable
+    $null=Read-PersistedPins $workspaceCase[1] 'changed' $stable
     Close-Notebook $process
     $process.Dispose()
     $process=$null

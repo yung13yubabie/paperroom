@@ -83,10 +83,20 @@ impl Notebook {
 
     /// Use imported display-only snapshots in their original collection.
     #[cfg(any(windows, test))]
+    pub(crate) fn collection_display_snapshot(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>> {
+        let tx=self.connection.unchecked_transaction()?;
+        let columns=self.collection_display_columns(collection)?.map(|keys|keys.into_iter().map(|key|{
+            let values=self.collection_display_values(collection,&key)?;
+            Ok((key,values))
+        }).collect::<Result<Vec<_>>>()).transpose()?;
+        tx.commit()?;
+        Ok(columns)
+    }
     pub(crate) fn collection_display_values(
         &self, collection: i64, key: &str,
     ) -> Result<std::collections::HashMap<i64, String>> {
         let key = key_checked(key)?;
+        if let Some(live)=super::obsidian_base_live::display(&self.connection,collection,&key,false)? { return Ok(live); }
         let mut statement = self.connection.prepare(
             "SELECT c.note_id, CASE WHEN fc.key IS NULL THEN p.value ELSE f.value END
              FROM collection_notes c

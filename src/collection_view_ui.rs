@@ -176,12 +176,8 @@ impl App {
         let display_columns = if saved_view.as_ref().is_some_and(|view| view.layout == CollectionLayout::Table)
             && timeline.is_none() && week.is_none() && calendar.is_none()
         {
-            self.notebook.collection_display_columns(id)?.map(|keys| {
-                keys.into_iter().map(|key| {
-                    let values = self.notebook.collection_display_values(id, &key)?;
-                    Ok(DisplayProperty { key, values })
-                }).collect::<Result<Vec<_>>>()
-            }).transpose()?
+            self.notebook.collection_display_snapshot(id)?.map(|columns|columns.into_iter()
+                .map(|(key,values)|DisplayProperty{key,values}).collect())
         } else { None };
         let checkbox = if display_columns.is_none() && let Some(filter) = saved_view.as_ref()
             .filter(|view| view.layout == CollectionLayout::Table && view.presentation.group_key.is_none()

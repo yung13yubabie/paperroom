@@ -6,7 +6,9 @@ param(
     [switch]$ProvePortableLinkGap,
     [switch]$LegacyLinkOnly,
     [switch]$UnifiedSourcesOnly,
-    [switch]$UnifiedDetailsOnly
+    [switch]$UnifiedDetailsOnly,
+    [switch]$BasesLiveOnly,
+    [switch]$CompanionPlacementOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1427,6 +1429,14 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($BasesLiveOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-live.ps1')
+        return
+    }
+    if ($CompanionPlacementOnly) {
+        . (Join-Path $PSScriptRoot 'windows-companion-placement.ps1')
+        return
+    }
     if ($UnifiedDetailsOnly) {
         . (Join-Path $PSScriptRoot 'windows-unified-source-details.ps1')
         return

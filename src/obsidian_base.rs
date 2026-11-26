@@ -40,8 +40,15 @@ pub(crate) struct Base {
     pub display_names: BTreeMap<String, String>,
 }
 
+impl Base {
+    pub(crate) fn has_live_status(&self)->bool {
+        self.views.iter().flat_map(|view|view.order.iter()).any(|key|key=="note.status"
+            || self.formulas.get(key).and_then(FileFormula::status_literal).is_some())
+    }
+}
+
 #[derive(Clone, Debug)]
-enum FileText { Folder, Path, Extension }
+enum FileText { Folder, Path, Extension, Status }
 #[derive(Clone, Debug)]
 enum StringTest { Contains, StartsWith, EndsWith }
 
@@ -50,6 +57,11 @@ pub(crate) struct FileFormula { field: FileText, test: StringTest, literal: Stri
 
 impl FileFormula {
     fn parse(expression: &str) -> R<Self> {
+        if let Some((lhs,rhs))=expression.split_once("==") && matches!(lhs.trim(),"status"|"note.status") {
+            let literal:String=serde_json::from_str(rhs.trim()).map_err(|_|"status 等值公式需要一個雙引號字串。")?;
+            if literal.len()>512 || literal.chars().any(char::is_control) {return Err("公式文字過長或含控制字元。".into());}
+            return Ok(Self{field:FileText::Status,test:StringTest::Contains,literal});
+        }
         let (call, argument) = expression.trim().split_once('(').ok_or("公式需要單一檔案文字函式。")?;
         let (receiver, method) = call.trim_end().rsplit_once('.').ok_or("公式缺少檔案欄位。")?;
         let field = match receiver {
@@ -68,8 +80,10 @@ impl FileFormula {
         Ok(Self { field, test, literal })
     }
 
+    pub(super) fn status_literal(&self)->Option<&str>{matches!(self.field,FileText::Status).then_some(&self.literal)}
     pub(super) fn display(&self, path: &str, folder: &str, name: &str) -> &'static str {
         let text = match self.field {
+            FileText::Status => unreachable!("status formulas use their source column"),
             FileText::Folder => folder, FileText::Path => path,
             FileText::Extension => name.rsplit_once('.').map_or("", |(_, ext)| ext),
         };

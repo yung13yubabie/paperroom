@@ -143,7 +143,10 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 38;
+#[path="obsidian_base_live.rs"]
+mod obsidian_base_live;
+
+const SCHEMA_VERSION: i32 = 39;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -427,6 +430,7 @@ impl Notebook {
             );")?;
         }
         if version < 38 { tx.execute_batch(heptabase_boards::SOURCE_SCHEMA)?; }
+        if version < 39 { tx.execute_batch(obsidian_base_live::SCHEMA)?; }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

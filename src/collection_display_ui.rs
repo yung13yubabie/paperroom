@@ -19,6 +19,7 @@ impl App {
             let action = popup(self.hwnd, self.widgets.links, None, &[
                 (1, "檢視可用屬性…"), (2, "設定顯示順序…"),
                 (3, "恢復原有欄位"), (4, "查看資料列的顯示欄位…"),
+                (5,"編輯連結的 status…"),
             ]);
             match action {
                 1 => {
@@ -60,6 +61,29 @@ impl App {
                     Ok(())
                 }
                 4 => self.show_collection_display_row(id),
+                5 => {
+                    let keys=self.notebook.live_status_keys(id)?;
+                    if keys.is_empty() {return Err("這個集合沒有連結的可編輯 status。".into());}
+                    let Some(k)=choose(self.hwnd,self.widgets.links,&keys,|k|k.clone()) else{return Ok(())};
+                    let key=&keys[k];
+                    let Some(WorkspaceView::Kanban(view))=&self.extras.workspace else{return Ok(())};
+                    let visible=self.notebook.editable_status_rows(id,key)?;
+                    let rows:Vec<_>=view.expanded_lanes().flat_map(|(_,rows)|rows.iter()).filter(|note|visible.contains_key(&note.id)).map(|note|(note.id,note.title.clone())).collect();
+                    if rows.is_empty(){return Err("目前沒有可編輯的來源資料列。".into());}
+                    let Some(n)=choose(self.hwnd,self.widgets.links,&rows,|(id,title)|format!("{title} (#{id})")) else{return Ok(())};
+                    let note=rows[n].0;
+                    let (version,value)=self.notebook.live_status_snapshot(id,key,note)?;
+                    let Some(draft)=crate::dialog::prompt(self.hwnd,"編輯工作區 status","儲存後，同一篇來源筆記的連結欄位將顯示新值。",&value,1024)? else{return Ok(())};
+                    if let Err(e)=self.notebook.edit_live_status(id,key,note,version,&draft){
+                        return crate::dialog::show_text(self.hwnd,"status 未儲存（可複製）",&format!("{e}\r\n\r\n{draft}"));
+                    }
+                    if !self.dirty && !self.failed && self.current.as_ref().is_some_and(|current|current.row.id==note) {
+                        self.current=self.notebook.note(note)?;
+                    }
+                    let saved=self.active_collection_view(id);
+                    self.open_collection_layout(id,title,saved)?;
+                    Ok(())
+                }
                 _ => Ok(()),
             }
         }

@@ -96,6 +96,7 @@ Native-VaultFolder $detailVault '匯入 1 篇筆記'
 Native-MenuFromKeyboard 109 40 '匯入 Obsidian Bases 檢視…'
 $prompt = Native-File 40 '匯入 Obsidian Bases 檢視…' $detailBase '已匯入 1 個 Bases 檢視' -AlreadyOpened -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
 Finish-Revision $prompt 6
+Native-Menu 109 1 '固定快照' -MenuOpen
 $null = Wait-For 'saved Bases source note' {
     [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'Bases 來源：SceneDetails.base'
 }

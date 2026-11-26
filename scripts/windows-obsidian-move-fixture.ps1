@@ -321,15 +321,28 @@ if ($HeadingProbe) {
         @($nodes | Where-Object { $_.Current.HasKeyboardFocus -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and
             $_.Current.Name -match '^(Select a command|Type a command|Command palette)' }).Count -eq 1
     }
-    Set-Clipboard -Value 'Rename heading'
+    Set-Clipboard -Value 'Rename this heading'
     InVerifiedWindow '^v'
-    $command=WaitFor 'exact Rename heading palette command' {
+    $command=WaitFor 'exact Rename this heading palette command' {
         param($nodes)
-        $exact=@($nodes | Where-Object {
-            $_.Current.Name -in 'Rename heading','Editor: Rename heading' -and
+        $named=@($nodes | Where-Object {
             $_.Current.ControlType -ne [Windows.Automation.ControlType]::Edit -and !$_.Current.BoundingRectangle.IsEmpty
         })
-        if ($exact.Count -eq 1) { $exact[0] }
+        $exact=@($named | Where-Object { $_.Current.Name -match '^(Editor:\s+)?Rename (this )?heading(?:…|\.\.\.)?$' })
+        if ($exact.Count -eq 1) { return $exact[0] }
+        # The command palette can expose matched words as separate text elements.
+        $parts=@(foreach ($word in 'Rename','this','heading') {
+            $hit=@($named | Where-Object { $_.Current.Name.Trim() -ceq $word })
+            if ($hit.Count -ne 1) { return }
+            $hit[0]
+        })
+        if ($parts.Count -ne 3) { return }
+        $a=$parts[0].Current.BoundingRectangle
+        $b=$parts[1].Current.BoundingRectangle
+        $c=$parts[2].Current.BoundingRectangle
+        if ($a.Right -le $b.Right -and $b.Right -le $c.Right -and
+            $c.Left-$a.Right -lt 150 -and
+            [Math]::Abs($a.Top-$b.Top) -lt 8 -and [Math]::Abs($a.Top-$c.Top) -lt 8) { $parts[0] }
     }
     $box=$command.Current.BoundingRectangle
     [ExactPicker]::ClickFixture($window,[int]($box.Left+$box.Width/2),[int]($box.Top+$box.Height/2),$false)

@@ -47,7 +47,11 @@ with closing(sqlite3.connect(Path(db).as_uri()+"?mode=ro",uri=True)) as c:
 }
 function Test-ReceiptPin {
     Native-Menu 109 12 '開啟已匯入的 Canvas…'
-    Choose-CollectionRow 'Review'
+    Native-Menu 109 1 'Review' -MenuOpen
+    $null=Wait-For 'saved Review Canvas finished replacing the previous workspace view' {
+        [PaperroomHighlightGui]::Read((Control $window 115)) -ceq 'Review' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq 'Canvas 操作'
+    }
     Native-Menu 120 16 '預覽或開啟 Bases 具名檢視…'
     Choose-CollectionRow 'Shipping.base#Dispatch 〔receipt-node〕'
     $preview=Wait-For 'named Bases preview after receipt operation' {
@@ -95,6 +99,7 @@ if (![PaperroomHighlightGui]::DialogContains($alert,$process.Id,'Bases 來源收
 [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
 $null=Wait-For 'bound-source refusal closed' {![PaperroomHighlightGui]::IsWindowVisible($alert)}
 if ((Receipt-State $db $false) -cne $initial) {throw 'Declined source deletion changed the bound receipt'}
+Write-Host 'Verified the app refused removal of the bound source and preserved the receipt.'
 Native-Menu 113 8 '附件與 PDF 摘錄…'
 Native-Menu 113 1 '加入本機附件…' -MenuOpen
 Native-File 1 '加入本機附件…' $asset '附件已保存到本機工作區。' -AlreadyOpened
@@ -104,6 +109,7 @@ if ([PaperroomHighlightGui]::Read((Control $delta 1)) -cne '還原此版本') {t
 Finish-Revision $delta 1
 $null=Wait-For 'ordinary history revision restored' {[PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已還原選取的筆記版本。'}
 if ((Receipt-State $db $false) -cne $initial) {throw 'Restoring the ordinary attachment altered bound identities'}
+Write-Host 'Verified ordinary attachment history restore retained the original source, view and Canvas.'
 Test-ReceiptPin
 Native-File 4 '備份工作區…' $backup '工作區備份已完成'
 Close-Notebook $process

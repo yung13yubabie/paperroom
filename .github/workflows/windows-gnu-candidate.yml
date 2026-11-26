@@ -196,9 +196,9 @@ jobs:
 
   windows-source:
     name: Confirm the existing Windows source suite on this exact head
-    needs: [linux, native]
+    needs: linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
@@ -210,7 +210,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The independent exact-SHA push job can outlast a short GUI flow.
-          for attempt in {1..16}; do
+          for attempt in {1..22}; do
             runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/windows.yml/runs" \
               -f event=push -f head_sha="$PAPERROOM_SOURCE" -f branch="$HEAD_BRANCH" -f per_page=30)"
             run="$(jq -c --arg sha "$PAPERROOM_SOURCE" --arg repo "$GITHUB_REPOSITORY" --arg branch "$HEAD_BRANCH" '

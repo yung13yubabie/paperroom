@@ -1,4 +1,4 @@
-name: Build and verify live Canvas cards and scoped sources
+name: Recheck the exact child-board candidate on Windows Server
 on:
   push:
     branches: ['dev/canvas-live-cards-20261126']
@@ -10,104 +10,39 @@ permissions:
 env:
   PAPERROOM_SOURCE: 2a048bae563819d6040c34c4c94e3fc0419b018a
   PAPERROOM_NAME: Paperroom-live-cards-windows-x64-gnu-draft
+  EXPECTED_EXE: bcd6c28d0ff2fe4e222a5dd6440d3d4d71b9fdd26778c5aebbd7a2eac5d17ab1
+  EXPECTED_ZIP: 270e7b9db000441e205f882a6aac14a4218377f68a07fc75f96aedb5300d2f5e
+  FLOW: child-board
 
 jobs:
-  build:
-    name: Rebuild twice and verify the packaged GNU EXE
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    outputs:
-      exe_sha: ${{ steps.build.outputs.exe_sha }}
-      zip_sha: ${{ steps.build.outputs.zip_sha }}
+  native:
+    name: Replay the downloaded EXE through the child-board UI
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Compare the workflow checkout to the fixed application source
+      - name: Confirm only this runner and child-board scenario changed
+        shell: bash
         run: |
           git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
-          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-live-cards-draft.yml'
-      - name: Install the pinned Rust GNU target
-        run: rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-gnu
-      - name: Run packaging regressions
-        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
-      - name: Independently build, package and read back the candidate
-        id: build
-        run: |
-          package="$RUNNER_TEMP/$PAPERROOM_NAME.zip"
-          export PAPERROOM_REPRO_EVIDENCE_DIR="$RUNNER_TEMP/gnu-originals"
-          bash scripts/build-windows-gnu-audit.sh "$package" "$PAPERROOM_SOURCE"
-          exe_sha="$(sha256sum "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" | cut -d ' ' -f 1)"
-          zip_sha="$(sha256sum "$package" | cut -d ' ' -f 1)"
-          python3 -B scripts/package-windows-gnu-audit.py verify --package "$package" --commit "$PAPERROOM_SOURCE" --exe-sha256 "$exe_sha" --zip-sha256 "$zip_sha"
-          cmp "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-b.exe"
-          install -m 0644 "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$RUNNER_TEMP/Paperroom.exe"
-          (cd "$RUNNER_TEMP" && sha256sum Paperroom.exe "$PAPERROOM_NAME.zip" > SHA256SUMS.txt)
-          echo "exe_sha=$exe_sha" >> "$GITHUB_OUTPUT"
-          echo "zip_sha=$zip_sha" >> "$GITHUB_OUTPUT"
-      - name: Retain the notice-inclusive Windows draft ZIP
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ${{ env.PAPERROOM_NAME }}
-          path: ${{ runner.temp }}/${{ env.PAPERROOM_NAME }}.zip
-          if-no-files-found: error
-          compression-level: 0
-      - name: Retain the standalone EXE and checksums for testing
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: Paperroom-live-cards-GNU-draft-exe
-          path: |
-            ${{ runner.temp }}/Paperroom.exe
-            ${{ runner.temp }}/SHA256SUMS.txt
-          if-no-files-found: error
-          compression-level: 0
-
-  linux:
-    name: Run the pinned Linux regression suite
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ env.PAPERROOM_SOURCE }}
-          persist-credentials: false
-      - run: rustup toolchain install 1.100.0 --profile minimal && cargo +1.100.0 test --locked
-
-  native:
-    name: Exercise the exact download (${{ matrix.flow }}) on Windows Server 2022
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        flow: [card-scope, notion-replace, child-board, node-assets, upgrade]
-    runs-on: windows-2022
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      FLOW: ${{ matrix.flow }}
-      EXPECTED_EXE: ${{ needs.build.outputs.exe_sha }}
-      EXPECTED_ZIP: ${{ needs.build.outputs.zip_sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-live-cards-draft.yml' ':!scripts/windows-native-child-board.ps1'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: ${{ env.PAPERROOM_NAME }}
           path: ${{ runner.temp }}/gnu-live-cards
+          run-id: 45768764162
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: Paperroom-live-cards-GNU-draft-exe
           path: ${{ runner.temp }}/gnu-live-cards-exe
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        if: matrix.flow == 'card-scope'
-        with:
-          name: obsidian-1.15.1-independent-base-pins
-          path: ${{ runner.temp }}/original-obsidian-pins
-          run-id: 45764058913
+          run-id: 45768764162
           github-token: ${{ github.token }}
       - name: Verify both downloads and run the native executable
         run: |
@@ -133,33 +68,13 @@ jobs:
           Write-Host "Both downloads contain the same EXE SHA-256 $env:EXPECTED_EXE. ZIP SHA-256 $env:EXPECTED_ZIP."
 
           $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $folder "$env:FLOW-restore.json"
-          if ($env:FLOW -eq 'upgrade') {
-            $baseline = Join-Path $folder 'Paperroom-v0.1.1.exe'
-            Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $baseline -TimeoutSec 45
-            if ((Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash -ine '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82') {
-              throw 'The public v0.1.1 baseline differs.'
-            }
-            ./scripts/windows-storage.ps1 -Exe $exe -UpgradeBaseline $baseline
-            ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE
-            @{exe_sha256=$env:EXPECTED_EXE; os=(Get-CimInstance Win32_OperatingSystem).Caption; upgrade_from='v0.1.1'; notices='passed'} |
-              ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8
-          } else {
-            $env:PAPERROOM_OBSIDIAN_PINS = Join-Path $env:RUNNER_TEMP 'original-obsidian-pins'
-            $scenario = switch ($env:FLOW) {
-              'card-scope' { @{PinnedCardScopeOnly=$true} }
-              'notion-replace' { @{NotionSourceReplacementOnly=$true} }
-              'child-board' { @{NativeChildBoardOnly=$true} }
-              'node-assets' { @{NodeAssetsOnly=$true} }
-              default { throw 'Unexpected native scenario.' }
-            }
-            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE @scenario
-          }
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE -NativeChildBoardOnly
           if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
             throw 'Missing native integration receipt.'
           }
       - name: Retain native integration receipts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Paperroom-live-cards-GNU-draft-native-${{ matrix.flow }}
+          name: Paperroom-live-cards-GNU-draft-native-child-board
           path: ${{ runner.temp }}/gnu-live-cards/*-restore.json
           if-no-files-found: error

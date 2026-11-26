@@ -31,9 +31,48 @@ function Return-ToExactChildTile {
         [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已定位上層的子白板卡片。'
     }
 }
-function Set-SelectedChildTile([string]$Coordinates) {
+function Set-SelectedChildTile([string]$Database,[int]$X,[int]$Y) {
+    $delta=@'
+import sqlite3,sys
+from contextlib import closing
+from pathlib import Path
+path,x,y=sys.argv[1:]
+with closing(sqlite3.connect(Path(path).as_uri()+"?mode=ro",uri=True)) as db:
+    px,py = db.execute("select o.x,o.y from board_objects o join boards b on b.id=o.child_id where b.title='ChildView'").fetchone()
+    print(f"{int(x)-px},{int(y)-py}")
+'@ | python - $Database $X $Y
+    if ($LASTEXITCODE -ne 0 -or $delta -notmatch '^-?[0-9]+,-?[0-9]+$') { throw 'Could not determine the saved tile movement delta.' }
     Native-Menu 120 12 '移動選取的物件…'
-    Collection-Prompt '移動選取的物件' $Coordinates
+    $dialog = Wait-For 'native tile displacement editor' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','移動選取的物件',1)
+    }
+    $edit = Control $dialog 101
+    if ([PaperroomHighlightGui]::Read($edit) -cne '0,0') { throw 'Tile displacement is not initialized to zero.' }
+    $point = [PaperroomHighlightGui]::FilenamePoint($dialog,$process.Id,$edit)
+    [PaperroomHighlightGui]::MouseAction($window,$process.Id,$edit,$point,0)
+    $null = Wait-For 'tile displacement edit has the keyboard focus' {
+        [PaperroomHighlightGui]::FilenameHasFocus($window,$process.Id,$dialog,$edit)
+    }
+    [void][PaperroomHighlightGui]::Send($edit,0x00B1,[IntPtr]::Zero,[IntPtr](-1))
+    [PaperroomHighlightGui]::TapKey($window,$process.Id,0x2E)
+    $null = Wait-For 'old tile displacement is cleared' { [PaperroomHighlightGui]::Read($edit) -ceq '' }
+    try {
+        foreach ($digit in $delta.ToCharArray()) {
+            $key = switch ($digit) {
+                ',' { 0xBC }
+                '-' { 0xBD }
+                default { [int][char]$digit }
+            }
+            [PaperroomHighlightGui]::TapKey($window,$process.Id,$key)
+        }
+        $null = Wait-For 'exact physical key displacement entered' { [PaperroomHighlightGui]::Read($edit) -ceq $delta }
+    } catch {
+        throw "Displacement dialog contains '$([PaperroomHighlightGui]::Read($edit))' after typing '$delta': $($_.Exception.Message)"
+    }
+    Finish-Revision $dialog 1
+    $null = Wait-For 'exactly one native selected object moved' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已移動 1 個白板物件。'
+    }
 }
 function Confirm-ChildBoardIdentity([string]$Database,[int]$X,[int]$Y,[string]$OriginalId='') {
     $identity=@'
@@ -75,12 +114,12 @@ $null=Wait-For 'child directly created from physical card' {
     [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('已建立子白板並放入同一張筆記卡。')
 }
 Return-ToExactChildTile
-Set-SelectedChildTile '4200,3600'
+Set-SelectedChildTile $boardDb 4200 3600
 $initial=Confirm-ChildBoardIdentity $boardDb 4200 3600
 
 Select-NativeBoard 'ChildView'
 Return-ToExactChildTile
-Set-SelectedChildTile '4400,3900'
+Set-SelectedChildTile $boardDb 4400 3900
 $null=Confirm-ChildBoardIdentity $boardDb 4400 3900 $initial
 Native-File 4 '備份工作區…' $boardBackup '工作區備份已完成'
 Close-Notebook $process
@@ -103,7 +142,7 @@ foreach ($workspace in @(@($boardApp,$boardDb,4500,4000),@($restored,$restoredDb
     }
     Select-NativeBoard 'ChildView'
     Return-ToExactChildTile
-    Set-SelectedChildTile "$($workspace[2]),$($workspace[3])"
+    Set-SelectedChildTile $workspace[1] $workspace[2] $workspace[3]
     $null=Confirm-ChildBoardIdentity $workspace[1] $workspace[2] $workspace[3] $initial
     Close-Notebook $process
     $process.Dispose()

@@ -109,6 +109,10 @@ function Witness31([string]$Db,[string]$Stage) {
     if ($LASTEXITCODE -ne 0 -or !$data) {throw "Failed $SharedFixtureCase SQLite evidence at $Stage"}
     return [string]$data
 }
+if ($SharedFixtureCase -eq 'native-board-transfer') {
+    . (Join-Path $PSScriptRoot 'windows-board-transfer32.ps1')
+    return
+}
 if ($SharedFixtureCase -eq 'collection-bulk-edit') {
     Start-Bulk31
     $targetMembers+=@('reserve','other')

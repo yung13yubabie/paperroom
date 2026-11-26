@@ -181,6 +181,81 @@ mod tests {
     }
 
     #[test]
+    fn source_index_follows_exact_rows_across_scopes_and_revalidates_stale_memberships()->Result<()> {
+        use super::super::collection_views::CollectionLayout;
+        let dir=super::super::tests::data_dir();
+        let zip=dir.join("source.zip");
+        fs::write(&zip,archive(&[
+            ("data.csv",b"Name,Status\nsame,ready"),("A/same.md",b"# same\n\nA unique [asset](image.txt)"),
+            ("B/same.md",b"# same\n\nB unique"),("A/image.txt",b"unchanged bytes")])?)?;
+        let file=dir.join("work.sqlite3");
+        let mut db=Notebook::open(&file,false)?;
+        let root=import(&mut db,&zip)?;
+        let csv=db.rows(View::All,"")?.into_iter().find(|r|r.title.ends_with("data.csv")).unwrap();
+        let (col,_)=db.create_collection_from_notion_csv(csv.id,db.list_attachments(csv.id)?[0].id,"Primary")?;
+        let row=db.collection_rows(col)?[0].0.id;
+        let details=db.note(row)?.unwrap();db.save(row,details.version,"same","unique row body")?;
+        let other=db.create_collection("Second")?;
+        db.add_to_collection(other,row,"todo")?;
+        let saved=db.create_collection_view(other,"Only done",CollectionLayout::Table,"done","")?;
+        let a=note_at(&db,root,"A/same.md")?;let b=note_at(&db,root,"B/same.md")?;
+        let page=db.notion_source_identity(a)?.unwrap();
+        let file_id=db.list_attachments(a)?[0].id;
+        let batch=db.notion_source_batches()?.remove(0);
+        let pages=db.notion_source_pages(&batch,row)?;
+        let target=pages.iter().find(|p|p.id==a).unwrap();
+        let token=db.notion_row_token(row)?.unwrap();
+        db.bind_notion_source(row,&token,&batch,target,None)?;
+        let decoy=db.add(None,"same","wrong row")?;
+        db.add_to_collection(col,decoy,"ready")?;
+        db.set_relation(decoy,"Other",a,true)?;
+        let (hits,more,conflicts)=db.notion_membership_page(&page,0)?;
+        assert_eq!((hits.len(),more,conflicts),(2,false,0));
+        assert_eq!(hits.iter().map(|h|h.collection).collect::<Vec<_>>(),[col,other]);
+        let first=&hits[0];let second=&hits[1];
+        assert_eq!(db.note_from_source_membership(&page,second)?.body,"unique row body");
+        db.move_collection_note(other,row,"todo","ready")?;
+        assert!(db.note_from_source_membership(&page,second).is_err());
+        assert_eq!(db.note_from_source_membership(&page,first)?.row.id,row);
+        db.trash(row)?;
+        assert!(db.notion_membership_page(&page,0)?.0.is_empty());
+        db.restore(row)?;
+        db.set_relation(row,SOURCE_RELATION,b,true)?;
+        let (hits,_,conflicts)=db.notion_membership_page(&page,0)?;
+        assert!(hits.is_empty()); assert_eq!(conflicts,1);
+        assert!(db.note_from_source_membership(&page,first).is_err());
+        db.set_relation(row,SOURCE_RELATION,b,false)?;
+        let n=db.note(row)?.unwrap();db.save(row,n.version,"renamed",&n.body)?;
+        assert!(db.note_from_source_membership(&page,first).is_err());
+        let n=db.note(a)?.unwrap();db.save(a,n.version,"renamed source",&n.body)?;
+        assert_eq!(db.notion_membership_page(&page,0)?.0[0].title,"renamed");
+        db.trash(a)?;assert!(db.notion_membership_page(&page,0).is_err());db.restore(a)?;
+        for i in 0..40 {
+            let extra=db.add(None,&format!("extra {i:02}"),"fixture")?;
+            db.add_to_collection(other,extra,"ready")?;db.set_relation(extra,SOURCE_RELATION,a,true)?;
+        }
+        let (first_page,more,_)=db.notion_membership_page(&page,0)?;
+        let (last_page,last_more,_)=db.notion_membership_page(&page,40)?;
+        assert_eq!((first_page.len(),more,last_page.len(),last_more),(40,true,2,false));
+        drop(db);
+        let db=Notebook::open(&file,false)?;
+        let backup=dir.join("backup.sqlite3");db.backup(&backup)?;drop(db);
+        let copy=dir.join("restored.sqlite3");fs::copy(backup,&copy)?;
+        let db=Notebook::open(&copy,false)?;
+        assert_eq!(db.note_from_source_membership(&page,&first_page[0])?.body,"unique row body");
+        assert!(db.collection_views(other)?.contains(&saved));
+        assert!(db.filtered_collection_rows(other,Some(&saved))?.is_empty());
+        let asset=dir.join("restored.txt");db.save_attachment_copy(file_id,&asset)?;
+        assert_eq!(fs::read(asset)?,b"unchanged bytes");
+        let old=db.bound_notion_source(row)?.unwrap();
+        db.bind_notion_source(row,&token,&batch,pages.iter().find(|p|p.id==b).unwrap(),Some(&old))?;
+        assert!(db.note_from_source_membership(&page,&first_page[0]).is_err());
+        let replacement=db.notion_source_identity(b)?.unwrap();
+        assert_eq!(db.notion_membership_page(&replacement,0)?.0.len(),2);
+        drop(db);fs::remove_dir_all(dir)?;Ok(())
+    }
+
+    #[test]
     fn chosen_csv_row_source_survives_reopen_backup_and_keeps_exact_attachment() -> Result<()> {
         let dir = super::super::tests::data_dir();
         let zip = dir.join("notion.zip");
@@ -447,3 +522,7 @@ impl super::Notebook {
         Ok(())
     }
 }
+
+#[path = "notion_source_memberships.rs"]
+mod memberships;
+pub(crate) use memberships::PageIdentity;

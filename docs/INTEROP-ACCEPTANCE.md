@@ -5,7 +5,7 @@
 | 想完成的工作 | Notion | Obsidian | Heptabase |
 | --- | --- | --- | --- |
 | 把頁面、欄位與附件搬進紙間 | [資料列和原始頁面](INTEROP-NOTION.md) | [Vault 與 Bases](INTEROP-OBSIDIAN.md) | [Markdown 及伴隨畫布](INTEROP-HEPTABASE.md) |
-| 在本機修改和導覽 | [集合、批次欄位編輯和來源關聯](INTEROP-NOTION.md#已實裝且驗證) | [動態檢視與 Canvas 卡片](INTEROP-OBSIDIAN.md#已實裝且驗證) | [筆記卡、連線端點和子白板](INTEROP-HEPTABASE.md#已實裝且驗證) |
+| 在本機修改和導覽 | [集合、批次欄位編輯和來源頁反查](INTEROP-NOTION.md#已實裝且驗證) | [動態檢視與 Canvas 卡片](INTEROP-OBSIDIAN.md#已實裝且驗證) | [筆記卡、跨白板複製和子白板](INTEROP-HEPTABASE.md#已實裝且驗證) |
 | 檢查原廠備份或連線服務 | [原廠 ZIP、協作和發佈](INTEROP-NOTION.md#已實裝待真實來源) | [原廠設定、Sync 和 Publish](INTEROP-OBSIDIAN.md#未實裝) | [All-Data、Space 和分享](INTEROP-HEPTABASE.md#已實裝待真實來源) |
 
 - **已實裝且驗證**表示已從指定入口跑完所述流程。合成輸入、原廠實檔和實際原廠介面證據各以連結標出。Windows Server 驗收只覆蓋所列 Windows Server 情境。
@@ -22,4 +22,4 @@
 | 發佈說明的相容性聲明 | 有原廠匯出和相符驗收的流程才可標成原廠往返。Notion 原廠 ZIP 和 Heptabase 原廠 All-Data 尚缺經授權的樣本，會阻擋這兩項相容性聲明。 |
 | 發行範圍與權限 | 正式發行另需核對候選、授權和版本範圍後才執行。草稿套件供驗證。 |
 
-本輪整合的固定來源、下載 SHA-256 與驗收工作連結以[草稿 PR #28](https://github.com/yung13yubabie/paperroom/pull/28) 最終描述為準。
+本輪整合的固定來源、下載 SHA-256 與驗收工作連結以[草稿 PR #30](https://github.com/yung13yubabie/paperroom/pull/30) 最終描述為準。

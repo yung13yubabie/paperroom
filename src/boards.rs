@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 pub const DEFAULT_BOARD_ID: i64 = 1;
 const MAX_CARDS: i64 = 128;
 
+#[derive(PartialEq, Eq)]
 pub struct Board {
     pub id: i64,
     pub title: String,
@@ -207,6 +208,13 @@ impl Notebook {
     pub(super) fn move_cards_on(
         tx:&Transaction<'_>, source:i64, destination:i64, expected:&[BoardPosition], dx:i32, dy:i32,
     )->Result<()> {
+        Self::transfer_layout_on(tx,source,destination,expected,dx,dy,LayoutTransfer::Move)
+    }
+
+    pub(super) fn transfer_layout_on(
+        tx:&Transaction<'_>, source:i64, destination:i64, expected:&[BoardPosition], dx:i32, dy:i32,
+        mode:LayoutTransfer,
+    )->Result<()> {
         if source == destination || expected.is_empty() || expected.len() as i64 > MAX_CARDS {
             return Err("請選取卡片與另一張目的白板。".into());
         }
@@ -219,7 +227,7 @@ impl Notebook {
             return Err("目的白板已不存在。".into());
         }
         if capacity + expected.len() as i64 > MAX_CARDS {
-            return Err("目的白板的卡片空間不足，未搬移任何卡片。".into());
+            return Err("目的白板的卡片空間不足。".into());
         }
 
         let mut selected = HashSet::with_capacity(expected.len());
@@ -248,20 +256,20 @@ impl Notebook {
                 let x = position.x.checked_add(dx).filter(|x| (0..=10000).contains(x));
                 let y = position.y.checked_add(dy).filter(|y| (0..=50000).contains(y));
                 let (Some(x), Some(y)) = (x, y) else {
-                    return Err("這項位移會超出目的白板的範圍，未搬移任何卡片。".into());
+                    return Err("這項位移會超出目的白板的範圍。".into());
                 };
                 let (active, duplicate, collision): (bool, bool, bool) = check.query_row(
                     params![source, destination, note, position.x, position.y, x, y],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )?;
                 if !active {
-                    return Err("來源卡片或位置已變更，未搬移任何卡片。請重新選取。".into());
+                    return Err("來源卡片或位置已變更。請重新選取。".into());
                 }
                 if duplicate {
-                    return Err("目的白板已有選取的卡片，未搬移任何卡片。".into());
+                    return Err("目的白板已有選取的卡片。".into());
                 }
                 if collision {
-                    return Err("目的位置有物件相疊，未搬移任何卡片。請改用其他位移。".into());
+                    return Err("目的位置有物件相疊。請改用其他位移。".into());
                 }
                 moved.push((note, x, y));
             }
@@ -274,7 +282,7 @@ impl Notebook {
                 let (from, to): (i64, i64) = row?;
                 let endpoints = (selected.contains(&from), selected.contains(&to));
                 if endpoints.0 != endpoints.1 {
-                    return Err("選取卡片仍連到原板的其他卡片，請一起選取連線兩端再搬移。".into());
+                    return Err("選取卡片仍連到原板的其他卡片，請一起選取連線兩端。".into());
                 }
                 if endpoints.0 {
                     edges.push((from, to));
@@ -293,13 +301,27 @@ impl Notebook {
                 params![destination, from, to])?;
         }
         for (group, members) in groups {
-            move_whole_board_group(tx, source, destination, group, &members)?;
+            match mode {
+                LayoutTransfer::Move => move_whole_board_group(tx,source,destination,group,&members)?,
+                LayoutTransfer::Copy => {
+                    tx.execute("INSERT INTO board_groups(board_id,title)
+                        SELECT ?2,title FROM board_groups WHERE board_id=?1 AND id=?3",params![source,destination,group])?;
+                    let new_group=tx.last_insert_rowid();
+                    tx.execute("INSERT INTO board_group_cards(board_id,note_id,group_id)
+                        SELECT ?2,note_id,?4 FROM board_group_cards WHERE board_id=?1 AND group_id=?3",
+                        params![source,destination,group,new_group])?;
+                    tx.execute("INSERT INTO board_group_sources(board_id,group_id,annotation_id)
+                        SELECT ?2,?4,annotation_id FROM board_group_sources WHERE board_id=?1 AND group_id=?3",
+                        params![source,destination,group,new_group])?;
+                }
+            }
         }
+        if matches!(mode,LayoutTransfer::Copy) { return Ok(()); }
         for note in selected {
             if tx.execute("DELETE FROM board_cards WHERE board_id=?1 AND note_id=?2",
                 params![source, note])? != 1
             {
-                return Err("來源位置已變更，未搬移任何卡片。".into());
+                return Err("來源位置已變更。".into());
             }
         }
         Ok(())
@@ -390,6 +412,9 @@ impl Notebook {
     }
 }
 
+#[derive(Clone,Copy)]
+pub(super) enum LayoutTransfer { Move, Copy }
+
 fn transferable_groups(
     tx: &Transaction<'_>, source: i64, destination: i64, selected: &HashSet<i64>,
 ) -> Result<BTreeMap<i64, Vec<i64>>> {
@@ -404,11 +429,11 @@ fn transferable_groups(
         return Ok(groups);
     }
     if groups.values().any(|members| !members.iter().all(|note| selected.contains(note))) {
-        return Err("選取只包含分區的一部分。請先展開分區並選取全部成員，再進行搬移。".into());
+        return Err("選取只包含分區的一部分。請先展開分區並選取全部成員。".into());
     }
     let count: i64 = tx.query_row("SELECT count(*) FROM board_groups WHERE board_id=?1", [destination], |row| row.get(0))?;
     if count + groups.len() as i64 > 64 {
-        return Err("目的白板的分區空間不足，未搬移任何卡片。".into());
+        return Err("目的白板的分區空間不足。".into());
     }
     let mut conflicts = tx.prepare(
         "SELECT EXISTS(SELECT 1 FROM board_groups s JOIN board_groups d ON d.title=s.title
@@ -416,7 +441,7 @@ fn transferable_groups(
     )?;
     for group in groups.keys() {
         if conflicts.query_row(params![source, destination, group], |row| row.get::<_, bool>(0))? {
-            return Err("目的白板已有同名分區，未搬移任何卡片。".into());
+            return Err("目的白板已有同名分區。".into());
         }
     }
     Ok(groups)

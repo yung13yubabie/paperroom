@@ -9,11 +9,12 @@ $folder='Pages 11111111111111111111111111111111'
 $targetPath="$folder/乙/Scene 33333333333333333333333333333333.md"
 @'
 import sys,zipfile
+from urllib.parse import quote
 p='Pages 11111111111111111111111111111111'
 a='Scene 22222222222222222222222222222222'
 b='Scene 33333333333333333333333333333333'
 with zipfile.ZipFile(sys.argv[1],"x") as z:
-    z.writestr(p+".md","# 工作資料")
+    z.writestr(p+".md","# 工作資料\n\n[精確甲](./"+quote(p+"/甲/"+a+".md")+")")
     z.writestr(f"{p}/甲/{a}.md","# 同名圖卡\n\n甲：另一份內容。\n\n[在地附件](local.txt)")
     z.writestr(f"{p}/乙/{b}.md","# 同名圖卡\n\n乙：待核對的正文。\n\n[在地附件](local.txt)")
     z.writestr(f"{p}/甲/local.txt","不同的甲附件。")
@@ -94,7 +95,22 @@ $null=Wait-For 'saved exact source binding' {
     [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已連結 Notion Markdown 來源頁。'
 }
 $null=Assert-NotionExactEdge $notionDb 'linked' $identity
+if ($NotionReverseRows) {
+    . (Join-Path $PSScriptRoot 'windows-notion-reverse-rows.ps1')
+    Open-SortCollection '導演集合'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 1 '儲存新檢視…' -MenuOpen
+    Collection-Prompt '儲存新檢視' '保留的來源檢視'
+    Native-Menu 120 2 '表格' -MenuOpen
+    Collection-Prompt '集合檢視'
+    Collection-Prompt '集合檢視' '場景'
+    Command $window 119
+    $null=Wait-For 'left saved view before opening source' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
+    }
+}
 Open-ConfirmedNotionSource (Join-Path $root 'local-before.txt')
+if ($NotionReverseRows) {Test-NotionReverse32 $notionDb}
 Native-File 4 '備份工作區…' $notionBackup '工作區備份已完成'
 Close-Notebook $process
 $process.Dispose()
@@ -109,14 +125,17 @@ foreach ($place in @(@($notionHome,$notionDb,'original'),@($restore,$restoreDb,'
     $window=$process.MainWindowHandle
     $null=Assert-NotionExactEdge $place[1] 'linked' $identity
     Open-ConfirmedNotionSource (Join-Path $root ($place[2]+'.txt'))
+    if ($NotionReverseRows) {Test-NotionReverse32 $place[1]}
     Close-Notebook $process
     $process.Dispose()
     $process=$null
 }
 if ((Get-FileHash -LiteralPath $notionZip).Hash -cne $notionSourceHash) { throw 'The original ZIP was modified.' }
+$extraNotionChecks=@()
+if ($NotionReverseRows) {$extraNotionChecks+=@('reverse exact CSV row and collection from imported page','same-title other page excluded','collection positioning on reopen and restore')}
 @{
     exe_sha256=$ExeSha256
     os=(Get-CimInstance Win32_OperatingSystem).Caption
-    scenarios=@('exact-relative-path-same-title','cancel-no-write','confirmed-stable-edge','correct-source-attachment-physical-save','reopen','isolated-restore')
+    scenarios=@('exact-relative-path-same-title','cancel-no-write','confirmed-stable-edge','correct-source-attachment-physical-save','reopen','isolated-restore')+$extraNotionChecks
 } | ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8
 Write-Host 'PASS: manual CSV row repair opens the exact Notion page and attachment after isolated restore.'

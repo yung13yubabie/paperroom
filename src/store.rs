@@ -65,7 +65,7 @@ pub(crate) mod notion_typed_relations;
 #[path = "notion_handoff.rs"]
 pub(crate) mod notion_handoff;
 #[path = "notion_page_links.rs"]
-mod notion_page_links;
+pub(crate) mod notion_page_links;
 #[path = "notion_preview.rs"]
 pub(crate) mod notion_preview;
 #[path = "notion_relation_resolver.rs"]

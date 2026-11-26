@@ -31,14 +31,14 @@ fn snapshot(db:&Connection,parent:i64,positions:&[BoardPosition])->Result<Select
     let mut members=db.prepare("SELECT note_id FROM board_group_cards WHERE board_id=?1 AND group_id=?2")?;
     for group in groups{
         for member in members.query_map(params![parent,group],|r|r.get::<_,i64>(0))? {
-            if !notes.contains(&member?){return Err("請選取整個分區後再收進子白板。".into());}
+            if !notes.contains(&member?){return Err("請選取整個分區。".into());}
         }
     }
     let mut edges=BTreeSet::new();
     let mut links=db.prepare("SELECT from_note,to_note FROM board_edges WHERE board_id=?1")?;
     for pair in links.query_map([parent],|r|Ok((r.get(0)?,r.get(1)?)))? {
         let (from,to)=pair?;
-        if notes.contains(&from)!=notes.contains(&to){return Err("請選取連線兩端，再收進子白板。".into());}
+        if notes.contains(&from)!=notes.contains(&to){return Err("請一併選取連線兩端。".into());}
         if notes.contains(&from){edges.insert((from,to));}
     }
     Ok(SelectionChild{parent,positions:positions.to_vec(),cards,edges})
@@ -87,7 +87,41 @@ fn child_unfold(db: &Connection, child: i64) -> Result<ChildUnfold> {
     Ok(ChildUnfold {selection, parent, tile, version, tile_origin:(x,y), tile_destination:destination})
 }
 
+pub(crate) struct CopyLayoutPlan {
+    selection: SelectionChild,
+    source_path: Vec<Board>,
+    target_path: Vec<Board>,
+}
+
 impl Notebook {
+    pub(crate) fn plan_copy_layout(&self, selection:SelectionChild, target:&Board)->Result<CopyLayoutPlan> {
+        let tx=self.connection.unchecked_transaction()?;
+        let source_path=self.board_path(selection.parent)?;
+        let target_path=self.board_path(target.id)?;
+        if selection.parent==target.id || target_path.last()!=Some(target) {
+            return Err("目的白板已變更，請重新選取。".into());
+        }
+        if snapshot(&tx,selection.parent,&selection.positions)?!=selection {
+            return Err("選取的卡片、分區或連線已變更，請重新選取。".into());
+        }
+        tx.commit()?;
+        Ok(CopyLayoutPlan {selection,source_path,target_path})
+    }
+
+    pub(crate) fn copy_layout(&self,plan:&CopyLayoutPlan,dx:i32,dy:i32)->Result<()> {
+        use super::super::boards::LayoutTransfer;
+        let source=plan.selection.parent;
+        let target=plan.target_path.last().ok_or("目的白板不存在。")?.id;
+        let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        if self.board_path(source)?!=plan.source_path || self.board_path(target)?!=plan.target_path
+            || snapshot(&tx,source,&plan.selection.positions)?!=plan.selection {
+            return Err("白板路徑、卡片、分區或連線已變更，請重新選取。".into());
+        }
+        Self::transfer_layout_on(&tx,source,target,&plan.selection.positions,dx,dy,LayoutTransfer::Copy)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn plan_child_unfold(&self, child: i64) -> Result<ChildUnfold> {
         let tx = self.connection.unchecked_transaction()?;
         let plan = child_unfold(&tx, child)?;
@@ -138,6 +172,88 @@ impl Notebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn copy_layout_preserves_both_boards_and_rejects_stale_or_partial_plans() -> Result<()> {
+        let dir=super::super::super::tests::data_dir();
+        let live=dir.join("source.db");
+        let backup=dir.join("backup.db");
+        let mut db=Notebook::open(&live,false)?;
+        let src=db.create_board("原板")?;
+        let dst=db.new_child_board(1,"目的")?;
+        let target=Board{id:dst,title:"目的".into()};
+        let a=db.add(None,"鏡頭","原文")?;
+        use crate::store::board_images::{BoardImageInput,ImageSize};
+        use image::ImageEncoder;
+        let mut pixels=Vec::new();
+        image::codecs::png::PngEncoder::new(&mut pixels).write_image(&[10,20,80,255],1,1,image::ExtendedColorType::Rgba8)?;
+        db.add_card_on(src,a)?;
+        let b=db.add_board_images(src,&[BoardImageInput::new("鏡頭".into(),pixels.clone())?])?[0];
+        let size=ImageSize{width:300,height:170};
+        let decoy=db.add(None,"同名對照","第三篇")?;
+        db.move_card_on(src,a,16,16)?;
+        db.move_card_on(src,b,276,16)?;
+        db.resize_board_image(src,b,(276,16),ImageSize::IMAGE,size)?;
+        let positions=[(a,16),(b,276)].map(|(id,x)|BoardPosition{item:BoardItem::Card(id),x,y:16,version:None});
+        let group=db.create_board_group(src,"段落")?;
+        db.set_board_group(src,a,None,Some(group))?;
+        db.set_board_group(src,b,None,Some(group))?;
+        db.add_edge_on(src,a,b)?;
+        let pdf=dir.join("來源.pdf");
+        let bytes=include_bytes!("../tests/fixtures/storyboard-zh/剪輯範圍.pdf");
+        std::fs::write(&pdf,bytes)?;
+        let file=db.import_attachment(a,&pdf)?;
+        let pin=db.add_pdf_annotation(file,1,"引文","註")?;
+        db.set_board_group_source(src,group,None,Some(pin))?;
+        let collection=db.create_collection("收錄")?;
+        db.add_to_collection(collection,a,"已確認")?;
+        assert!(db.plan_selection_child(src,&positions[..1]).is_err());
+        let plan=db.plan_copy_layout(db.plan_selection_child(src,&positions)?,&target)?;
+        let mut writer=Notebook::open(&live,false)?;
+        writer.remove_edge_on(src,a,b)?;
+        assert!(db.copy_layout(&plan,0,135).is_err());
+        writer.add_edge_on(src,a,b)?;
+        writer.reparent_board(dst,Some(1),None)?;
+        assert!(db.copy_layout(&plan,0,135).is_err());
+        let plan=db.plan_copy_layout(db.plan_selection_child(src,&positions)?,&target)?;
+        writer.add_card_on(dst,decoy)?;
+        writer.move_card_on(dst,decoy,16,151)?;
+        assert!(db.copy_layout(&plan,0,135).is_err());
+        writer.remove_card_on(dst,decoy)?;
+        assert!(db.copy_layout(&plan,i32::MAX,0).is_err());
+        // Abort after inserting the placements and group, while copying its PDF pin.
+        db.connection.execute_batch("CREATE TEMP TRIGGER fail_copy BEFORE INSERT ON board_group_sources
+            BEGIN SELECT RAISE(ABORT,'synthetic late pin failure'); END;")?;
+        assert!(db.copy_layout(&plan,0,135).is_err());
+        assert!(db.groups_on(dst)?.is_empty() && db.cards_on(dst)?.is_empty() && db.edges_on(dst)?.is_empty());
+        db.connection.execute_batch("DROP TRIGGER fail_copy")?;
+        db.copy_layout(&plan,0,135)?;
+        assert!(db.copy_layout(&plan,0,135).is_err());
+        let fresh_group=db.groups_on(dst)?[0].id;
+        assert_ne!(fresh_group,group);
+        db.backup(&backup)?;
+        drop(writer);drop(db);
+        for path in [&live,&backup] {
+            let db=Notebook::open(path,false)?;
+            for (board,y,g) in [(src,16,group),(dst,151,fresh_group)] {
+                assert_eq!(db.cards_on(board)?.into_iter().map(|c|(c.id,c.x,c.y)).collect::<Vec<_>>(),[(a,16,y),(b,276,y)]);
+                assert_eq!(db.cards_on(board)?.into_iter().find(|card|card.id==b).unwrap().size(),size);
+                assert_eq!(db.board_image_bytes(b)?.unwrap(),pixels);
+                assert_eq!(db.edges_on(board)?.len(),1);
+                assert_eq!(db.live_board_group_source(board,g,pin)?.unwrap().attachment_id,file);
+                assert_eq!(db.groups_on(board)?[0].members.len(),2);
+            }
+            assert_eq!(db.read_pdf_attachment(file)?.1,bytes.as_slice());
+            assert_eq!(db.connection.query_row("SELECT count(*) FROM collection_notes WHERE collection_id=?1 AND note_id=?2",params![collection,a],|r|r.get::<_,i64>(0))?,1);
+            db.rename_board_group(dst,fresh_group,"段落","另一種排列")?;
+            db.remove_edge_on(dst,a,b)?;
+            assert_eq!(db.groups_on(src)?[0].title,"段落");
+            assert_eq!(db.edges_on(src)?.len(),1);
+            assert!(!db.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",[],|r|r.get::<_,bool>(0))?);
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn unfolding_restores_canonical_cards_and_keeps_the_tile_and_grandchild() -> Result<()> {
         let dir = super::super::super::tests::data_dir();

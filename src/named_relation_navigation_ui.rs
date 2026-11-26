@@ -5,11 +5,11 @@ impl App {
     pub(super) unsafe fn show_named_relation_navigation(&mut self, note: i64) -> Result<()> {
         let origin = self.notebook.named_relation_origin(note)?;
         let anchor = self.widgets.links;
-        let direction = match unsafe { popup(self.hwnd, anchor, None, &[
-            (1, "指向此筆記的具名關聯…"),
-            (2, "此筆記指向的具名關聯…"),
-            (3, "編輯集合關聯屬性…"),
-        ]) } {
+        let mut actions=vec![(1,"指向此筆記的具名關聯…"),(2,"此筆記指向的具名關聯…"),(3,"編輯集合關聯屬性…")];
+        let imported=self.notebook.notion_source_identity(note)?;
+        if imported.is_some() {actions.push((4,"查看 Notion 來源頁的集合資料列…"));}
+        let direction = match unsafe { popup(self.hwnd, anchor, None, &actions) } {
+            4 => {if let Some(page)=imported {unsafe {self.show_notion_source_rows(&page)?;}} return Ok(())},
             1 => Direction::Incoming,
             2 => Direction::Outgoing,
             3 => return unsafe { self.edit_relation_fields(note) },

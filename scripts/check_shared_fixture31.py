@@ -25,6 +25,19 @@ def witness(db, spec, scenario, stage):
                           (result["field"][2],)).fetchall()
         require(len(mode) == 1 and mode[0][1] == "場景", "Named collection view lost its filter")
         result.update(values=values, view=mode)
+    elif scenario == "native-board-transfer":
+        boards = {}
+        for key, title in (("source", "CopySource32"), ("destination", "CopyDestination32")):
+            board_id, = db.execute("SELECT id FROM boards WHERE title=?", (title,)).fetchone()
+            cards = db.execute("SELECT note_id,x,y FROM board_cards WHERE board_id=? ORDER BY note_id", (board_id,)).fetchall()
+            edges = db.execute("SELECT from_note,to_note FROM board_edges WHERE board_id=? ORDER BY 1,2", (board_id,)).fetchall()
+            boards[key] = dict(id=board_id, cards=cards, edges=edges)
+        src, dst = boards["source"], boards["destination"]
+        pair = tuple(sorted((ids["canonical"], ids["exact"])))
+        require([n for n, _, _ in src["cards"]] == list(pair) and src["edges"] == [pair], "Wrong original layout")
+        require(dst["edges"] == ([] if stage == "before" else [pair]), "Destination edges differ")
+        require(dst["cards"] == ([] if stage == "before" else [(n,x,y+135) for n,x,y in src["cards"]]), "Wrong copied position")
+        result["boards"] = boards
     elif scenario == "native-board-edge-navigation":
         all_boards = {}
         for name, role, members in [("EdgeFar", "exact", ["canonical","exact","decoy"]),

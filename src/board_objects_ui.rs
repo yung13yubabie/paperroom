@@ -151,6 +151,35 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn copy_selected_layout_menu(&mut self) -> Result<()> {
+        unsafe {
+            let source=self.board_id();
+            let positions=self.board_selection_snapshot();
+            if positions.is_empty() {
+                label(self.widgets.status,"按住 Ctrl 點選要複製配置的卡片。");
+                return Ok(());
+            }
+            let selection=self.notebook.plan_selection_child(source,&positions)?;
+            let boards=self.notebook.list_boards()?.into_iter().filter(|b|b.id!=source).collect::<Vec<_>>();
+            if boards.is_empty() { label(self.widgets.status,"請先建立另一張目的白板。"); return Ok(()); }
+            let Some(index)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,boards.len(),
+                |i|format!("[#{}]　{}",boards[i].id,boards[i].title)) else {return Ok(())};
+            let target=&boards[index];
+            let plan=self.notebook.plan_copy_layout(selection,target)?;
+            let Some(delta)=crate::dialog::prompt(self.hwnd,"跨白板複製配置","輸入水平、垂直位移（dx,dy，可為負數）","0,0",32)?
+                else {return Ok(())};
+            let (dx,dy)=delta.split_once(',').ok_or("請用逗號分隔兩個整數。")?;
+            let dx=dx.trim().parse::<i32>().map_err(|_|"水平位移須為整數。")?;
+            let dy=dy.trim().parse::<i32>().map_err(|_|"垂直位移須為整數。")?;
+            let message_text=format!("將 {} 張卡片放到「{}」並位移（{dx}, {dy}）？兩張白板共用原筆記，分區與連線可分別編輯。",positions.len(),target.title);
+            if message(self.hwnd,"確認複製白板配置",&message_text,MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES {
+                self.notebook.copy_layout(&plan,dx,dy)?;
+                label(self.widgets.status,&format!("已將 {} 張卡片與配置複製到「{}」，原白板已保留。",positions.len(),target.title));
+            }
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn move_selected_board_cards_menu(&mut self) -> Result<()> {
         unsafe {
             let source = self.board_id();

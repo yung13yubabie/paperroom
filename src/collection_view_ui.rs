@@ -149,6 +149,12 @@ impl App {
     }
 
     pub(super) unsafe fn open_collection_layout(&mut self,id:i64,title:String,saved_view:Option<CollectionView>) -> Result<()> {
+        let view=self.build_collection_layout(id,title,saved_view)?;
+        unsafe {self.activate_workspace(WorkspaceView::Kanban(view));}
+        Ok(())
+    }
+
+    pub(super) fn build_collection_layout(&self,id:i64,title:String,saved_view:Option<CollectionView>) -> Result<Kanban> {
         let timeline = if let Some(view) = saved_view.as_ref().filter(|view| view.presentation.timeline_mode) {
             let month = view.presentation.calendar_month.ok_or("時間軸的月份有誤。")?;
             Some((month, self.notebook.timeline_collection_rows(id, view, month)?))
@@ -194,8 +200,7 @@ impl App {
         let group_folds = saved_view.as_ref().map(|view| self.notebook.collection_group_folds(view)).transpose()?.flatten();
         let mut view = Kanban { id,title,saved_view,column,row,checkbox,display_columns,calendar,week,timeline,timeline_drag:None,lanes,group_folds };
         view.row = row.min(view.max_scroll_row());
-        unsafe { self.activate_workspace(WorkspaceView::Kanban(view)); }
-        Ok(())
+        Ok(view)
     }
 
     pub(super) unsafe fn collection_view_menu(&mut self,id:i64,title:String) -> Result<()> {

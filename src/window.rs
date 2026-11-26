@@ -2197,6 +2197,7 @@ impl App {
                 (23, "對齊或等距排列…"), (24, "復原最近一次排列"),
                 (25, "新增心智圖根節點…"), (26, "心智圖節點…"),
                 (27, "白板形狀…"), (28, "白板標籤…"),
+                (29,"將選取的卡片與配置複製到另一張白板…"),
             ]) {
                 1 => {
                     let notes = self.notebook.rows(View::All, "")?;
@@ -2240,6 +2241,7 @@ impl App {
                 11 => self.add_existing_pdf_excerpt_ui()?,
                 12 => self.board_selection_menu()?,
                 13 => self.collapse_board_group_menu()?,
+                29 => self.copy_selected_layout_menu()?,
                 14 => self.reuse_selected_board_cards_menu()?,
                 15 => self.move_selected_board_cards_menu()?,
                 16 => self.arm_board_drop_target()?,

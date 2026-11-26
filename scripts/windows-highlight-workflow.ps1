@@ -15,6 +15,7 @@ param(
     [switch]$VendorRichCanvasOnly,
     [switch]$PinnedBasesOnly,
     [switch]$NotionSourceOnly,
+    [switch]$NotionReverseRows,
     [switch]$NodeAssetsOnly,
     [switch]$PinnedCardScopeOnly,
     [switch]$NotionSourceReplacementOnly,
@@ -23,7 +24,7 @@ param(
     [switch]$TypedRelationBranchOnly,
     [switch]$RelationRollupRecoveryOnly,
     [switch]$SharedNoteWorkflowOnly,
-    [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation')][string]$SharedFixtureCase='shared-workflow',
+    [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation','native-board-transfer')][string]$SharedFixtureCase='shared-workflow',
     [switch]$VaultHeadingOnly,
     [switch]$ReceiptHistoryOnly,
     [switch]$BasesDescendingOnly

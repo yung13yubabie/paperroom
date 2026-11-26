@@ -1,7 +1,7 @@
-name: Verify official Obsidian Bases and Canvas runtime
+name: Verify official Obsidian Canvas media round trip
 on:
   push:
-    branches: ['dev/qa/phase22-obsidian-runtime-receipts']
+    branches: ['dev/qa/phase22-obsidian-media-canvas-20261126']
 permissions:
   contents: read
 jobs:
@@ -14,7 +14,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Read two Bases and edit and reopen a synthetic Canvas
+      - name: Move a native Canvas card and reopen its media fixture
         shell: pwsh
         env:
           OBSIDIAN_RECEIPTS: ${{ runner.temp }}/obsidian-synthetic-receipts
@@ -23,7 +23,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: obsidian-1.15.1-synthetic-runtime
+          name: obsidian-1.15.1-canvas-media-roundtrip
           path: ${{ runner.temp }}/obsidian-synthetic-receipts
           if-no-files-found: warn
           retention-days: 14

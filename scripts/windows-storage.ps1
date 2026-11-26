@@ -183,7 +183,7 @@ def inspect(database):
         assert con.execute("pragma integrity_check").fetchall() == [("ok",)]
         assert con.execute("pragma foreign_key_check").fetchall() == []
         version = con.execute("pragma user_version").fetchone()[0]
-        if version == 41:
+        if version == 42:
             assert con.execute("SELECT count(*) FROM collection_field_rules").fetchone() == (0,)
             assert con.execute("SELECT count(*) FROM notion_page_paths").fetchone() == (0,)
         notes = con.execute("select id,parent,title,body,pinned,trash_root,version from notes order by id").fetchall()
@@ -259,14 +259,14 @@ function Test-PublishedWorkspaceUpgrade($Root, $Baseline, $Candidate) {
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         Set-UpgradeTitle $process $newTitle
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 41 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 42 $newTitle $oldDb
         $process = Start-Notebook (Join-Path $upgrade 'bin') (Join-Path $upgrade 'local') (Join-Path $upgrade 'temp') $false
         if ((Read-Control $process.MainWindowHandle 103) -cne $newTitle) { throw 'Candidate did not retain the upgraded note on reopen.' }
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 41 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 42 $newTitle $oldDb
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         if ((Get-FileHash -LiteralPath $oldDb).Hash -cne $originalHash) { throw 'Published original database bytes changed.' }
-        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 41 → native UI save/reopen, integrity, and original byte preservation passed.'
+        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 42 → native UI save/reopen, integrity, and original byte preservation passed.'
     } finally {
         if ($process -and !$process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }
@@ -353,7 +353,7 @@ try {
         }
         Set-UpgradeTitle $aliasProcess $aliasTitle
         Close-Notebook $aliasProcess
-        Assert-UpgradeDatabase $aliasDb 41 $aliasTitle
+        Assert-UpgradeDatabase $aliasDb 42 $aliasTitle
         $aliasProcess = Start-Notebook $aliasBin $aliasLocal $aliasTemp $false
         if ((Read-Control $aliasProcess.MainWindowHandle 103) -cne $aliasTitle) {
             throw 'The resolved portable folder did not retain the note on reopen.'

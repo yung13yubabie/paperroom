@@ -230,22 +230,36 @@ impl App {
                         projection::hit_node(&view.doc, projection, point, grip)) else { return Ok(()); };
                     let Some(node) = view.doc.json()["nodes"].as_array().into_iter().flatten()
                         .find(|node| node["id"].as_str() == Some(node_id)) else { return Ok(()); };
+                    let editable = crate::store::canvas_base_cards::named_nodes(&view.doc)
+                        .iter().any(|(pin, _, _)| *pin == node_id)
+                        && !self.notebook.is_companion_canvas(view.id)?
+                        && self.notebook.canvas_vault(view.id)?.is_some();
                     let Some(reference) = node_asset_reference(node) else { return Ok(()); };
-                    let Some(CanvasAssetState::Stored(member)) = view.bundle.as_ref()
-                        .and_then(|bundle| bundle.references.get(reference)) else {
+                    let member = view.bundle.as_ref().and_then(|bundle| bundle.references.get(reference))
+                        .and_then(|state| match state {
+                            CanvasAssetState::Stored(member) => Some(member),
+                            _ => None,
+                        });
+                    if !editable && member.is_none() {
                         label(self.widgets.status, "此節點沒有可另存的封裝附件。");
                         return Ok(());
-                    };
-                    let (command, saved) = if node["type"] == "group" {
+                    }
+                    let (asset_command, saved) = if node["type"] == "group" {
                         ("儲存此群組的背景圖片…", "已另存群組背景的原始圖片。")
                     } else {
                         ("儲存此節點的附件…", "已另存節點的原始附件。")
                     };
-                    if ClientToScreen(self.hwnd, &mut cursor) == 0
-                        || popup(self.hwnd, self.widgets.links, Some(cursor), &[(1, command)]) != 1
-                    {
-                        return Ok(());
+                    let mut entries = Vec::new();
+                    if editable { entries.push((1, "編輯 Bases 卡片欄位…")); }
+                    let asset_id = if editable { 2 } else { 1 };
+                    if member.is_some() { entries.push((asset_id, asset_command)); }
+                    if ClientToScreen(self.hwnd, &mut cursor) == 0 { return Ok(()); }
+                    let selected = popup(self.hwnd, self.widgets.links, Some(cursor), &entries);
+                    if editable && selected == 1 {
+                        let selected = node_id.to_owned();
+                        return self.edit_canvas_base_card(&selected);
                     }
+                    let Some(member) = member.filter(|_| selected == asset_id) else { return Ok(()); };
                     let name = member.rsplit('/').next().ok_or("封裝附件缺少檔名。")?;
                     if let Some(path) = file_dialog(self.hwnd, "所有檔案\0*.*\0\0", "", Some(name))? {
                         self.notebook.save_canvas_node_asset(view.id, &view.doc, node_id, member, &path)?;
@@ -405,7 +419,11 @@ impl App {
                 frame(dc, rect, accent);
                 if let Some(grip) = grip { fill(dc, &rectangle(grip), accent); }
                 let field = match kind { "text" => "text", "file" => "file", "link" => "url", _ => "label" };
-                let caption = node[field].as_str().unwrap_or(kind).chars().take(140)
+                let file = node[field].as_str().unwrap_or(kind);
+                let is_base = kind == "file" && file.rsplit_once('.')
+                    .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("base"));
+                let pin = if is_base { node["subpath"].as_str().filter(|path| path.starts_with('#')).unwrap_or("") } else { "" };
+                let caption = file.chars().chain(pin.chars()).take(140)
                     .map(|c| if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { ' ' } else { c })
                     .collect::<String>();
                 let unknown = !matches!(kind, "text" | "file" | "link" | "group");

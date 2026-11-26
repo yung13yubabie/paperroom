@@ -1,0 +1,80 @@
+name: Recheck the exact child-board candidate on Windows Server
+on:
+  push:
+    branches: ['dev/canvas-live-cards-20261126']
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: 2a048bae563819d6040c34c4c94e3fc0419b018a
+  PAPERROOM_NAME: Paperroom-live-cards-windows-x64-gnu-draft
+  EXPECTED_EXE: bcd6c28d0ff2fe4e222a5dd6440d3d4d71b9fdd26778c5aebbd7a2eac5d17ab1
+  EXPECTED_ZIP: 270e7b9db000441e205f882a6aac14a4218377f68a07fc75f96aedb5300d2f5e
+  FLOW: child-board
+
+jobs:
+  native:
+    name: Replay the downloaded EXE through the child-board UI
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm only this runner and child-board scenario changed
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-live-cards-draft.yml' ':!scripts/windows-native-child-board.ps1'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.PAPERROOM_NAME }}
+          path: ${{ runner.temp }}/gnu-live-cards
+          run-id: 45768764162
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-live-cards-GNU-draft-exe
+          path: ${{ runner.temp }}/gnu-live-cards-exe
+          run-id: 45768764162
+          github-token: ${{ github.token }}
+      - name: Verify both downloads and run the native executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'gnu-live-cards'
+          $zip = Join-Path $folder "$env:PAPERROOM_NAME.zip"
+          python -B scripts/package-windows-gnu-audit.py verify --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'GNU ZIP failed complete readback.' }
+          $extracted = Join-Path $folder 'verified'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+          $exe = Join-Path $extracted 'Paperroom.exe'
+          $standaloneFolder = Join-Path $env:RUNNER_TEMP 'gnu-live-cards-exe'
+          $standalone = Join-Path $standaloneFolder 'Paperroom.exe'
+          $checksums = Get-Content -LiteralPath (Join-Path $standaloneFolder 'SHA256SUMS.txt')
+          if ($checksums.Count -ne 2 -or $checksums[0] -cne "$env:EXPECTED_EXE  Paperroom.exe" -or
+              $checksums[1] -cne "$env:EXPECTED_ZIP  $env:PAPERROOM_NAME.zip" -or
+              (Get-FileHash -LiteralPath $standalone -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'Downloaded EXEs or checksum list differed from the expected unsigned candidate.'
+          }
+          Write-Host "Both downloads contain the same EXE SHA-256 $env:EXPECTED_EXE. ZIP SHA-256 $env:EXPECTED_ZIP."
+
+          $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $folder "$env:FLOW-restore.json"
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE -NativeChildBoardOnly
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
+            throw 'Missing native integration receipt.'
+          }
+      - name: Retain native integration receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-live-cards-GNU-draft-native-child-board
+          path: ${{ runner.temp }}/gnu-live-cards/*-restore.json
+          if-no-files-found: error

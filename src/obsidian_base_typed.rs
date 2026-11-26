@@ -132,19 +132,28 @@ impl Notebook{
     }
     pub(crate) fn edit_typed_base(&self,col:i64,key:&str,id:i64,expected:i64,new:&str)->Result<()>{
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
-        super::obsidian_base_dynamic::require_visible(&tx,col,id)?;
+        edit_typed_base_on(&tx,col,key,id,expected,new)?;
+        tx.commit()?;Ok(())
+    }
+}
+
+
+pub(super) fn edit_typed_base_on(tx:&Transaction<'_>,col:i64,key:&str,id:i64,expected:i64,new:&str)->Result<()> {
+        super::obsidian_base_dynamic::require_visible(tx,col,id)?;
         let (title,body,source,kind):(String,String,String,String)=tx.query_row(&format!("SELECT n.title,n.body,b.source_key,b.kind{ROWS} AND n.id=?3 AND n.version=?4 AND b.op IS NULL"),params![col,key,id,expected],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or("來源或版本已變更。")?;
         if !allowed(new,&kind){return Err("請輸入 true、false、限定範圍的十進位數或 null，符合選取欄位型別。".into())}
         let old=cell(&body,&source,&kind)?;
         if old.value==new{return Ok(())}
         let replacement=format!("{}{new}{}",old.before,old.after);
-        obsidian_base_live::save_splice(&tx,id,expected,&title,body,old.range,&replacement,|updated|{
+        obsidian_base_live::save_splice(tx,id,expected,&title,body,old.range,&replacement,|updated|{
             if cell(updated,&source,&kind)?.value!=new{return Err("新值未能原樣保存。".into())}Ok(())
         })?;
-        tx.commit()?;Ok(())
-    }
+    Ok(())
 }
 
+pub(super) fn existing_direct_value(body:&str,source:&str,kind:&str)->Option<String>{
+    cell(body,source,kind).ok().filter(|cell|cell.value!=MISSING).map(|cell|cell.value)
+}
 
 // The order key is independent from the caption: 2, 2.0 and 2.000 share a lane.
 pub(super) fn group(value:Option<&String>,kind:&str)->((u8,i128),String){

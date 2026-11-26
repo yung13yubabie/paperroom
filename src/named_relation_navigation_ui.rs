@@ -54,6 +54,7 @@ impl App {
 impl App {
     pub(super) unsafe fn bind_notion_source_page(&mut self, row: i64) -> Result<()> {
         let token = self.notebook.notion_row_token(row)?.ok_or("此筆記已經不在集合中。")?;
+        let previous = self.notebook.bound_notion_source(row)?;
         let batches = self.notebook.notion_source_batches()?;
         if batches.is_empty() { return Err("找不到含 Markdown 來源頁的 Notion 匯入批次。".into()); }
         let anchor = self.widgets.links;
@@ -65,10 +66,23 @@ impl App {
         let Some(index) = (unsafe { navigation_ui::choose_navigation_page(self.hwnd, anchor, pages.len(),
             |i| pages[i].label()) }) else { return Ok(()); };
         let page = &pages[index];
-        let prompt = format!("將集合資料列 [#{row}] 連到您選取的來源頁？\r\n{}  (#{})\r\n{}\r\n這會建立本機具名關聯。",batch.title,batch.id,page.label());
-        if unsafe { message(self.hwnd,"連結 Notion 來源頁",&prompt,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) } == IDYES {
-            self.notebook.bind_notion_source(row,&token,batch,page)?;
-            unsafe { label(self.widgets.status,"已連結 Notion Markdown 來源頁。"); }
+        let (caption, prompt, status) = if let Some(old) = previous.as_ref() {
+            if old.matches(page) {
+                unsafe { label(self.widgets.status,"已經連結到這個 Notion Markdown 來源頁。"); }
+                return Ok(());
+            }
+            ("更換 Notion 來源頁",
+                format!("更換集合資料列 [#{row}] 的來源？\r\n原來源：{}\r\n新來源：{}  (#{})\r\n{}",
+                    old.label(), batch.title, batch.id, page.label()),
+                "已更換 Notion Markdown 來源頁。")
+        } else {
+            ("連結 Notion 來源頁",
+                format!("將集合資料列 [#{row}] 連到您選取的來源頁？\r\n{}  (#{})\r\n{}\r\n這會建立本機具名關聯。",batch.title,batch.id,page.label()),
+                "已連結 Notion Markdown 來源頁。")
+        };
+        if unsafe { message(self.hwnd,caption,&prompt,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) } == IDYES {
+            self.notebook.bind_notion_source(row,&token,batch,page,previous.as_ref())?;
+            unsafe { label(self.widgets.status,status); }
         }
         Ok(())
     }

@@ -1268,6 +1268,8 @@ impl App {
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
                 (40, "匯入 Obsidian Bases 檢視…"),
+                (41, "匯入隨 Vault 來源變動的 Bases…"),
+                (42, "從同一 Vault 加入新 Markdown…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
             if action == 33 {
@@ -1275,6 +1277,10 @@ impl App {
                 if let Err(error) = crate::dialog::show_text(self.hwnd, "第三方補充通知", &notices) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if matches!(action,41|42) && (self.dirty || self.failed) {
+                self.show_error("請先儲存或處理目前編輯中的筆記，再核對 Vault 來源。".into());
                 return;
             }
             if action == 32 {
@@ -1333,7 +1339,8 @@ impl App {
                     29 => return app.export_zotero_csl_ui(),
                     31 => return app.import_canvas_bundle_ui(),
                     35 => return app.workspace_search_ui(),
-                    40 => {
+                    42 => return app.add_verified_vault_source(),
+                    40 | 41 => {
                         let source = app.current.as_ref().ok_or("先開啟已匯入的 Vault 筆記。")?;
                         let root = app.notebook.graph_vault(source.row.id)?
                             .ok_or("先開啟要套用這份 Bases 的已匯入 Vault 筆記。")?;
@@ -1345,18 +1352,19 @@ impl App {
                                 std::fs::File::open(&path)?, crate::store::obsidian_base::MAX_BYTES as u64,
                             )?;
                             let parsed = crate::store::obsidian_base::parse(&raw)?;
-                            let prompt = format!("從已匯入的「{}」（#{}）建立 {} 個集合？紙間會使用目前的來源筆記，並保存 .base 原檔。", scope.row.title, root, parsed.views.len());
+                            let mut prompt = format!("從已匯入的「{}」（#{}）建立 {} 個集合？紙間會使用目前的來源筆記，並保存 .base 原檔。", scope.row.title, root, parsed.views.len());
+                            if action==41 {prompt.push_str("\r\n新來源、改名與搬移會依最新配對路徑重新入選。");}
                             if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
                                 return Ok(());
                             }
                             let dynamic = parsed.has_dynamic_rules();
-                            let mode=if parsed.has_live_status(){
+                            let mode=if action==41{4}else if parsed.has_live_status(){
                                 let mut options=vec![(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})];
                                 if dynamic{options.push((3,"動態篩選與排序（連結來源）"));}
                                 popup(app.hwnd,app.widgets.files,None,&options)
                             }else{1};
-                            if !matches!(mode,1..=3){return Ok(());}
-                            let (receipt,views)=app.notebook.import_obsidian_base_options(root,filename,raw,mode!=1,mode==3)?;
+                            if !matches!(mode,1..=4){return Ok(());}
+                            let (receipt,views)=if mode==4{app.notebook.import_vault_scope_base(root,filename,raw)?}else{app.notebook.import_obsidian_base_options(root,filename,raw,mode!=1,mode==3)?};
                             app.open_import(receipt, &format!("已匯入 {} 個 Bases 檢視。", views.len()));
                         }
                         return Ok(());
@@ -2538,7 +2546,17 @@ impl App {
             if self.extras.cards.iter().any(|card| card.id == id && card.image.is_some()) {
                 items.push((6, "調整圖片卡大小…"));
             }
+            let card_position = self.extras.cards.iter().find(|card| card.id == id)
+                .map(|card| (card.x, card.y));
+            if card_position.is_some() {
+                items.push((7, "從此卡建立子白板…"));
+            }
             let action = popup(self.hwnd, null_mut(), Some(point), &items);
+            if action == 7 {
+                return self.create_child_board_from_card_ui(
+                    id, card_position.ok_or("找不到來源卡片。")?,
+                );
+            }
             if action == 6 {
                 return self.resize_board_image_ui(id);
             }

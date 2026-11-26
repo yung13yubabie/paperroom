@@ -16,6 +16,9 @@ pub(crate) const PUSH_SCHEMA: &str = "CREATE TABLE vault_push_verified(
     INSERT INTO vault_push_verified(note_id) SELECT b.note_id FROM vault_sync_base b
     JOIN notes n ON n.id=b.note_id WHERE n.body=b.body;";
 
+#[path = "vault_admission.rs"]
+mod admission;
+
 #[path = "vault_relocation.rs"]
 mod relocation;
 

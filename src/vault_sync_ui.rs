@@ -191,3 +191,19 @@ impl App {
         }
     }
 }
+
+impl App {
+    pub(super) unsafe fn add_verified_vault_source(&mut self)->Result<()> {
+        unsafe {
+            let anchor=self.current.as_ref().ok_or("請先開啟這個 Vault 的既有來源筆記。")?.row.id;
+            self.notebook.vault_relocation_origin(anchor)?;
+            let Some(dir)=folder_dialog(self.hwnd)? else{return Ok(())};
+            let Some(path)=crate::dialog::prompt(self.hwnd,"加入 Vault 新來源","輸入新 Markdown 的精確相對路徑，以 / 分隔資料夾。","",4096)? else{return Ok(())};
+            let preview=self.notebook.preview_vault_admission(anchor,&dir,&path)?;
+            if message(self.hwnd,"確認加入 Vault 新來源",&preview.report(),MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES{return Ok(())}
+            let note=self.notebook.apply_vault_admission(&preview)?;
+            self.open_import(note,"已建立新來源筆記，並更新跟隨這個 Vault 的 Bases。");
+            Ok(())
+        }
+    }
+}

@@ -27,14 +27,17 @@ pub(crate) struct View {
 impl View {
     /// Only pass imported active Markdown file paths from the selected Vault.
     pub fn matches_path(&self, relative: &str) -> bool {
+        matches_paths(&self.folders,relative)
+    }
+}
+pub(super) fn matches_paths(rules:&[FolderRule],relative:&str)->bool{
         let parent = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
-        self.folders.iter().all(|rule| match rule {
+        rules.iter().all(|rule| match rule {
             FolderRule::Path(path) => relative==path,
             FolderRule::Exact(dir) => parent == dir,
             FolderRule::Subtree(dir) => parent == dir || parent.strip_prefix(dir.as_str())
                 .is_some_and(|tail| tail.starts_with('/')),
         })
-    }
 }
 
 #[derive(Debug)]
@@ -66,7 +69,7 @@ enum StringTest { Contains, StartsWith, EndsWith }
 pub(crate) struct FileFormula { field: FileText, test: StringTest, literal: String }
 
 impl FileFormula {
-    fn parse(expression: &str) -> R<Self> {
+    pub(super) fn parse(expression: &str) -> R<Self> {
         if let Some((lhs,rhs))=expression.split_once("==") && matches!(lhs.trim(),"status"|"note.status") {
             let literal:String=serde_json::from_str(rhs.trim()).map_err(|_|"status 等值公式需要一個雙引號字串。")?;
             if literal.len()>512 || literal.chars().any(char::is_control) {return Err("公式文字過長或含控制字元。".into());}
@@ -91,6 +94,11 @@ impl FileFormula {
         Ok(Self { field, test, literal })
     }
 
+    pub(super) fn path_expression(&self)->Option<String>{
+        let receiver=match self.field{FileText::Path=>"file.path",FileText::Folder=>"file.folder",FileText::Extension=>"file.ext",_=>return None};
+        let method=match self.test{StringTest::Contains=>"contains",StringTest::StartsWith=>"startsWith",StringTest::EndsWith=>"endsWith"};
+        Some(format!("{receiver}.{method}({})",serde_json::to_string(&self.literal).ok()?))
+    }
     pub(super) fn typed(&self)->Option<&Test>{if let FileText::Typed(test)=&self.field{Some(test)}else{None}}
     pub(super) fn status_literal(&self)->Option<&str>{matches!(self.field,FileText::Status).then_some(&self.literal)}
     pub(super) fn display(&self, path: &str, folder: &str, name: &str) -> &'static str {

@@ -300,7 +300,7 @@ impl Notebook {
         ).optional()?;
         let Some(previous) = previous else { return Ok(None); };
         let restored = expected.reparse(previous)?;
-        replace_source(&tx, canvas_id, expected, &restored)?;
+        replace_source(&tx, canvas_id, expected.as_str(), restored.as_str())?;
         tx.commit()?;
         Ok(Some(restored))
     }
@@ -316,10 +316,15 @@ fn edit_on(tx:&Transaction<'_>, canvas_id:i64, expected:&Document, edit:CanvasEd
         HashSet::new()
     };
     let revised = apply(expected, edit, &reserved)?;
-    replace_source(tx, canvas_id, expected, &revised)?;
-    if revised.as_str() != expected.as_str() {
+    replace_with_undo(tx,canvas_id,expected.as_str(),revised.as_str())?;
+    Ok(revised)
+}
+
+pub(super) fn replace_with_undo(tx:&Transaction<'_>,canvas_id:i64,expected:&str,revised:&str)->Result<()> {
+    replace_source(tx,canvas_id,expected,revised)?;
+    if revised != expected {
         tx.execute("INSERT INTO canvas_edit_undo(canvas_id, source) VALUES (?1, ?2)",
-            params![canvas_id, expected.as_str()])?;
+            params![canvas_id, expected])?;
         // Keep the most recent action per canvas with a workspace-wide byte budget.
         tx.execute(
             "DELETE FROM canvas_edit_undo WHERE rowid IN (
@@ -330,11 +335,11 @@ fn edit_on(tx:&Transaction<'_>, canvas_id:i64, expected:&Document, edit:CanvasEd
              )", [super::workspace::MAX_CANVAS_STORAGE_BYTES],
         )?;
     }
-    Ok(revised)
+    Ok(())
 }
 
 fn replace_source(
-    tx: &Transaction<'_>, canvas_id: i64, expected: &Document, revised: &Document,
+    tx: &Transaction<'_>, canvas_id: i64, expected: &str, revised: &str,
 ) -> Result<()> {
     let changed = tx.execute(
         "UPDATE saved_canvases SET source=?3
@@ -342,7 +347,7 @@ fn replace_source(
          AND length(CAST(?3 AS BLOB)) +
              (SELECT coalesce(sum(length(CAST(source AS BLOB))),0)
               FROM saved_canvases WHERE id<>?1) <= ?4",
-        params![canvas_id, expected.as_str(), revised.as_str(), super::workspace::MAX_CANVAS_STORAGE_BYTES],
+        params![canvas_id, expected, revised, super::workspace::MAX_CANVAS_STORAGE_BYTES],
     )?;
     if changed == 0 {
         return Err("畫布已更改、已移除，或工作區的 Canvas 已達容量上限。請重新開啟畫布。".into());

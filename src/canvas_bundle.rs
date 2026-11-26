@@ -490,17 +490,22 @@ mod tests {
             let source = dir.join("vault.zip");
             let pack = json!({"nodes":[
                 {"id":"exact","type":"file","x":0,"y":0,"width":100,"height":80,
-                 "file":"甲/鏡頭.md","subpath":"#答案"},
+                 "file":"甲/鏡頭.md","subpath":"#答案","unknown":{"preserve":true}},
+                {"id":"wrong-note","type":"file","x":0,"y":120,"width":100,"height":80,"file":"乙/鏡頭.md","subpath":"#答案"},
+                {"id":"base-pin","type":"file","x":0,"y":220,"width":100,"height":80,"file":"進度.base","subpath":"#答案"},
                 {"id":"basename-only","type":"file","x":120,"y":0,"width":90,"height":80,"file":"鏡頭.md"}
             ]});
             let content = "# 答案\n甲組筆記。\n";
+            let original=serde_json::to_string_pretty(&pack)?;
+            let physical=dir.join("原件.canvas");fs::write(&physical,&original)?;
             let mut zip = ZipWriter::new(File::create_new(&source)?);
-            for (name, bytes) in [("研究/圖.canvas", pack.to_string().into_bytes()),
+            for (name, bytes) in [("研究/圖.canvas", fs::read(&physical)?),
                 ("甲/鏡頭.md", content.as_bytes().to_vec()), ("乙/鏡頭.md", b"separate sibling".to_vec())] {
                 zip.start_file(name, SimpleFileOptions::default())?;
                 zip.write_all(&bytes)?;
             }
             zip.finish()?;
+            let zip_bytes=fs::read(&source)?;
             let bundle = db.import_canvas_bundle(&source)?.id;
             assert!(db.resolve_canvas_file_link(bundle, None, "exact")?.note_id.is_none());
             let page = |folder: &str, body: &str| ImportedPage {
@@ -514,12 +519,49 @@ mod tests {
             let exact = db.resolve_canvas_file_link(bundle, scope, "exact")?;
             assert_eq!(exact.subpath.as_deref(), Some("#答案"));
             assert_eq!(db.note(exact.note_id.unwrap())?.unwrap().body, content);
+            let target=exact.note_id.unwrap();
+            let body=db.note(target)?.unwrap().body;
+            assert!(matches!(crate::markdown::resolve_heading(&body,exact.subpath.as_deref().unwrap(),crate::markdown::AnchorSyntax::Wiki),crate::markdown::HeadingLookup::Found{..}));
+            let selected=db.vault_heading_choices(target)?;
+            let plan=db.preview_heading_rename(&selected,"答案","解答")?;
+            assert!(plan.summary().contains(&format!("[#{bundle}]　節點：exact")));
+            let original_working=db.read_canvas(bundle)?.as_str().to_owned();
+            let collision_doc=crate::canvas::parse(r##"{"nodes":[{"id":"future","type":"file","file":"甲/鏡頭.md","subpath":"#解答","x":0,"y":0,"width":40,"height":40}]}"##.into())?;
+            let collision=db.save_canvas("collision",&collision_doc)?;
+            db.set_canvas_vault(collision,Some(a))?;
+            assert!(db.preview_heading_rename(&selected,"答案","解答").is_err());
+            assert!(db.apply_heading_rename(&plan).is_err());
+            assert_eq!(db.note(target)?.unwrap().body,body);
+            db.set_canvas_vault(collision,None)?;
+            db.connection.execute_batch(&format!("CREATE TEMP TRIGGER interrupt_heading_canvas BEFORE UPDATE OF source ON saved_canvases WHEN OLD.id={bundle}
+                BEGIN SELECT RAISE(ABORT,'test write failure'); END;"))?;
+            assert!(db.apply_heading_rename(&plan).is_err());
+            assert_eq!(db.note(target)?.unwrap().body,body);
+            assert_eq!(db.read_canvas(bundle)?.as_str(),original_working);
+            db.connection.execute_batch("DROP TRIGGER interrupt_heading_canvas")?;
+            db.apply_heading_rename(&plan)?;
+            let link=db.resolve_canvas_file_link(bundle,scope,"exact")?;
+            assert_eq!(link.note_id,Some(target));
+            assert_eq!(link.subpath.as_deref(),Some("#解答"));
+            let updated=db.note(target)?.unwrap().body;
+            assert!(matches!(crate::markdown::resolve_heading(&updated,link.subpath.as_deref().unwrap(),crate::markdown::AnchorSyntax::Wiki),crate::markdown::HeadingLookup::Found{..}));
+            let mut revised=pack.clone();revised["nodes"][0]["subpath"]=json!("#解答");
+            assert_eq!(db.read_canvas(bundle)?.json(),&revised);
+            assert_eq!(fs::read(&physical)?,original.as_bytes());
+            assert_eq!(fs::read(&source)?,zip_bytes);
+            let backup=dir.join("isolated.sqlite3");
+            db.backup(&backup)?;
+            let reopened=Notebook::open(&backup,false)?;
+            assert_eq!(reopened.resolve_canvas_file_link(bundle,scope,"exact")?.subpath,Some("#解答".into()));
+            assert_eq!(reopened.undo_canvas_edit(bundle,&reopened.read_canvas(bundle)?)?.unwrap().as_str(),original_working);
+            drop(reopened);
+
             assert!(links.iter().find(|link| link.node_id == "basename-only").unwrap().note_id.is_none());
             db.compare_set_canvas_vault(bundle, Some(a), Some(b))?;
             assert!(db.resolve_canvas_file_link(bundle, Some(a), "exact").is_err());
             db.compare_set_canvas_vault(bundle, Some(b), None)?;
             assert!(db.resolve_canvas_file_link(bundle, None, "exact")?.note_id.is_none());
-            assert_eq!(db.read_canvas(bundle)?.json(), &pack);
+            assert_eq!(db.read_canvas(bundle)?.json(), &revised);
             Ok(())
         })();
         let _ = fs::remove_dir_all(dir);

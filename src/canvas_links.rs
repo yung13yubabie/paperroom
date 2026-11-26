@@ -186,6 +186,55 @@ pub(super) struct CanvasRelocation {
     pub revised: String,
 }
 
+#[derive(PartialEq, Eq)]
+pub(super) struct CanvasHeadingEdit {
+    pub id:i64, pub title:String, pub nodes:Vec<String>, pub original:String, pub revised:String,
+}
+
+// Active non-companion Canvases resolve file nodes using the exact Vault-relative key.
+// Companion receipts follow a different identity contract and are deliberately excluded.
+pub(super) fn plan_heading_nodes(conn:&Connection, root:i64, target:i64,
+    mut change:impl FnMut(&str)->Result<Option<String>>)->Result<Vec<CanvasHeadingEdit>> {
+    let path:String=conn.query_row("SELECT relative_path FROM vault_paths WHERE import_root=? AND note_id=?",
+        params![root,target],|r|r.get(0))?;
+    let mut q=conn.prepare("SELECT c.id,c.title,c.source,bundle.canvas_id IS NOT NULL
+        FROM canvas_vault_bindings b JOIN saved_canvases c ON c.id=b.canvas_id
+        LEFT JOIN canvas_bundles bundle ON bundle.canvas_id=c.id
+        WHERE b.import_root=? AND NOT EXISTS(SELECT 1 FROM companion_canvases cc WHERE cc.canvas_id=c.id)
+        ORDER BY c.id")?;
+    let mut rows=q.query([root])?;
+    let mut edits=Vec::new();
+    let mut delta=0i64;
+    while let Some(row)=rows.next()? {
+        let id:i64=row.get(0)?;
+        let title:String=row.get(1)?;
+        let raw:String=row.get(2)?;
+        let doc=if row.get::<_,bool>(3)? {crate::canvas::parse_bundle(raw)?}else{crate::canvas::parse(raw)?};
+        let mut updates=Vec::new();
+        for (i,n) in doc.json()["nodes"].as_array().into_iter().flatten().enumerate() {
+            if n["type"].as_str()!=Some("file") {continue;}
+            let link=file_link(n)?;
+            if relative_key(&link.file).as_deref()!=Some(path.as_str()) {continue;}
+            let Some(anchor)=link.subpath.as_deref().filter(|a| !a.starts_with("#^")) else {continue};
+            let next=change(anchor).map_err(|e|format!("Canvas「{title}」[#{id}] 節點 {}：{e}",link.node_id))?;
+            if let Some(next)=next {updates.push((i,link.node_id,next));}
+        }
+        if updates.is_empty(){continue;}
+        let mut tree=doc.json().clone();
+        let mut nodes=Vec::new();
+        for (i,node,next) in updates {
+            tree["nodes"][i]["subpath"]=Value::String(next);
+            nodes.push(node);
+        }
+        let revised=super::canvas_edit::serialize_edit(&doc,tree)?;
+        delta+=revised.as_str().len() as i64-doc.as_str().len() as i64;
+        edits.push(CanvasHeadingEdit{id,title,nodes,original:doc.as_str().into(),revised:revised.as_str().into()});
+    }
+    if delta>0 && !conn.query_row("SELECT coalesce(sum(length(CAST(source AS BLOB))),0)+?1<=?2 FROM saved_canvases",
+        [delta,super::workspace::MAX_CANVAS_STORAGE_BYTES],|r|r.get::<_,bool>(0))? {return Err("更新後會超過工作區 Canvas 容量。".into());}
+    Ok(edits)
+}
+
 pub(super) fn plan_vault_relocation(
     conn: &Connection, import_root: i64, old_path: &str, new_path: &str,
 ) -> Result<Vec<CanvasRelocation>> {

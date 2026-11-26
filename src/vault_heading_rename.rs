@@ -12,13 +12,19 @@ pub(crate) struct HeadingSelection {
 struct Edit { id:i64, version:i64, token:String, title:String, path:String, next:String, links:usize }
 
 #[derive(PartialEq,Eq)]
-pub(crate) struct RenamePlan { root:i64, target:i64, old:String, new:String, edits:Vec<Edit> }
+pub(crate) struct RenamePlan {
+    root:i64, target:i64, old:String, new:String, edits:Vec<Edit>,
+    canvases:Vec<super::super::canvas_links::CanvasHeadingEdit>,
+}
 
 impl RenamePlan {
     pub(crate) fn summary(&self)->String {
         let links=self.edits.iter().map(|e|e.links).sum::<usize>();
         let mut out=format!("「{}」 → 「{}」\r\n將更新 {} 篇筆記、{} 個連結。只修改工作區內同批 Vault 的使用中筆記。\r\n",self.old,self.new,self.edits.len(),links);
         for e in &self.edits {out.push_str(&format!("\r\n{}　[#{}]　{} 個連結",e.path,e.id,e.links));}
+        for canvas in &self.canvases { for node in &canvas.nodes {
+            out.push_str(&format!("\r\nCanvas {}　[#{}]　節點：{}",canvas.title,canvas.id,node));
+        }}
         out
     }
 }
@@ -102,6 +108,9 @@ impl Notebook {
             return Err("預覽後來源或引用已變更，請重新檢查。".into());
         }
         for e in &plan.edits { super::super::save_in(&tx,e.id,e.version,&e.title,&e.next)?; }
+        for c in &plan.canvases {
+            super::super::canvas_edit::replace_with_undo(&tx,c.id,&c.original,&c.revised)?;
+        }
         tx.commit()?;Ok(())
     }
 }
@@ -176,7 +185,22 @@ fn prepare(db:&Connection,target:i64,version:i64,old:&str,new:&str)->Result<Rena
         for (range,text) in spans.into_iter().rev(){next.replace_range(range,&text);}
         edits.push(Edit{id,version:row.get(3)?,token:row.get(4)?,title:row.get(1)?,path,next,links});
     }
-    Ok(RenamePlan{root,target,old:old.to_owned(),new:new.to_owned(),edits})
+    let canvases=super::super::canvas_links::plan_heading_nodes(db,root,target,|anchor|{
+        comparisons+=before.len();
+        if comparisons>2_000_000 {return Err("引用比對超過此次檢查上限。".into());}
+        let locate=|heads:&[_],len,a:&str| markdown::lookup_headings(heads,len,a,AnchorSyntax::Wiki);
+        let prior=locate(&before,body.len(),anchor);
+        let next=locate(&after,changed.len(),anchor);
+        let position=|v:&HeadingLookup|match v {HeadingLookup::Found{ordinal,..}=>Some(*ordinal),_=>None};
+        if position(&prior)==position(&next) {return Ok(None);}
+        let replacement=format!("#{new}");
+        if position(&prior)!=Some(ordinal) || anchor[1..].contains('#')
+            || position(&locate(&after,changed.len(),&replacement))!=Some(ordinal) {
+            return Err("此小節會失去原定位或改指其他小節。".into());
+        }
+        Ok(Some(replacement))
+    })?;
+    Ok(RenamePlan{root,target,old:old.to_owned(),new:new.to_owned(),edits,canvases})
 }
 
 #[cfg(test)]

@@ -48,9 +48,12 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as
     notes=json.loads(data)["nodes"]
     n=[x for x in notes if x["type"]=="file"]
     assert len(n)==1+int(sys.argv[2]) and all(x["file"]=="甲/鏡頭.md" for x in n)
-    assert [x["x"] for x in n]==[10,70,185][:len(n)]
+    expected=[(10,15,280,120),(70,200,240,114),(185,360,240,114)]
+    assert [tuple(x[k] for k in ("x","y","width","height")) for x in n]==expected[:len(n)]
+    assert len({x["id"] for x in n})==len(n)
     assert notes[0]["label"]=="原有群組"
     assert db.execute("pragma integrity_check").fetchone()==("ok",)
+    print(n[-1]["id"])
 '@ | python - $Db $Added
     if ($LASTEXITCODE -ne 0) { throw 'Canvas geometry or original content differed.' }
 }
@@ -78,15 +81,15 @@ Add-Placement '70 200 240 114' -Cancel
 Check-PlacementDatabase $placementDb 0
 Add-Placement '70 200 240 114'
 Add-Placement '185 360 240 114'
-Check-PlacementDatabase $placementDb 2
+$thirdNode=Check-PlacementDatabase $placementDb 2
 Open-PlacementSource 3
 Native-Menu 120 60002 '查看此筆記的 Canvas 位置…'
 Native-Menu 120 1 'Boards/Placement.canvas  (#' -MenuOpen -CaptionPrefix
 $locations=@(Collection-MenuLabels)
 if ($locations.Count -ne 3) { throw 'The note does not list all three original and new positions.' }
-Native-Menu 120 3 '3　甲/鏡頭.md' -MenuOpen -CaptionPrefix
+Native-Menu 120 3 "3　甲/鏡頭.md 〔$thirdNode〕" -MenuOpen -CaptionPrefix
 $null=Wait-For 'native Canvas location from linked note' {
-    [PaperroomHighlightGui]::Read((Control $window 116)).StartsWith('已定位 Canvas 節點')
+    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq "已定位 Canvas 節點「$thirdNode」。"
 }
 Native-File 4 '備份工作區…' $placementBackup '工作區備份已完成'
 Close-Notebook $process
@@ -100,7 +103,7 @@ Copy-Item -LiteralPath $placementBackup -Destination $restoredDb
 Copy-Item -LiteralPath $Exe -Destination (Join-Path $restore 'Paperroom.exe')
 $process=Start-Notebook $restore
 $window=$process.MainWindowHandle
-Check-PlacementDatabase $restoredDb 2
+if ((Check-PlacementDatabase $restoredDb 2) -cne $thirdNode) { throw 'The exact third Canvas node changed during restore.' }
 Open-PlacementCanvas
 Open-PlacementSource 3
 Open-PlacementCanvas

@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  PAPERROOM_SOURCE: 1e9acce2f92c1b9a5a8531726b59d008fbc740bd
+  PAPERROOM_SOURCE: add644ae7927d6f7e95d257a98a83fa920ad0ed6
   PAPERROOM_NAME: Paperroom-pinned-bases-windows-x64-gnu-draft
 
 jobs:

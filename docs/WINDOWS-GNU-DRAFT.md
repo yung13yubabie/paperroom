@@ -6,6 +6,8 @@
 
 ## 逐項依賴證據與用戶端收據
 
+新的 GNU ZIP 會在 `licenses/gnu/` 收錄 MinGW-w64 12.0.0 的 `COPYING.MinGW-w64-runtime.txt`。Rust 標準庫的五份授權原文則位於 `licenses/rust-toolchain/licenses/`，與 `COPYRIGHT-library.html` 一起閱讀。建置會比對審閱過的原文，並在封裝清冊內逐檔記錄 SHA-256。這些原文對照目前固定的 GNU 工具鏈，更新工具鏈時要核對對應版的通知。
+
 新版封裝的 `evidence/gnu-dependency-redistribution.json` 綁定來源提交和 EXE。它逐項列出 Cargo 目標與建置角色、Cargo.lock 記下的 registry 封存雜湊、套件宣告授權、包內通知原文的路徑與雜湊，以及可從第一份最終 GNU link map 辨認的非空 Rust 封存物件。建置器比對 Cargo `compiler-artifact` 訊息的完整輸出路徑與套件 ID，涵蓋舊 `release/deps` 及 Cargo 1.100 的 `release/build/<package>/<hash>/out`。未能唯一比對的物件列在未歸屬清單。原始絕對路徑及 Cargo 訊息留在建置端，封裝只記錄封存檔與物件名稱。沒有觀察到的項目只代表本次 map 未歸屬，可能受連結最佳化或巨集展開影響。MinGW、GCC 與 Rust 執行階段另見 GNU runtime 成員收據。Windows OS DLL 只列直接匯入。
 
 `alloc-stdlib 0.2.4` 的 crate 封存沒有可收錄的授權檔名。封裝另附官方固定上游版本的原文與對應說明，並以雜湊核對。其他缺件列為未解，不能把開放原始碼宣告當成原始通知。這份清冊提供建置和通知證據。發行者仍要以實際最終產物審查適用條款與未辨識元件。

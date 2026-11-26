@@ -1,6 +1,8 @@
 # Windows 簽章準備
 
-紙間目前提供未簽章的 EXE。下一版的建置會將 Cargo 套件版本寫入 Windows 檔案內容。檔案總管可顯示產品名稱與版本；發行者身分須等日後有公開信任的簽章才能驗證。
+紙間固定的 Windows GNU 草稿為未簽章 EXE。Windows 驗收紀錄顯示 Authenticode 狀態為 `NotSigned`，PE 憑證表為空。檔案內容已有產品名稱和 Cargo 套件版本。 [固定候選與封裝](WINDOWS-GNU-0118861-REDISTRIBUTION.md)
+
+正式版先由發行者決定是否採用簽章。若選擇簽章，核准後再對已審核來源的產物執行，並為簽章後的新 EXE 和 ZIP 重新驗雜湊及正常下載首啟。乾淨 Windows 10／11 的斷網驗收另有結果欄。 [Windows 斷網手冊](../qa/windows-client-offline/GNU-CANDIDATE.md)
 
 ## 申請前由誰決定什麼
 
@@ -14,7 +16,7 @@
 
 ## 現階段如何產生候選檔
 
-在 GitHub 的 Actions 選擇手動建置未簽章 Windows 候選檔的工作流程，選定已審查的 ref 後執行。保留完整 commit、run 與 attempt、工件 ID、EXE 的 SHA-256，以及 GitHub 工件封裝的 digest。EXE 和外層 ZIP 的雜湊分別核對。這份工作流程可單獨用來驗證來源與版本。既有 Windows 儲存與復原測試繼續驗證發行行為。[未簽章候選檔工作流程](../.github/workflows/unsigned-windows.yml)
+草稿 PR #30 使用 [Windows GNU 草稿流程](../.github/workflows/windows-gnu-candidate.yml)。[手動未簽章 MSVC 流程](../.github/workflows/unsigned-windows.yml) 有自己的建置和再散布證據。審查時保留完整 commit、run、attempt、工件 ID、EXE SHA-256 與 GitHub 外層工件 digest。簽署決定應對應實際要發行的工具鏈與工件。
 
 ## 獲准後如何交付簽章版
 

@@ -63,7 +63,7 @@ SQLite 的 WAL 和 SHM 是資料庫運作的一部分，不要手動刪除。筆
 
 ## 從原始碼建置
 
-新的 Windows x64 候選檔使用 Rust 1.100.0 與 Visual Studio C++（MSVC）工具鏈。建置採用靜態 VC 執行階段，CI 會檢查候選 EXE 是否仍直接匯入另行安裝的 VC 執行階段 DLL。此檢查不能取代乾淨 Windows 客戶端的斷網實測，也不等於完成再散布清單。
+草稿 PR #30 的 Windows x64 候選使用 Rust 1.100.0 與 GNU／MinGW。固定下載、授權證據及乾淨客戶端的待驗事項見下方查核。此處也保留 MSVC 開發指令，該路徑使用靜態 VC 執行階段並有獨立的相依與再散布證據。 [GNU 候選查核](docs/WINDOWS-GNU-0118861-REDISTRIBUTION.md)
 
 在已安裝上述 MSVC 工具鏈的 Windows 環境執行：
 

@@ -27,6 +27,12 @@ KNOWN_DLLS = {
 MAP_INPUT = re.compile(r"\b0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(/[^\r\n]+)$", re.I)
 INPUT_NAME = re.compile(r"[A-Za-z0-9_.+-]{1,200}\Z", re.ASCII)
 HEX64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+AUDITED_RUNTIME_NOTICES = ROOT / "docs/third-party/windows-gnu-0118861"
+RUST_RUNTIME_NOTICES = (
+    "Apache-2.0.txt", "BSD-2-Clause.txt", "LLVM-exception.txt", "MIT.txt", "Unicode-3.0.txt",
+)
+MINGW_RUNTIME_NOTICE = "COPYING.MinGW-w64-runtime.txt"
+MINGW_RUNTIME_NOTICE_SHA256 = "e9b2dc02451ea29092a1f25fa0f3c07207ed421f1807dffb0c4e6dce69dee7bd"
 
 
 def digest(data):
@@ -129,6 +135,11 @@ def rust_licenses(entries, sysroot):
     entries["licenses/rust-toolchain/COPYRIGHT-library.html"] = standard
     for name in parser.relative_links(standard):
         entries[f"licenses/rust-toolchain/{name}"] = (docs / name).read_bytes()
+    for name in RUST_RUNTIME_NOTICES:
+        original = (docs / "licenses" / name).read_bytes()
+        if original != (AUDITED_RUNTIME_NOTICES / name).read_bytes():
+            raise ValueError(f"Rust runtime license differs from the audited toolchain: {name}")
+        entries[f"licenses/rust-toolchain/licenses/{name}"] = original
 
 
 def build(work, sysroot, commit, output, permit_different_rebuild):
@@ -165,6 +176,10 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
 
     vendors = vendor / "usr/share/doc"
     entries["licenses/gnu/mingw-w64-copyright.txt"] = (vendors / "mingw-w64-common/copyright").read_bytes()
+    mingw_runtime = (AUDITED_RUNTIME_NOTICES / MINGW_RUNTIME_NOTICE).read_bytes()
+    if digest(mingw_runtime) != MINGW_RUNTIME_NOTICE_SHA256:
+        raise ValueError("MinGW runtime license differs from the audited 12.0.0 source")
+    entries[f"licenses/gnu/{MINGW_RUNTIME_NOTICE}"] = mingw_runtime
     entries["licenses/gnu/gcc-mingw-w64-copyright.txt"] = (vendors / "gcc-mingw-w64-base/copyright").read_bytes()
     known = ROOT / "docs/third-party/gnu-runtime"
     for name in ("GCC-exception-3.1.txt", "GPL-3.0-or-later.txt"):

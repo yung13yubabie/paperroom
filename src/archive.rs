@@ -617,6 +617,7 @@ mod tests {
         assert_eq!(tight.saved_canvases()?.len(),127);
         assert_eq!(tight.rows(View::All, "")?.len(), old_rows);
         assert_eq!(fs::read(&zip_path)?, original_zip);
+        drop(tight);
         fs::remove_dir_all(dir)?;
         Ok(())
     }

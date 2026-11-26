@@ -26,7 +26,16 @@ jobs:
       - name: Compare the workflow checkout to the fixed application source
         run: |
           git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
-          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-source-details-draft.yml' ':!scripts/windows-highlight-workflow.ps1' ':!scripts/windows-unified-source-details.ps1'
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-source-details-draft.yml' ':!scripts/windows-highlight-workflow.ps1' ':!scripts/windows-unified-source-details.ps1' ':!src/archive.rs'
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          path = 'src/archive.rs'
+          prior = subprocess.check_output(['git','show',os.environ['PAPERROOM_SOURCE'] + ':' + path])
+          old = b'        assert_eq!(fs::read(&zip_path)?, original_zip);\n        fs::remove_dir_all(dir)?;'
+          new = b'        assert_eq!(fs::read(&zip_path)?, original_zip);\n        drop(tight);\n        fs::remove_dir_all(dir)?;'
+          if prior.count(old) != 1 or prior.replace(old,new) != pathlib.Path(path).read_bytes():
+              raise SystemExit('Only the Heptabase test cleanup may differ in archive.rs.')
+          PY
       - name: Install the pinned Rust GNU target
         run: rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-gnu
       - name: Run packaging regressions
@@ -69,7 +78,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ env.PAPERROOM_SOURCE }}
           persist-credentials: false
       - run: rustup toolchain install 1.100.0 --profile minimal && cargo +1.100.0 test --locked
 

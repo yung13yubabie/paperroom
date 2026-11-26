@@ -118,7 +118,22 @@ impl App {
                 return Ok(());
             }
             let (field,origin)=&fields[index-1];
-            let action=popup(self.hwnd,anchor,None,&[(1,"加入關聯筆記…"),(2,"移除關聯筆記…"),(3,"開啟關聯筆記…")]);
+            let action=popup(self.hwnd,anchor,None,&[(1,"加入關聯筆記…"),(2,"移除關聯筆記…"),(3,"開啟關聯筆記…"),
+                (4,"儲存關聯計數公式…"),(5,"儲存數值加總公式…")]);
+            if action == 4 || action == 5 {
+                let number = if action == 5 {
+                    let keys = self.notebook.property_definitions()?.into_iter()
+                        .filter_map(|(key,kind)| (kind == crate::store::typed_properties::PropertyType::Number).then_some(key))
+                        .collect::<Vec<_>>();
+                    if keys.is_empty() {return Err("請先定義可加總的數字屬性。".into());}
+                    let Some(i) = choose_navigation_page(self.hwnd,anchor,keys.len(),|i| keys[i].as_str()) else {return Ok(())};
+                    Some(keys[i].clone())
+                } else {None};
+                let Some(name) = crate::dialog::prompt(self.hwnd,"儲存集合彙總公式","公式名稱","",128)? else {return Ok(())};
+                self.notebook.save_field_rollup(field,origin,number.as_deref(),&name)?;
+                label(self.widgets.status,"已儲存集合彙總公式。");
+                return Ok(());
+            }
             if !(1..=3).contains(&action) {return Ok(())}
             let choices=self.notebook.field_candidates(field,origin,action!=1)?;
             if choices.is_empty() {

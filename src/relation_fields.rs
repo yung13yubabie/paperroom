@@ -136,10 +136,152 @@ impl Notebook {
     }
 }
 
+impl Notebook {
+    pub(crate) fn save_field_rollup(&self, field:&Field, origin:&Member, key:Option<&str>, name:&str)->Result<()> {
+        let tx=rusqlite::Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        if !self.editable_relation_fields(origin.id)?.iter().any(|(f,m)| f==field && m==origin) {
+            return Err("關聯屬性或筆記已變更，請重新選取。".into());
+        }
+        let collection=if field.reverse {field.target} else {field.source};
+        let direction=if field.reverse {"in"} else {"out"};
+        let expression=if let Some(key)=key {
+            self.require_rollup_numeric_key(key)?;
+            let quoted=key.replace('\\',"\\\\").replace('"', r#"\""#);
+            format!(r#"field_sum("{}","{}","{}")"#,field.id,direction,quoted)
+        } else {
+            format!(r#"field_count("{}","{}")"#,field.id,direction)
+        };
+        self.add_collection_formula(collection,name,&expression)?;
+        tx.commit()?; Ok(())
+    }
+
+    fn require_rollup_numeric_key(&self,key:&str)->Result<()> {
+        if !self.connection.prepare_cached(
+            "SELECT 1 FROM property_definitions WHERE key=?1 AND kind='number'")?.exists([key])? {
+            return Err(format!("請先將「{key}」定義為數字屬性。").into());
+        }
+        Ok(())
+    }
+
+    // Invoked inside the caller's read transaction, including scans of saved views.
+    pub(super) fn relation_field_rollup(&self, note:i64, field_id:&str, role:&str, key:Option<&str>)->Result<f64> {
+        let field = field_id.parse::<i64>().ok().filter(|n| *n>0 && n.to_string()==field_id)
+            .ok_or("關聯屬性編號必須是正整數。")?;
+        let (local,here,there) = match role {
+            "in" => ("target_collection","target_note","source_note"),
+            "out" => ("source_collection","source_note","target_note"),
+            _ => return Err("關聯方向必須為 in 或 out。".into()),
+        };
+        let active=self.connection.prepare_cached(&format!(
+            "SELECT 1 FROM relation_fields f JOIN collection_notes m ON m.collection_id=f.{local}
+             JOIN notes n ON n.id=m.note_id WHERE f.id=?1 AND n.id=?2 AND n.trash_root IS NULL"))?
+            .exists(params![field,note])?;
+        if !active {return Err(format!("找不到適用於筆記 #{note} 的關聯屬性 #{field}。").into());}
+        let from=format!("FROM relation_field_values v JOIN notes n ON n.id=v.{there}");
+        let condition=format!("WHERE v.field_id=?1 AND v.{here}=?2 AND n.trash_root IS NULL");
+        let Some(key)=key else {
+            let count:i64=self.connection.prepare_cached(&format!("SELECT count(*) {from} {condition}"))?
+                .query_row(params![field,note],|r|r.get(0))?;
+            return Ok(count as f64);
+        };
+        self.require_rollup_numeric_key(key)?;
+        let mut query=self.connection.prepare_cached(&format!(
+            "SELECT n.id,p.value {from} JOIN note_properties p ON p.note_id=n.id AND p.key=?3 {condition} ORDER BY n.id"))?;
+        let mut values=query.query(params![field,note,key])?;
+        let mut sum=0.0;
+        while let Some(row)=values.next()? {
+            let id:i64=row.get(0)?;
+            let raw:String=row.get(1)?;
+            let number=super::typed_properties::PropertyType::Number.normalized(&raw)
+                .and_then(|s|s.parse::<f64>().ok()).filter(|n|n.is_finite())
+                .ok_or_else(||format!("請修正筆記 #{id} 的數字屬性「{key}」。"))?;
+            sum+=number;
+            if !sum.is_finite() {return Err("數字加總超出公式範圍。".into());}
+        }
+        Ok(sum)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    #[test]
+    fn field_rollup_drives_saved_numeric_filter_sort_and_isolated_backup()->Result<()> {
+        use super::super::collection_views::{CollectionLayout,FilterKind,FilterOperator,FilterRule,SortRule,SortSource,ViewRules};
+        use super::super::typed_properties::PropertyType;
+        let dir=super::super::tests::data_dir();
+        let path=dir.join("original.sqlite3");
+        let mut db=Notebook::open(&path,false)?;
+        let col=db.create_collection("source")?;let peers=db.create_collection("target")?;
+        let a=db.add(None,"A","A")?;let b=db.add(None,"B","B")?;let empty=db.add(None,"Empty","")?;
+        let x=db.add(None,"same","X")?;let y=db.add(None,"same","Y")?;
+        for id in [a,b,empty]{db.add_to_collection(col,id,"ready")?;}
+        for id in [x,y]{db.add_to_collection(peers,id,"ready")?;}
+        let origin=db.relation_collections(a)?.remove(0).2;
+        db.create_relation_field(&origin,(col,"source"),(peers,"target"),"鏡頭")?;
+        let (field,one)=db.editable_relation_fields(a)?.remove(0);
+        let (_,two)=db.editable_relation_fields(b)?.remove(0);
+        let (reverse,px)=db.editable_relation_fields(x)?.remove(0);
+        let (_,py)=db.editable_relation_fields(y)?.remove(0);
+        db.edit_field_value(&field,&one,&px,true)?;
+        db.edit_field_value(&field,&two,&py,true)?;
+        db.set_relation(a,"鏡頭",y,true)?; // same name belongs to the older, independent data model
+        let key=r#"工時"\鏡頭"#;
+        db.compare_set_property_type(key,None,Some(PropertyType::Number))?;
+        db.save_field_rollup(&field,&one,Some(key),"Total")?;
+        db.save_field_rollup(&reverse,&px,None,"Sources")?;
+        let expr=db.collection_formulas(col)?[0].1.clone();
+        let count=db.collection_formulas(peers)?[0].1.clone();
+        assert_eq!(db.evaluate_note_formula(x,&count)?,"1");
+        db.save_field_rollup(&reverse,&px,Some(key),"ReverseTotal")?;
+        let reverse_expr=db.collection_formulas(peers)?.into_iter().find(|(n,_)|n=="ReverseTotal").unwrap().1;
+        db.compare_set_property(a,key,None,Some("-4"))?;
+        assert_eq!(db.evaluate_note_formula(x,&reverse_expr)?,"-4");
+        for invalid in [r#"field_count("01","out")"#,r#"field_count("9223372036854775807","in")"#,
+                        r#"field_count("1","reverse")"#] {
+            assert!(db.evaluate_note_formula(a,invalid).is_err());
+        }
+        assert_eq!(db.evaluate_note_formula(a,&expr)?,"0");
+        assert_eq!(db.evaluate_note_formula(empty,&expr)?,"0");
+        assert!(db.evaluate_note_formula(x,&expr).is_err());
+        assert!(db.save_field_rollup(&field,&one,Some("missing"),"bad").is_err());
+        assert!(db.save_field_rollup(&field,&one,None,"Total").is_err());
+        db.compare_set_property(x,key,None,Some("12"))?;db.compare_set_property(y,key,None,Some("8"))?;
+        let view=db.create_collection_view(col,"Totals",CollectionLayout::Table,"","")?;
+        let rules=ViewRules {
+            filters:vec![FilterRule{key:"Total".into(),kind:FilterKind::Formula(Some(PropertyType::Number)),
+                operator:FilterOperator::Greater,value:"0".into(),argument:None}],
+            sorts:vec![SortRule{key:"Total".into(),source:SortSource::Formula(Some(PropertyType::Number)),descending:true}],
+            ..Default::default()
+        };
+        db.set_collection_view_rules(col,&view,rules.clone())?;
+        let rows=|db:&Notebook|->Result<Vec<i64>> {
+            let saved=db.collection_views(col)?.remove(0);
+            assert_eq!(saved.rules(),rules);
+            Ok(db.presented_collection_lanes(col,Some(&saved))?.into_iter().flat_map(|(_,rows)|rows.into_iter().map(|r|r.id)).collect())
+        };
+        assert_eq!(rows(&db)?,[a,b]);
+        db.compare_set_property(x,key,Some("12"),Some("3"))?;
+        assert_eq!(rows(&db)?,[b,a]);
+        db.trash(y)?;
+        assert_eq!(rows(&db)?,[a]);
+        db.restore(y)?;
+        db.connection.execute("UPDATE note_properties SET value='invalid' WHERE note_id=?1 AND key=?2",params![x,key])?;
+        assert!(db.evaluate_note_formula(a,&expr).unwrap_err().to_string().contains(&format!("#{x}")));
+        db.compare_set_property(x,key,Some("invalid"),Some("0"))?;
+        assert_eq!(rows(&db)?,[b]);
+        drop(db);
+        let db=Notebook::open(&path,false)?;
+        assert_eq!(rows(&db)?,[b]);
+        let backup=dir.join("backup.sqlite3");db.backup(&backup)?;drop(db);
+        let copy=dir.join("restored.sqlite3");fs::copy(backup,&copy)?;
+        let db=Notebook::open(&copy,false)?;
+        assert_eq!(db.evaluate_note_formula(x,&count)?,"1");
+        assert_eq!(rows(&db)?,[b]);
+        drop(db);fs::remove_dir_all(dir)?;Ok(())
+    }
+
     #[test]
     fn dynamic_base_is_not_a_relation_field_endpoint()->Result<()> {
         let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;

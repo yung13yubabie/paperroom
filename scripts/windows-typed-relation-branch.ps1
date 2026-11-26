@@ -100,6 +100,12 @@ foreach ($role in $notes27.Keys) {
             Collection-Prompt '設定文字屬性' $value
         }
     }
+    if ($RelationRollupRecoveryOnly -and $role -in 'exact','decoy') {
+        Native-Menu 113 4 '設定文字屬性…'
+        Collection-Prompt '文字屬性' 'Duration'
+        $value=if ($role -eq 'exact') {'8'} else {'1'}
+        Collection-Prompt '設定文字屬性' $value
+    }
     if ($role -in 'canonical','decoy') {
         $asset=Join-Path $folder 'same.txt'
         [IO.File]::WriteAllText($asset,"synthetic asset $role",$utf27)
@@ -107,6 +113,15 @@ foreach ($role in $notes27.Keys) {
         Native-Menu 113 8 '附件與 PDF 摘錄…'
         Native-Menu 113 1 '加入本機附件…' -MenuOpen
         Native-File 1 '加入本機附件…' $asset '附件已保存到本機工作區。' -AlreadyOpened
+    }
+}
+if ($RelationRollupRecoveryOnly) {
+    Native-Menu 109 14 '屬性型別…'
+    Native-Menu 109 1 '設定屬性型別…' -MenuOpen
+    Collection-Prompt '設定工作區屬性型別' 'Duration'
+    Native-Menu 109 1 '數字' -MenuOpen
+    $null=Wait-For 'declared actual numeric Duration type' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已更新工作區屬性型別，原有筆記值已保留。'
     }
 }
 foreach ($name in 'Source','Target') {
@@ -118,23 +133,25 @@ foreach ($name in 'Source','Target') {
         Collection-Prompt '加入集合'
     }
 }
-Collection27 'Source'
-Native-Menu 120 11 '集合檢視…'
-Native-Menu 120 1 '儲存新檢視…' -MenuOpen
-Collection-Prompt '儲存新檢視' 'Ranked'
-Native-Menu 120 2 '表格' -MenuOpen
-Collection-Prompt '集合檢視'
-Collection-Prompt '集合檢視'
-Native-Menu 120 11 '集合檢視…'
-Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
-foreach ($key in 'Batch','Rank') {
-    Native-Menu 120 2 '新增排序…' -MenuOpen
-    Choose-CollectionRow '其他文字欄位…'
-    Collection-Prompt '文字欄位' $key
-    Native-Menu 120 1 '升冪' -MenuOpen
+if (!$RelationRollupRecoveryOnly) {
+    Collection27 'Source'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 1 '儲存新檢視…' -MenuOpen
+    Collection-Prompt '儲存新檢視' 'Ranked'
+    Native-Menu 120 2 '表格' -MenuOpen
+    Collection-Prompt '集合檢視'
+    Collection-Prompt '集合檢視'
+    Native-Menu 120 11 '集合檢視…'
+    Native-Menu 120 11 '編輯篩選與多欄排序…' -MenuOpen
+    foreach ($key in 'Batch','Rank') {
+        Native-Menu 120 2 '新增排序…' -MenuOpen
+        Choose-CollectionRow '其他文字欄位…'
+        Collection-Prompt '文字欄位' $key
+        Native-Menu 120 1 '升冪' -MenuOpen
+    }
+    Native-Menu 120 5 '儲存變更' -MenuOpen
+    Assert-RankedRows @('對照筆記','共同筆記')
 }
-Native-Menu 120 5 '儲存變更' -MenuOpen
-Assert-RankedRows @('對照筆記','共同筆記')
 Select-Note '共同筆記'
 Native-Menu 120 60001 '具名關聯的來源與目標…'
 Native-Menu 120 3 '編輯集合關聯屬性…' -MenuOpen
@@ -142,6 +159,11 @@ Choose-CollectionRow '新增關聯屬性…'
 Choose-CollectionRow 'Source　[#'
 Choose-CollectionRow 'Target　[#'
 Collection-Prompt '新增集合關聯屬性' '關聯'
+if ($RelationRollupRecoveryOnly) {
+    . (Join-Path $PSScriptRoot 'windows-rollup-board-recovery.ps1')
+    return
+}
+
 Collection27 'Source'
 BranchRelation27 canonical $false 1 exact
 Collection27 'Target'

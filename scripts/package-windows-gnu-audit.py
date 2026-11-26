@@ -173,11 +173,12 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
     draft_notes = ROOT / "docs/WINDOWS-GNU-DRAFT.md"
     audit_notes = draft_notes if draft_notes.is_file() else ROOT / "docs/WINDOWS-GNU-AUDIT.md"
     entries["GNU-AUDIT.md"] = audit_notes.read_bytes()
-    target_deps = exe_path.parent / "deps"
-    observations = live_rust_members((work / "proof_a/final.map").read_text(encoding="utf-8"), target_deps)
+    observations = live_rust_members((work / "proof_a/final.map").read_text(encoding="utf-8"), exe_path.parent)
+    artifact_messages = (work / "proof_a/cargo-artifacts.jsonl").read_text(encoding="utf-8")
     cargo_metadata = json.loads((work / "metadata/cargo.json").read_bytes())
     lock_raw = (work / "proof_a/src/Cargo.lock").read_bytes()
-    evidence = make_evidence(entries, cargo_metadata, lock_raw, observations, commit, TARGET, exe_sha,
+    evidence = make_evidence(entries, cargo_metadata, lock_raw, observations, artifact_messages,
+                             commit, TARGET, exe_sha,
                              stamp["direct_dll_imports"])
     entries[DEPENDENCY_INDEX] = json_bytes(evidence)
     details = {

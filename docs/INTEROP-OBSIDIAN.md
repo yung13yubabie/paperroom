@@ -14,6 +14,7 @@
 | 從已釘選的 Canvas 卡直接修改原筆記欄位 | 檔案卡右鍵開啟布林與數值欄位編輯；同 Canvas 各卡依目前筆記重新取值。來源變更時會重驗卡片、視圖、筆記與版本。[本輪驗收流程](../scripts/windows-pinned-card-live-scope.ps1) |
 | 在同一 Vault 經明確確認接納新檔、移動和改名 | 另選隨 Vault 來源變動的 Bases 模式，以已核對的來源身分和路徑重算。當前檢視和完整備份仍依同一筆記 ID。[本輪驗收流程](../scripts/windows-pinned-card-live-scope.ps1) |
 | 限制單一 Bases 檢視的結果數 | 以公開 `limit` 語法匯入未分組的動態表格或清單，按現有條件和排序顯示前 N 筆。改值後重算，未顯示的候選仍保存。 [原廠語法](https://obsidian.md/help/bases/syntax) |
+| 讓型別分組降冪顯示 | 支援以既有數值、布林欄位或可辨認的布林比較公式分組並降冪顯示。缺欄、null 與無效值各保留獨立分組，排序在有效值之後。原始設定維持原樣。 [驗收腳本](../scripts/windows-bases-desc.ps1) |
 
 ## 已實裝待真實來源
 

@@ -31,8 +31,18 @@ def identity(row):
     return row["name"], row["version"]
 
 
-def live_rust_members(map_text, target_deps):
-    """Observe only nonempty final-map inputs from this build's target deps directory."""
+def target_archive(archive, target_release):
+    if not RUST_ARCHIVE.fullmatch(archive.name) or not archive.is_relative_to(target_release):
+        return False
+    parts = archive.relative_to(target_release).parts
+    return ((len(parts) == 2 and parts[0] == "deps")
+            or (len(parts) == 5 and parts[0] == "build" and parts[3] == "out"
+                and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", parts[1])
+                and re.fullmatch(r"[a-f0-9]+", parts[2])))
+
+
+def live_rust_members(map_text, target_release):
+    """Observe nonempty final-map `.rlib` members within this target's output."""
     _, marker, memory = map_text.partition("Linker script and memory map")
     if not marker:
         raise ValueError("GNU ld did not emit the memory map")
@@ -43,35 +53,35 @@ def live_rust_members(map_text, target_deps):
             continue
         filename, separator, raw_member = match[3].strip().partition("(")
         archive = Path(filename)
-        if archive.parent != target_deps or not RUST_ARCHIVE.fullmatch(archive.name):
+        if not target_archive(archive, target_release):
             continue
         member = raw_member.removesuffix(")") if separator else ""
         if member and not OBJECT_NAME.fullmatch(member):
             raise ValueError("Unfamiliar member name in target live-input evidence")
-        observed.add((archive.name, member))
+        observed.add((archive, member))
     return sorted(observed)
 
 
-def attribute_members(cargo_metadata, target_packages, observations):
-    """Use the actual Cargo library target names, refusing ambiguous versions."""
-    target_names = {}
-    for row in cargo_metadata["packages"]:
-        package = identity(row)
-        if package not in target_packages:
+def attribute_members(cargo_metadata, target_packages, observations, artifact_messages):
+    """Join live archives to the exact filename and Cargo package ID seen at build."""
+    packages_by_id = {row["id"]: identity(row) for row in cargo_metadata["packages"]}
+    observed_paths = {archive: set() for archive, _ in observations}
+    for line in artifact_messages.splitlines():
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
             continue
-        for target in row["targets"]:
-            if "lib" in target["kind"] or "rlib" in target["kind"]:
-                name = target["name"].replace("-", "_")
-                target_names.setdefault(name, set()).add(package)
+        for filename in message["filenames"]:
+            archive = Path(filename)
+            if archive in observed_paths:
+                observed_paths[archive].add(message["package_id"])
     linked, unassigned = {}, {}
     for archive, member in observations:
-        name = RUST_ARCHIVE.fullmatch(archive)[1]
-        choices = target_names.get(name, set())
-        if len(choices) != 1:
-            unassigned.setdefault(archive, set()).add(member)
+        owners = observed_paths[archive]
+        package = packages_by_id.get(next(iter(owners))) if len(owners) == 1 else None
+        if package not in target_packages:
+            unassigned.setdefault(archive.name, set()).add(member)
             continue
-        package, = choices
-        linked.setdefault(package, {}).setdefault(archive, set()).add(member)
+        linked.setdefault(package, {}).setdefault(archive.name, set()).add(member)
     return linked, unassigned
 
 
@@ -98,7 +108,8 @@ def package_notices(row, entries):
     return source, notices
 
 
-def make_evidence(entries, cargo_metadata, lock_raw, observations, commit, target, exe_sha, imports):
+def make_evidence(entries, cargo_metadata, lock_raw, observations, artifact_messages,
+                  commit, target, exe_sha, imports):
     provenance_raw = entries[CARGO_PROVENANCE]
     registry_raw = entries[REGISTRY_NOTICES]
     provenance, registry = json.loads(provenance_raw), json.loads(registry_raw)
@@ -116,7 +127,9 @@ def make_evidence(entries, cargo_metadata, lock_raw, observations, commit, targe
     registry_rows = {identity(row): row for row in registry["packages"]}
     if registry_rows.keys() != target_registry or len(registry_rows) != len(registry["packages"]):
         raise ValueError("Package notice index does not cover the exact target registry graph")
-    observed, unattributed = attribute_members(cargo_metadata, target_packages, observations)
+    observed, unattributed = attribute_members(cargo_metadata, target_packages, observations, artifact_messages)
+    if not observed:
+        raise ValueError("No final link-map archive could be assigned to a target package via Cargo artifacts")
     rows = []
     for row in provenance["packages"]:
         package = identity(row)
@@ -157,7 +170,8 @@ def make_evidence(entries, cargo_metadata, lock_raw, observations, commit, targe
         "packages": rows,
         "unattributed_target_archives": archives_for_report(unattributed),
         "scope": ("Exact locked target resolution, shipped notice bytes and recognizable nonempty inputs "
-                  "from the first build's final GNU link map. An unobserved crate is not evidence "
+                  "from the first build's final GNU link map, assigned by exact Cargo artifact path and package ID. "
+                  "An unobserved crate is not evidence "
                   "of absence, and a mapped archive does not attribute every executable byte. "
                   "This inventory does not decide redistribution rights."),
     }

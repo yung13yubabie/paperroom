@@ -63,6 +63,9 @@ impl<'a> DerivedRow<'a> {
         code.evaluate(|name, args| {
             let key = &args[0];
             match name {
+                "field_count" | "field_sum" => self.db.relation_field_rollup(
+                    self.note, key, &args[1], args.get(2).map(String::as_str),
+                ).map(Value::Num),
                 "relation_count" => self.count(key).map(|n| Value::Num(n as f64)).map_err(Into::into),
                 "relation_sum" => self.sum(key, &args[1]).map(Value::Num).map_err(Into::into),
                 "prop" | "typed" => {

@@ -154,7 +154,7 @@ mod obsidian_base_dynamic;
 pub(crate) mod canvas_base_cards;
 #[path = "relation_fields.rs"]
 pub(crate) mod relation_fields;
-const SCHEMA_VERSION: i32 = 43;
+const SCHEMA_VERSION: i32 = 44;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -446,6 +446,7 @@ impl Notebook {
         }
         if version < 42 {tx.execute_batch(obsidian_base_import::scope::SCHEMA)?;}
         if version < 43 { tx.execute_batch(relation_fields::SCHEMA)?; }
+        if version < 44 { tx.execute_batch(obsidian_base_typed::DESCENDING_GROUP_SCHEMA)?; }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

@@ -1,0 +1,139 @@
+name: Build and verify exact source-identity draft
+on:
+  push:
+    branches: ['dev/unified-canonical-sources-20261126']
+
+permissions:
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: 698fbf53b74c39429e8853de2f4e42b031d941bc
+  PAPERROOM_NAME: Paperroom-canonical-sources-windows-x64-gnu-draft
+
+jobs:
+  build:
+    name: Rebuild twice and verify the packaged GNU EXE
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      exe_sha: ${{ steps.build.outputs.exe_sha }}
+      zip_sha: ${{ steps.build.outputs.zip_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare the workflow checkout to the fixed application source
+        run: |
+          git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-canonical-sources-draft.yml'
+      - name: Install the pinned Rust GNU target
+        run: rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-gnu
+      - name: Run packaging regressions
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Independently build, package and read back the candidate
+        id: build
+        run: |
+          package="$RUNNER_TEMP/$PAPERROOM_NAME.zip"
+          export PAPERROOM_REPRO_EVIDENCE_DIR="$RUNNER_TEMP/gnu-originals"
+          bash scripts/build-windows-gnu-audit.sh "$package" "$PAPERROOM_SOURCE"
+          exe_sha="$(sha256sum "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" | cut -d ' ' -f 1)"
+          zip_sha="$(sha256sum "$package" | cut -d ' ' -f 1)"
+          python3 -B scripts/package-windows-gnu-audit.py verify --package "$package" --commit "$PAPERROOM_SOURCE" --exe-sha256 "$exe_sha" --zip-sha256 "$zip_sha"
+          cmp "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-b.exe"
+          install -m 0644 "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$RUNNER_TEMP/Paperroom.exe"
+          (cd "$RUNNER_TEMP" && sha256sum Paperroom.exe "$PAPERROOM_NAME.zip" > SHA256SUMS.txt)
+          echo "exe_sha=$exe_sha" >> "$GITHUB_OUTPUT"
+          echo "zip_sha=$zip_sha" >> "$GITHUB_OUTPUT"
+      - name: Retain the notice-inclusive Windows draft ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.PAPERROOM_NAME }}
+          path: ${{ runner.temp }}/${{ env.PAPERROOM_NAME }}.zip
+          if-no-files-found: error
+          compression-level: 0
+      - name: Retain the standalone EXE and checksums for testing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-canonical-sources-GNU-draft-exe
+          path: |
+            ${{ runner.temp }}/Paperroom.exe
+            ${{ runner.temp }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    name: Run the pinned Linux regression suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal && cargo +1.100.0 test --locked
+
+  native:
+    name: Exercise the two exact downloads on Windows Server 2022
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      EXPECTED_EXE: ${{ needs.build.outputs.exe_sha }}
+      EXPECTED_ZIP: ${{ needs.build.outputs.zip_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.PAPERROOM_NAME }}
+          path: ${{ runner.temp }}/gnu-canonical
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-canonical-sources-GNU-draft-exe
+          path: ${{ runner.temp }}/gnu-canonical-exe
+      - name: Verify both downloads and run the native executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'gnu-canonical'
+          $zip = Join-Path $folder "$env:PAPERROOM_NAME.zip"
+          python -B scripts/package-windows-gnu-audit.py verify --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'GNU ZIP failed complete readback.' }
+          $extracted = Join-Path $folder 'verified'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+          $exe = Join-Path $extracted 'Paperroom.exe'
+          $standaloneFolder = Join-Path $env:RUNNER_TEMP 'gnu-canonical-exe'
+          $standalone = Join-Path $standaloneFolder 'Paperroom.exe'
+          $checksums = Get-Content -LiteralPath (Join-Path $standaloneFolder 'SHA256SUMS.txt')
+          if ($checksums.Count -ne 2 -or $checksums[0] -cne "$env:EXPECTED_EXE  Paperroom.exe" -or
+              $checksums[1] -cne "$env:EXPECTED_ZIP  $env:PAPERROOM_NAME.zip" -or
+              (Get-FileHash -LiteralPath $standalone -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'Downloaded EXEs or checksum list differed from the expected unsigned candidate.'
+          }
+          Write-Host "Both downloads contain the same EXE SHA-256 $env:EXPECTED_EXE. ZIP SHA-256 $env:EXPECTED_ZIP."
+
+          $baseline = Join-Path $folder 'Paperroom-v0.1.1.exe'
+          Invoke-WebRequest -Uri 'https://github.com/yung13yubabie/paperroom/releases/download/v0.1.1/Paperroom.exe' -OutFile $baseline -TimeoutSec 45
+          if ((Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash -ine '0b281c84d7cf82c03c6262307a2b5b3585ba180e107119dc02b7518f1473de82') {
+            throw 'The public v0.1.1 baseline differs.'
+          }
+          ./scripts/windows-storage.ps1 -Exe $exe -UpgradeBaseline $baseline
+          ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE
+          $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $folder 'unified-reopen-restore.json'
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE -UnifiedDetailsOnly
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
+            throw 'Missing native unified-workspace receipt.'
+          }
+      - name: Retain native integration receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-canonical-sources-GNU-draft-native-evidence
+          path: ${{ runner.temp }}/gnu-canonical/*-restore.json
+          if-no-files-found: error

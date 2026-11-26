@@ -15,6 +15,7 @@ const SCOPE: &str = "CSV 附件保留匯出檔的原始位元組。打開來源�
 
 #[derive(Default)]
 pub(crate) struct CsvSources {
+    pub(crate) typed_relations: Option<super::notion_typed_relations::Plan>,
     pub(super) page_origins: BTreeMap<Vec<String>, (Option<String>, String)>,
     namespaces: BTreeSet<String>,
     files: BTreeMap<(String, String), CsvSource>,
@@ -165,6 +166,9 @@ impl CsvSources {
 
     pub(crate) fn report(&self) -> String {
         let mut text = format!("Notion CSV 原檔 {} 份，共 {} 位元組。\r\n{SCOPE}", self.count(), self.bytes);
+        if let Some(plan) = &self.typed_relations {
+            let _ = write!(text, "\r\n已確認的紙間交接具名關聯：{} 條。", plan.count());
+        }
         if self.files.is_empty() {
             return text;
         }
@@ -179,6 +183,7 @@ impl CsvSources {
     }
 
     pub(crate) fn attach(self, tx: &Transaction<'_>, root: i64) -> Result<()> {
+        if let Some(plan) = &self.typed_relations { plan.attach(tx, root)?; }
         if self.files.is_empty() {
             return Ok(());
         }

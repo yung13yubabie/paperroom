@@ -105,6 +105,10 @@ pub(crate) fn notion_archive_with_media(path: &Path) -> Result<(Import, MediaPla
     let mut media = MediaPlan::default();
     let mut csv = CsvSources::default();
     let imported = read_archive(path, Some(&mut media), Some(&mut csv))?;
+    if let Some(plan) = &csv.typed_relations
+        && (!imported.has_mcp_transfer_manifest || plan.page_count() != imported.pages.len() || csv.count() != 0 || media.file_count() != 0) {
+        return Err("紙間具名關聯交接標記或確認頁數不符，或會另匯入 CSV 或附件。未執行匯入。".into());
+    }
     Ok((imported, media, csv))
 }
 
@@ -123,7 +127,7 @@ impl Import {
 
     pub(crate) fn markdown_zip_import_notice(&self) -> Option<&'static str> {
         if self.is_flat_heptabase_backup() {
-            Some("ZIP 含有 All-Data.json，可能是 Heptabase 備份。紙間會匯入 Markdown、可比對的相對附件和同包筆記連結。另外提供的標準 JSON Canvas 若能對應會轉成紙間白板，其餘可讀取的圖將保存為未綁定的可編輯 Canvas。不會讀取 All-Data.json 或還原其中的白板配置、關聯或中繼資料。仍要繼續？")
+            Some("ZIP 含有 All-Data.json，可能是 Heptabase 備份。紙間會匯入 Markdown、可比對的相對附件和同包筆記連結。另外提供的標準 JSON Canvas 若能對應會轉成紙間白板，其餘可讀取的圖將保存為可編輯 Canvas，僅對應原始檔案節點及同包完整路徑。不會讀取 All-Data.json 或還原其中的白板配置、關聯或中繼資料。仍要繼續？")
         } else {
             self.has_all_data_json.then_some(
                 "ZIP 含有 All-Data.json 及內嵌 ZIP。紙間只會匯入 Markdown 與可辨識的附件，不會跨 ZIP 配對筆記或白板。仍要繼續？"
@@ -274,6 +278,16 @@ fn collect(
         let path = raw_path.replace('\\', "/");
         let filename = path.rsplit('/').next().unwrap_or(&path);
         let (stem, ext) = filename.rsplit_once('.').unwrap_or((filename, ""));
+        if part.is_none() && raw_path == crate::store::notion_typed_relations::MEMBER
+            && let Some(sources) = csv.as_deref_mut() {
+            use crate::store::notion_typed_relations::{LIMIT, Plan};
+            if entry.is_symlink() || entry.size() > LIMIT || sources.typed_relations.is_some() {
+                return Err("紙間具名關聯交接檔無效、重複或過大。".into());
+            }
+            let bytes = read_bounded(entry.with_reader(&mut bodies, Default::default())?, LIMIT)?;
+            sources.typed_relations = Some(Plan::read(&bytes)?);
+            continue;
+        }
         let csv_extension = filename.trim_end_matches([' ', '.']).rsplit_once('.')
             .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("csv"));
         if let Some(sources) = csv.as_deref_mut() && csv_extension {
@@ -573,6 +587,10 @@ mod tests {
         let (a, b) = (find("甲/鏡頭.md")?, find("乙/鏡頭.md")?);
         drop(inspect);
         assert_ne!(a, b);
+        let unresolved = db.saved_canvases()?.into_iter().find(|(_,t)| t.ends_with("名稱無法確認.canvas")).unwrap().0;
+        assert_eq!(db.resolve_canvas_file_link(unresolved,None,"a")?.note_id,None);
+        assert_eq!(db.resolve_canvas_file_link(unresolved,None,"b")?.note_id,Some(b));
+        assert!(db.set_canvas_vault(id, Some(root)).is_err());
         let a_note = db.note(a)?.unwrap();
         assert_eq!(a_note.body, a_body);
         assert_eq!(db.note(b)?.unwrap().body, "乙正文。");
@@ -587,6 +605,24 @@ mod tests {
             let reopened = Notebook::open(path, false)?;
             assert!(reopened.canvas_vault(id)?.is_none());
             assert_eq!(reopened.read_canvas(id)?.json(), &rich);
+            let (_, links) = reopened.canvas_file_link_snapshot(id)?;
+            assert_eq!(links.iter().map(|l| l.note_id).collect::<Vec<_>>(), [Some(b),Some(b)]);
+            let placement = reopened.canvas_note_placements(b)?.into_iter().find(|p| p.canvas_id==id).unwrap();
+            let hits = reopened.canvas_note_occurrences(b,&placement)?;
+            assert_eq!(hits.len(),2);
+            reopened.locate_canvas_note(b,&placement,&hits[0])?;
+            if path==&backup {
+                use crate::store::canvas_edit::CanvasEdit;
+                let before = reopened.read_canvas(id)?;
+                let changed = reopened.edit_canvas(id,&before,CanvasEdit::Content{id:"a",value:"甲/鏡頭.md"})?;
+                assert_eq!(reopened.resolve_canvas_file_link(id,None,"a")?.note_id,None);
+                assert!(reopened.locate_canvas_note(b,&placement,&hits[0]).is_err());
+                let changed = reopened.edit_canvas(id,&changed,CanvasEdit::Content{id:"a",value:"乙/./鏡頭.md"})?;
+                assert_eq!(reopened.resolve_canvas_file_link(id,None,"a")?.note_id,None);
+                reopened.edit_canvas(id,&changed,CanvasEdit::AddNode{kind:"file",content:"乙/鏡頭.md",geometry:[1,2,30,40]})?;
+                assert_eq!(reopened.canvas_file_links(id)?.iter().filter(|l|l.note_id.is_some()).count(),1);
+                assert_eq!(reopened.canvas_note_occurrences(b,&placement)?.len(),1);
+            }
             let readback = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let check = readback.prepare("SELECT b.title,c.x,c.y FROM board_cards c
                  JOIN boards b ON b.id=c.board_id WHERE c.note_id=?1 ORDER BY b.title")?

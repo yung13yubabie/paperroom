@@ -11,6 +11,7 @@ from pathlib import Path
 
 SCHEMA = "paperroom-notion-mcp-transfer/1"
 REFERENCE_SCHEMA = "paperroom-notion-mcp-transfer/2"
+RELATION_SCHEMA = "paperroom-notion-mcp-transfer/3"
 REFERENCE_LIMIT = 2048
 INPUT_LIMIT = 8 * 1024 * 1024
 PAGE_LIMIT = 4 * 1024 * 1024
@@ -104,6 +105,42 @@ def add_reference_notes(archive, references, approved, manifest):
     manifest["reference_companions"] = members
 
 
+def add_typed_relations(archive, source, approved):
+    members = source["confirmed_page_data_sources"]
+    relations = source["confirmed_database_relations"]
+    if not isinstance(members, dict) or len(members) != len(approved):
+        raise ValueError("each confirmed page needs one data-source ID")
+    memberships = {page_id(k): page_id(v) for k, v in members.items()}
+    if set(memberships) != approved:
+        raise ValueError("data-source membership must match the confirmed pages")
+    if not isinstance(relations, list) or len(relations) > REFERENCE_LIMIT:
+        raise ValueError("expected up to 2048 confirmed typed relations")
+    declarations = {}
+    edges = set()
+    for item in relations:
+        require_keys(item, ["source_page_id", "property_name", "property_type",
+                            "target_data_source_id", "target_page_id"])
+        start, end = page_id(item["source_page_id"]), page_id(item["target_page_id"])
+        destination = page_id(item["target_data_source_id"])
+        name = item["property_name"]
+        if (start not in approved or start == end or memberships.get(end) != destination
+                or item["property_type"] != "relation" or not isinstance(name, str)
+                or not name or name != name.strip() or len(name.encode()) > 256
+                or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name)):
+            raise ValueError("relation identity, type, name or target data-source membership mismatch")
+        if declarations.setdefault((memberships[start], name), destination) != destination:
+            raise ValueError("same source property has inconsistent target data sources")
+        edge = (start, name, "relation", destination, end)
+        if edge in edges:
+            raise ValueError("duplicate typed relation")
+        edges.add(edge)
+    plan = ["paperroom-notion-typed-relations/1", sorted(memberships.items()), sorted(edges)]
+    data = json.dumps(plan, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(data) > 1024 * 1024:
+        raise ValueError("typed relation plan exceeds 1 MiB")
+    add_member(archive, "paperroom-transfer/typed-relations-v1.json", data)
+
+
 def build(raw):
     if len(raw) > INPUT_LIMIT:
         raise ValueError("input exceeds 8 MiB")
@@ -112,8 +149,10 @@ def build(raw):
     keys = ["schema", "confirmed_page_ids", "pages"]
     if schema == REFERENCE_SCHEMA:
         keys.append("confirmed_page_references")
+    if schema == RELATION_SCHEMA:
+        keys.extend(["confirmed_page_data_sources", "confirmed_database_relations"])
     require_keys(source, keys)
-    if schema not in (SCHEMA, REFERENCE_SCHEMA):
+    if schema not in (SCHEMA, REFERENCE_SCHEMA, RELATION_SCHEMA):
         raise ValueError("unknown transfer schema")
     approved = source["confirmed_page_ids"]
     pages = source["pages"]
@@ -155,6 +194,10 @@ def build(raw):
         if schema == REFERENCE_SCHEMA:
             add_reference_notes(archive, source["confirmed_page_references"],
                                 {p["source_page_id"] for p in manifest["pages"]}, manifest)
+        if schema == RELATION_SCHEMA:
+            add_typed_relations(archive, source, {p["source_page_id"] for p in manifest["pages"]})
+            manifest["limitations"] = [x for x in LIMITATIONS if "relations," not in x] + [
+                "Only explicit directed database relation values are projected; views, rollups and remote resources are not restored."]
         add_member(archive, "paperroom-transfer/original.json", raw)
         add_member(archive, "paperroom-transfer/manifest.json",
                    json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
@@ -178,8 +221,9 @@ def main():
     except (ValueError, OSError, RecursionError) as error:
         parser.exit(1, f"Transfer refused: {error}\n")
     print(f"Created ZIP SHA-256 {hashlib.sha256(data).hexdigest()}")
-    for limit in LIMITATIONS:
-        print(limit)
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for limit in json.loads(archive.read("paperroom-transfer/manifest.json"))["limitations"]:
+            print(limit)
 
 
 if __name__ == "__main__":

@@ -443,9 +443,10 @@ impl App {
                             (9, "匯出 JSON Canvas ZIP…"), (10, "檢視附件與相容性"), (11, "儲存封裝附件…"),
                         ]);
                     }
-                    choices.splice(3..3, [
+                    let companion = self.notebook.is_companion_canvas(id)?;
+                    if companion { choices.insert(3,(5,"開啟同包來源筆記…")); } else { choices.splice(3..3, [
                         (4, "綁定匯入的 Vault…"), (5, "開啟畫布來源筆記…"), (6, "解除 Vault 綁定"),
-                    ]);
+                    ]); }
                     let selected_file = if view.selection.len() == 1 {
                         view.doc.json()["nodes"].as_array().into_iter().flatten().find(|node|
                             node["type"].as_str() == Some("file")
@@ -462,7 +463,7 @@ impl App {
                         {
                             return Err("Canvas 節點已更改，請重新開啟畫布。".into());
                         }
-                        let target = link.note_id.ok_or("請先綁定含有這個精確路徑的 Vault。")?;
+                        let target = link.note_id.ok_or(if companion { "此節點沒有可用的原始同包筆記。" } else { "請先綁定含有這個精確路徑的 Vault。" })?;
                         if view.focused_source.as_ref().is_some_and(|(id, source)| id == node_id && *source != target) {
                             return Err("此節點已不再指向原筆記，請重新查看出現位置。".into());
                         }
@@ -502,8 +503,12 @@ impl App {
                             let label = link.label.as_deref().unwrap_or(&link.file);
                             format!("{label} 〔{}〕 {suffix}", link.node_id)
                         }) {
-                            let link = self.notebook.resolve_canvas_file_link(id, expected, &links[index].node_id)?;
-                            let target = link.note_id.ok_or("請先綁定含有這個精確路徑的 Vault。")?;
+                            let selected = &links[index];
+                            let link = self.notebook.resolve_canvas_file_link(id, expected, &selected.node_id)?;
+                            if &link != selected {
+                                return Err("此檔案節點或來源已變更，請重新開啟清單。".into());
+                            }
+                            let target = link.note_id.ok_or(if companion { "此節點沒有可用的原始同包筆記。" } else { "請先綁定含有這個精確路徑的 Vault。" })?;
                             self.open_anchored_note(target, link.subpath.as_deref())?;
                         } else if links.is_empty() {
                             label(self.widgets.status, "畫布沒有檔案節點。");

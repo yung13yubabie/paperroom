@@ -112,6 +112,23 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(len(archive.namelist()), 4)
 
 
+    def test_typed_edges_require_confirmed_target_membership(self):
+        doc = sample()
+        a, b = doc["confirmed_page_ids"]
+        doc.update(schema=transfer.RELATION_SCHEMA, confirmed_page_data_sources={a: "a"*32, b: "b"*32})
+        edge = dict(source_page_id=a, property_name="取景", property_type="relation",
+                    target_data_source_id="b"*32, target_page_id=b)
+        doc["confirmed_database_relations"] = [edge]
+        with zipfile.ZipFile(io.BytesIO(transfer.build(raw(doc)))) as archive:
+            plan = json.loads(archive.read("paperroom-transfer/typed-relations-v1.json"))
+            self.assertEqual(plan[2], [[a, "取景", "relation", "b"*32, b]])
+            self.assertEqual(archive.read("paperroom-transfer/original.json"), raw(doc))
+        for changes in [dict(target_page_id=a), dict(target_page_id="9"*32),
+                        dict(target_data_source_id="c"*32), dict(property_type="url")]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                transfer.build(raw(dict(doc, confirmed_database_relations=[dict(edge, **changes)])))
+
+
     def test_bounds_and_duplicate_json(self):
         for data in [b" " * (transfer.INPUT_LIMIT + 1), b'{"schema":1,"schema":2}', b"\xff"]:
             with self.assertRaises(ValueError):

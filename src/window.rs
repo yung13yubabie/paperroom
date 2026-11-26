@@ -1394,7 +1394,13 @@ impl App {
                             let mut report = media.report(imported.pages.len(), imported.skipped);
                             report.push_str("\r\n\r\n");
                             report.push_str(&csv.report());
-                            if imported.has_mcp_transfer_manifest {
+                            if let Some(plan) = &csv.typed_relations {
+                                let question = format!("依紙間交接檔建立 {} 條具名關聯？只會連到本次新匯入的筆記。資料由交接檔提供，並非 Notion 認證。", plan.count());
+                                if message(app.hwnd, "匯入具名關聯", &question, MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES {
+                                    return Ok(());
+                                }
+                                report.push_str(&format!("\r\n\r\n依紙間交接檔建立 {} 條具名關聯。", plan.count()));
+                            } else if imported.has_mcp_transfer_manifest {
                                 report.push_str("\r\n\r\n此 ZIP 帶紙間 MCP 文字交接標記。本次只匯入所選頁面的文字，交接收據留在原 ZIP；此標記不是原廠匯出證明。");
                             }
                             report.push_str("\r\n\r\n同批同一 ZIP 部件中可唯一比對的相對頁面連結，會出現在「筆記連結」選單。原始 Markdown 不變。片段只認唯一的字面標題。外部連結、附件路徑及未能確認的頁面連結保留原樣。");
@@ -1432,7 +1438,7 @@ impl App {
                                 report.push_str("\r\n\r\n");
                                 report.push_str(&counts);
                                 if drawings.canvases > 0 {
-                                    report.push_str("請從「檔案 → 開啟已匯入的 Canvas」開啟。這些 Canvas 保留檔案路徑，未綁定筆記來源。");
+                                    report.push_str("請從「檔案 → 開啟已匯入的 Canvas」開啟。可從圖內開啟原始節點對應的同包筆記。沒有對應的檔案節點仍會保留。");
                                 }
                                 report.push_str("All-Data.json 的原廠白板與中繼資料沒有還原，請保留原 ZIP。");
                                 for warning in drawings.details {

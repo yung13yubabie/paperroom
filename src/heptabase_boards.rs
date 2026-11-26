@@ -4,6 +4,19 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+pub(super) const SOURCE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS companion_canvases(
+    canvas_id INTEGER PRIMARY KEY REFERENCES saved_canvases(id) ON DELETE CASCADE,
+    import_root INTEGER REFERENCES heptabase_import_roots(import_root) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS companion_node_sources(
+    canvas_id INTEGER NOT NULL REFERENCES companion_canvases(canvas_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL, path TEXT NOT NULL,
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    PRIMARY KEY(canvas_id,node_id)
+);
+";
+
 struct Card { note: i64, x: i64, y: i64 }
 struct Layout { cards: Vec<Card>, edges: Vec<(i64, i64)> }
 
@@ -73,7 +86,7 @@ pub(crate) struct CompanionReport {
 }
 
 pub(super) fn import_companion_boards(
-    db: &Connection, documents: Vec<(String, String)>, notes: &HashMap<String, i64>,
+    db: &Connection, import_root: i64, documents: Vec<(String, String)>, notes: &HashMap<String, i64>,
 ) -> Result<CompanionReport> {
     let mut report = CompanionReport::default();
     for (member, raw) in documents {
@@ -101,11 +114,23 @@ pub(super) fn import_companion_boards(
             _ => None,
         };
         if let Some(reason) = reason {
-            // No Vault binding here: its resolver can normalize paths beyond the
-            // exact source mapping promised for a Heptabase companion.
+            // Store original node identities separately from ordinary Vault bindings.
             let id = super::workspace::save_canvas_on(db, &member, &document)?;
+            db.execute("INSERT INTO companion_canvases(canvas_id,import_root) VALUES(?1,?2)", [id,import_root])?;
+            let mut bound = 0;
+            let mut missing = 0;
+            for node in document.json()["nodes"].as_array().into_iter().flatten().filter(|n| n["type"]=="file") {
+                let path = node["file"].as_str().ok_or("檔案節點缺少路徑。")?;
+                if let Some(note) = notes.get(path).filter(|_| windows_zip_path(path)) {
+                    db.execute("INSERT INTO companion_node_sources(canvas_id,node_id,path,note_id) VALUES(?1,?2,?3,?4)",
+                        params![id,node["id"].as_str(),path,note])?;
+                    bound += 1;
+                } else {
+                    missing += 1;
+                }
+            }
             report.canvases += 1;
-            report.details.push(format!("{member}：已保存為未綁定的可編輯 Canvas（#{id}）。{reason}"));
+            report.details.push(format!("{member}：已保存為可編輯 Canvas（#{id}）。同包來源 {bound} 個，未對應檔案節點 {missing} 個。{reason}"));
             continue;
         }
         let layout = native?;
@@ -138,6 +163,8 @@ mod tests {
             CREATE TABLE boards(id INTEGER PRIMARY KEY,title TEXT COLLATE NOCASE UNIQUE);
             CREATE TABLE board_cards(board_id INTEGER,note_id INTEGER,x INTEGER,y INTEGER,PRIMARY KEY(board_id,note_id));
             CREATE TABLE board_edges(board_id INTEGER,from_note INTEGER,to_note INTEGER,PRIMARY KEY(board_id,from_note,to_note));")?;
+        db.execute_batch("CREATE TABLE heptabase_import_roots(import_root INTEGER PRIMARY KEY); INSERT INTO heptabase_import_roots VALUES(1); CREATE TABLE notes(id INTEGER PRIMARY KEY); INSERT INTO notes VALUES(42),(7);")?;
+        db.execute_batch(SOURCE_SCHEMA)?;
         let tx = db.transaction()?;
         let notes = HashMap::from([("甲/鏡頭.md".to_owned(), 42), ("乙/鏡頭.md".to_owned(), 7)]);
         let first = drawing();
@@ -159,7 +186,7 @@ mod tests {
         group["nodes"][1]["type"] = "group".into();
         let inputs = [("分鏡",first),("參考",second),("箭頭",arrow),("重放",repeated),("缺件",ambiguous),
             ("擴充",unknown),("疊放",overlap),("標籤",labelled),("群組",group)];
-        let report = import_companion_boards(&tx, inputs.into_iter()
+        let report = import_companion_boards(&tx, 1, inputs.into_iter()
             .map(|(name, doc)| (format!("手稿/{name}.canvas"),doc.to_string())).collect(), &notes)?;
         assert_eq!(report.boards, 2);
         assert_eq!(report.canvases, 7);

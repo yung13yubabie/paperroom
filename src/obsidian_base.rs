@@ -36,7 +36,50 @@ impl View {
 pub(crate) struct Base {
     pub raw: Vec<u8>,
     pub views: Vec<View>,
+    pub formulas: BTreeMap<String, FileFormula>,
     pub display_names: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+enum FileText { Folder, Path, Extension }
+#[derive(Clone, Debug)]
+enum StringTest { Contains, StartsWith, EndsWith }
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileFormula { field: FileText, test: StringTest, literal: String }
+
+impl FileFormula {
+    fn parse(expression: &str) -> R<Self> {
+        let (call, argument) = expression.trim().split_once('(').ok_or("公式需要單一檔案文字函式。")?;
+        let (receiver, method) = call.trim_end().rsplit_once('.').ok_or("公式缺少檔案欄位。")?;
+        let field = match receiver {
+            "file.folder" => FileText::Folder,
+            "file.path" => FileText::Path, "file.ext" => FileText::Extension,
+            _ => return Err("公式只支援資料夾、路徑和副檔名。".into()),
+        };
+        let test = match method {
+            "contains" => StringTest::Contains, "startsWith" => StringTest::StartsWith,
+            "endsWith" => StringTest::EndsWith,
+            _ => return Err("公式只支援 contains、startsWith 和 endsWith。".into()),
+        };
+        let argument = argument.strip_suffix(')').ok_or("公式缺少結尾括號。")?;
+        let literal: String = serde_json::from_str(argument.trim()).map_err(|_|"公式參數需要一個雙引號字串。")?;
+        if literal.len()>512 || literal.chars().any(char::is_control) { return Err("公式字串超過 512 位元組或含控制字元。".into()); }
+        Ok(Self { field, test, literal })
+    }
+
+    pub(super) fn display(&self, path: &str, folder: &str, name: &str) -> &'static str {
+        let text = match self.field {
+            FileText::Folder => folder, FileText::Path => path,
+            FileText::Extension => name.rsplit_once('.').map_or("", |(_, ext)| ext),
+        };
+        let matches = match self.test {
+            StringTest::Contains => text.contains(&self.literal),
+            StringTest::StartsWith => text.starts_with(&self.literal),
+            StringTest::EndsWith => text.ends_with(&self.literal),
+        };
+        if matches { "true" } else { "false" }
+    }
 }
 
 enum Node { Text(String), Map(BTreeMap<String, Node>), Seq(Vec<Node>) }
@@ -186,11 +229,11 @@ fn property(s: String) -> R<String> {
     if matches!(s.as_str(), "file.name" | "file.folder" | "file.path" | "file.ext") {
         return Ok(s);
     }
-    let key = s.strip_prefix("note.").unwrap_or(&s);
+    let (namespace,key) = s.strip_prefix("formula.").map_or_else(|| ("note",s.strip_prefix("note.").unwrap_or(&s)),|key|("formula",key));
     if key.is_empty() || key.len() > 128 || !key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
         return Err(format!("不支援的 Bases 屬性：{s}"));
     }
-    Ok(format!("note.{key}"))
+    Ok(format!("{namespace}.{key}"))
 }
 
 fn predicate(s: &str) -> R<FolderRule> {
@@ -240,6 +283,16 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
     if events.next() != Some(Event::DocumentEnd) || events.next().is_some() {
         return Err("每個 Bases 檔案只能有一份 YAML 文件。".into());
     }
+    let mut formulas = BTreeMap::new();
+    if let Some(definitions) = root.remove("formulas") {
+        let definitions=definitions.map()?;
+        if definitions.len()>32 { return Err("每份 Bases 最多支援 32 條公式。".into()); }
+        for (name, value) in definitions {
+            let key=property(format!("formula.{name}"))?;
+            let formula=FileFormula::parse(&value.text()?).map_err(|err|format!("公式「{name}」：{err}"))?;
+            formulas.insert(key, formula);
+        }
+    }
     let mut display_names = BTreeMap::new();
     if let Some(properties) = root.remove("properties") {
         for (key, config) in properties.map()? {
@@ -276,7 +329,10 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
         supported(row)?;
         views.push(View {name, layout, order, folders});
     }
-    Ok(Base { raw: raw.to_vec(), views, display_names })
+    for key in display_names.keys().chain(views.iter().flat_map(|view|view.order.iter())) {
+        if key.starts_with("formula.") && !formulas.contains_key(key) { return Err(format!("找不到公式：{key}")); }
+    }
+    Ok(Base { raw: raw.to_vec(), views, display_names, formulas })
 }
 
 #[cfg(test)]

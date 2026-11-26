@@ -69,8 +69,8 @@ function WaitFor($stage,[scriptblock]$check) {
         if ($result) { Write-Host "Passed $stage"; return $result }
         Start-Sleep -Milliseconds 500
     } while ([datetime]::UtcNow -lt $end)
-    @($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' }) |
-        ForEach-Object { Write-Host ("Observed signed desktop window: " + $_.Current.Name) }
+    @($nodes | Where-Object { $_.Current.Name -and $_.Current.Name.Length -le 150 }) |
+        Select-Object -First 50 | ForEach-Object { Write-Host ("Visible fixture control: " + $_.Current.ControlType.ProgrammaticName + " " + $_.Current.Name) }
     throw "Blocked at $stage. No matching visible UI in the verified Obsidian process."
 }
 function Exact($nodes,$name,$kind) {
@@ -203,19 +203,19 @@ function Find-NewVendorInput([string]$Prior) {
 ExactForegroundKeys '^p'
 $commandInput=WaitFor 'the command palette owns a newly focused text input' { Find-NewVendorInput $beforeId }
 $commandId=$commandInput.GetRuntimeId() -join ','
-Set-Clipboard -Value 'Move current file to another folder'
-ExactForegroundKeys '^v'
+ExactForegroundKeys 'move current file'
 $null = WaitFor 'native command palette shows the Move current file command' {
     param($nodes)
-    @($nodes | Where-Object { $_.Current.Name -match '(?i)^(?:files?:\s*)?Move current file to another folder$' -and
-        $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit' }).Count -gt 0
+    @($nodes | Where-Object {
+        $_.Current.Name -match '(?i)\bmove\s+(the\s+)?current\s+file\s+to\s+another\s+folder\b' -and
+        $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
+    }).Count -gt 0
 }
 ExactForegroundKeys '{ENTER}'
 $moveInput=WaitFor 'the native Move dialog owns its own focused text input' { Find-NewVendorInput $commandId }
 $moveBounds=$moveInput.Current.BoundingRectangle
 $folder = ($To -split '/')[0]
-Set-Clipboard -Value $folder
-ExactForegroundKeys '^v'
+ExactForegroundKeys $folder
 $null = WaitFor 'destination folder visible in vendor dialog' {
     param($nodes)
     @($nodes | Where-Object {

@@ -154,6 +154,11 @@ with sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as 
 '@ | python - $db27
 if ($LASTEXITCODE -ne 0 -or "$edgeCount" -cne '0') {throw 'Reverse removal left an edge'}
 BranchRelation27 exact $true 1 canonical
+BranchRelation27 exact $true 3 canonical
+$null=Wait-For 'opened the original canonical body through the reverse field' {
+    [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '共同筆記' -and
+    [PaperroomHighlightGui]::Read((Control $window 121)).Contains('PAPERROOM-CANON')
+}
 Collection27 'Source'
 Native-Menu 120 26 '資料列附件…'
 Choose-CollectionRow "待處理　共同筆記　[#$($ids27.canonical)]　1 個附件"
@@ -164,7 +169,21 @@ Native-File 1 '資料列附件' $outfile "已儲存資料列 #$($ids27.canonical
 if ((Get-FileHash -LiteralPath $outfile).Hash.ToLowerInvariant() -cne $assets27.canonical.sha256) {throw 'Wrong attachment bytes'}
 Native-Menu 120 3 '開啟資料列…'
 Choose-CollectionRow "待處理　共同筆記  ($($ids27.canonical))"
+$null=Wait-For 'finished leaving the collection and opening the canonical note' {
+    [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '共同筆記' -and
+    [PaperroomHighlightGui]::Read((Control $window 120)) -cne '看板操作'
+}
+Select-Note '共同筆記'
 Click-WorkspaceButton 119
+$null=Wait-For 'native board controls ready at their board positions' {
+    if ([PaperroomHighlightGui]::Read((Control $window 119)) -cne '返回筆記' -or
+        [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') { return $false }
+    try {
+        $area=[PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+        $button=[PaperroomHighlightGui]::ButtonPoint($window,$process.Id,(Control $window 120))
+        return $button.Y -lt $area.Top
+    } catch { return $false }
+}
 Native-Menu 120 3 '新增白板…'
 Collection-Prompt '新增白板' 'Research'
 foreach ($role in 'canonical','other') {

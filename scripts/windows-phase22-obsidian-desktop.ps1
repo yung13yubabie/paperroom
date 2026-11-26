@@ -59,7 +59,10 @@ function DesktopNodes {
 function WaitFor($stage,[scriptblock]$check) {
     $end=[datetime]::UtcNow.AddSeconds(35)
     do {
-        $nodes=@(DesktopNodes)
+        try { $nodes=@(DesktopNodes) } catch {
+            Start-Sleep -Milliseconds 300
+            continue
+        }
         $result = & $check $nodes
         if ($result) { Write-Host "Passed $stage"; return $result }
         Start-Sleep -Milliseconds 500
@@ -112,6 +115,30 @@ public static class ExactPicker {
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr window);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flag);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+    public static int[] Bounds(IntPtr window) {
+        if (GetForegroundWindow()!=window || !GetWindowRect(window, out Rect r) ||
+            r.Right-r.Left < 500 || r.Bottom-r.Top < 340)
+            throw new InvalidOperationException("The fixture window is not usable.");
+        return new int[]{r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top};
+    }
+    public static void ClickFixture(IntPtr window, int x, int y, bool twice) {
+        Point p=new Point{X=x,Y=y};
+        if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(p),2)!=window ||
+            !SetCursorPos(x,y) || GetAncestor(WindowFromPoint(p),2)!=window ||
+            GetForegroundWindow()!=window)
+            throw new InvalidOperationException("The fixture point is not exposed.");
+        mouse_event(2,0,0,0,UIntPtr.Zero);
+        mouse_event(4,0,0,0,UIntPtr.Zero);
+        if (twice) {
+            System.Threading.Thread.Sleep(90);
+            if (GetAncestor(WindowFromPoint(p),2)!=window || GetForegroundWindow()!=window)
+                throw new InvalidOperationException("The fixture point is no longer exposed.");
+            mouse_event(2,0,0,0,UIntPtr.Zero);
+            mouse_event(4,0,0,0,UIntPtr.Zero);
+        }
+    }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint wheel, UIntPtr extra);
     public static void ClickDefault(IntPtr dialog,IntPtr button) {
@@ -139,9 +166,15 @@ $item=$null
 $deadline=[datetime]::UtcNow.AddSeconds(12)
 do {
     if ([ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'Expected the same native picker after address entry.' }
-    $items=@($picker.FindAll($tree,$truth) | Where-Object {
-        !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'PaperroomFixture' -and $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
-    })
+    try {
+        $fresh = [Windows.Automation.AutomationElement]::FromHandle($handle)
+        $items=@($fresh.FindAll($tree,$truth) | Where-Object {
+            !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'PaperroomFixture' -and $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
+        })
+    } catch {
+        Start-Sleep -Milliseconds 250
+        continue
+    }
     foreach ($element in $items) {
         $selection=$null
         if ($element.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selection)) {
@@ -166,15 +199,139 @@ function OpenFixture($file) {
     $path=[uri]::EscapeDataString($file)
     Start-Process "obsidian://open?vault=PaperroomFixture&file=$path"
 }
-foreach ($folder in 'A','B') {
-    OpenFixture "$folder.base"
-    $literal = if ($folder -eq 'A') { 'PaperroomPredicateTrue' } else { 'PaperroomPredicateFalse' }
-    $null=WaitFor "rendered $folder predicate $literal" {
-        param($nodes)
-        (@($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' -and $_.Current.Name -like "$folder - PaperroomFixture -*" }).Count -gt 0) -and
-        (@($nodes | Where-Object { $_.Current.Name -like "*$literal*" }).Count -gt 0)
-    }
+function FixtureWindow([string]$Tab) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(18)
+    do {
+        $wanted = @(
+            Get-Process Obsidian -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -ceq $exe -and $_.MainWindowTitle -like "$Tab - PaperroomFixture - Obsidian 1.15.1*" }
+        )
+        if ($wanted.Count -eq 1 -and [ExactPicker]::GetForegroundWindow() -eq $wanted[0].MainWindowHandle) {
+            return $wanted[0]
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "The expected foreground Obsidian tab was not seen: $Tab"
 }
-OpenFixture 'Board.canvas'
-$null=WaitFor 'rendered unique Canvas node' {param($nodes) @(Exact $nodes 'CanvasProof7B42').Count -gt 0}
-'PASS Obsidian Desktop 1.15.1 rendered both predicate results and the synthetic Canvas node.'
+
+if (!$env:OBSIDIAN_RECEIPTS) { throw 'The dedicated runner evidence directory is missing.' }
+$null = New-Item -ItemType Directory -Path $env:OBSIDIAN_RECEIPTS
+$utf8 = [Text.UTF8Encoding]::new($false)
+function Record([string]$Name,[string]$Text) {
+    [IO.File]::WriteAllText((Join-Path $env:OBSIDIAN_RECEIPTS $Name),$Text,$utf8)
+}
+function Image([string]$Name,[IntPtr]$Handle) {
+    try {
+        $r=[ExactPicker]::Bounds($Handle)
+        $bmp=[Drawing.Bitmap]::new($r[2],$r[3])
+        try {
+            $g=[Drawing.Graphics]::FromImage($bmp)
+            try { $g.CopyFromScreen($r[0],$r[1],0,0,$bmp.Size) } finally { $g.Dispose() }
+            $bmp.Save((Join-Path $env:OBSIDIAN_RECEIPTS $Name),[Drawing.Imaging.ImageFormat]::Png)
+        } finally { $bmp.Dispose() }
+    } catch { Write-Host 'Screenshot unavailable in the desktop session.' }
+}
+
+function CopyBase([string]$Folder,[string]$Literal) {
+    OpenFixture "$Folder.base"
+    $app=FixtureWindow $Folder
+    "Observed desktop tab: $($app.MainWindowTitle)"
+    $hwnd=$app.MainWindowHandle
+    [void][ExactPicker]::ShowWindow($hwnd,3)
+    Start-Sleep -Milliseconds 850
+    Image "Base-$Folder.png" $hwnd
+    $r=[ExactPicker]::Bounds($hwnd)
+    $expectedPath = "$Folder/Twin.md"
+    $otherPath = if ($Folder -eq 'A') { 'B/Twin.md' } else { 'A/Twin.md' }
+    $otherLiteral = if ($Folder -eq 'A') { 'PaperroomPredicateFalse' } else { 'PaperroomPredicateTrue' }
+    # Use only the standard table keyboard commands and fresh clipboard values.
+    foreach ($top in 115,143,170) {
+        foreach ($side in 0.40,0.52) {
+            $nonce=[guid]::NewGuid().ToString('N')
+            Set-Clipboard -Value $nonce
+            [ExactPicker]::ClickFixture($hwnd,($r[0]+[int]($r[2]*$side)),($r[1]+$top),$false)
+            if ([ExactPicker]::GetForegroundWindow() -ne $hwnd) { throw 'The Base view lost foreground.' }
+            [Windows.Forms.SendKeys]::SendWait('^a')
+            [Windows.Forms.SendKeys]::SendWait('^c')
+            Start-Sleep -Milliseconds 260
+            $copied=Get-Clipboard -Raw
+            $lines=@($copied -split '\r?\n')
+            $witness=@($lines | Where-Object { $_.Contains($expectedPath) -and $_.Contains($Literal) })
+            if ($copied -ne $nonce -and $witness.Count -eq 1 -and
+                !$copied.Contains($otherLiteral) -and !$copied.Contains($otherPath)) {
+                Record "Base-$Folder.tsv" $witness[0]
+                "PASS Native $Folder.base rendered $expectedPath and copied computed value $Literal from the same row."
+                return
+            }
+        }
+    }
+    throw "Native $Folder.base opened, but the exact computed cell was not verified by table copy."
+}
+
+function ReadBoard {
+    Get-Content -LiteralPath (Join-Path $vault 'Board.canvas') -Raw | ConvertFrom-Json
+}
+function VerifyCanvas {
+    $boardPath=Join-Path $vault 'Board.canvas'
+    $before=(Get-FileHash -LiteralPath $boardPath).Hash
+    OpenFixture 'Board.canvas'
+    $app=FixtureWindow 'Board'
+    "Observed desktop tab: $($app.MainWindowTitle)"
+    $hwnd=$app.MainWindowHandle
+    [void][ExactPicker]::ShowWindow($hwnd,3)
+    Start-Sleep -Milliseconds 850
+    Image 'Canvas-opened.png' $hwnd
+    $r=[ExactPicker]::Bounds($hwnd)
+    $x=$r[0]+[int]($r[2]*0.59)
+    $y=$r[1]+[int]($r[3]*0.52)
+    [ExactPicker]::ClickFixture($hwnd,$x,$y,$false)
+    [Windows.Forms.SendKeys]::SendWait('+1')
+    Start-Sleep -Milliseconds 650
+    [ExactPicker]::ClickFixture($hwnd,$x,$y,$true)
+    Start-Sleep -Milliseconds 325
+    if ([ExactPicker]::GetForegroundWindow() -ne $hwnd) { throw 'The Canvas view lost foreground.' }
+    [Windows.Forms.SendKeys]::SendWait('^{END}')
+    Set-Clipboard -Value ' CanvasSaved93C1'
+    [Windows.Forms.SendKeys]::SendWait('^v')
+    [Windows.Forms.SendKeys]::SendWait('{ESC}')
+    $until=[DateTime]::UtcNow.AddSeconds(10)
+    do {
+        try { $data=ReadBoard } catch { $data=$null }
+        if ($data -and @($data.nodes).Count -eq 1 -and $data.nodes[0].id -ceq '1234567890abcdef' -and
+            $data.nodes[0].text -ceq 'CanvasProof7B42 CanvasSaved93C1') { break }
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $until)
+    if (!$data -or @($data.nodes).Count -ne 1 -or $data.nodes[0].id -cne '1234567890abcdef' -or
+        $data.nodes[0].text -cne 'CanvasProof7B42 CanvasSaved93C1' -or
+        (Get-FileHash -LiteralPath $boardPath).Hash -ceq $before) {
+        throw 'The identified text card did not save the expected edit to the original Canvas file.'
+    }
+    $pidBefore = $app.Id
+    if (!$app.CloseMainWindow()) { throw 'The actual Canvas window could not close normally.' }
+    if (!$app.WaitForExit(9000)) { throw 'The Obsidian application did not exit after the normal window close.' }
+    OpenFixture 'Board.canvas'
+    $reopened=FixtureWindow 'Board'
+    $after=ReadBoard
+    if ($reopened.Id -eq $pidBefore -or @($after.nodes).Count -ne 1 -or
+        $after.nodes[0].id -cne '1234567890abcdef' -or $after.nodes[0].text -cne 'CanvasProof7B42 CanvasSaved93C1' -or
+        @($after.edges).Count -ne 0) {
+        throw 'The stored Canvas edit did not survive the application restart.'
+    }
+    Start-Sleep -Milliseconds 700
+    Image 'Canvas-reopened.png' $reopened.MainWindowHandle
+    Record 'Canvas-saved.canvas' ([IO.File]::ReadAllText($boardPath))
+    "PASS Native official Canvas edit was saved to the exact node and reopened after normal full process exit. Source hash $before and saved hash $((Get-FileHash -LiteralPath $boardPath).Hash)."
+}
+
+$outcome=[ordered]@{version=$info.FileVersion; installer_sha256=$expected; base_A=$false; base_B=$false; canvas=$false}
+foreach ($name in 'A','B') {
+    $literal=if($name -eq 'A'){'PaperroomPredicateTrue'}else{'PaperroomPredicateFalse'}
+    try { CopyBase $name $literal; $outcome["base_$name"]=$true }
+    catch { Write-Host "BASE $name BLOCKED: $($_.Exception.Message)" }
+}
+try { VerifyCanvas; $outcome.canvas=$true }
+catch { Write-Host "CANVAS BLOCKED: $($_.Exception.Message)" }
+Record 'results.json' ($outcome | ConvertTo-Json)
+if (!$outcome.base_A -or !$outcome.base_B -or !$outcome.canvas) {
+    throw 'A requested official desktop operation lacks a passing receipt.'
+}

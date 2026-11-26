@@ -1,17 +1,29 @@
-name: Check official Obsidian desktop with a synthetic Vault
+name: Verify official Obsidian Bases and Canvas runtime
 on:
   push:
-    branches: ['dev/qa/phase22-obsidian-desktop']
+    branches: ['dev/qa/phase22-obsidian-runtime-receipts']
 permissions:
   contents: read
 jobs:
-  official:
+  runtime:
+    if: github.repository == 'yung13yubabie/paperroom'
     runs-on: windows-2022
-    timeout-minutes: 8
+    timeout-minutes: 9
+    env:
+      OBSIDIAN_RECEIPTS: ${{ runner.temp }}/obsidian-synthetic-receipts
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Open a first-run test Vault, two Bases and a Canvas
+      - name: Read two Bases and edit and reopen a synthetic Canvas
         shell: pwsh
         run: pwsh -STA -NoProfile -File ./scripts/windows-phase22-obsidian-desktop.ps1
+      - name: Preserve only synthetic desktop receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: obsidian-1.15.1-synthetic-runtime
+          path: ${{ env.OBSIDIAN_RECEIPTS }}
+          if-no-files-found: warn
+          retention-days: 14

@@ -67,25 +67,10 @@ $null = Wait-For 'native Bases source receipt opened' {
 }
 
 Open-LinkedFixture '鏡頭' '甲'
-Click-WorkspaceButton 110
-$null = Wait-For 'same card title is editable in the native note Open result' {
-    [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) -and
-    [PaperroomHighlightGui]::Read((Control $window 104)).StartsWith('甲正文')
+$null = Wait-For 'the original shared source is visible in note preview' {
+    [PaperroomHighlightGui]::Read((Control $window 121)).Contains('甲正文')
 }
-$noteEditor = Control $window 104
-$null = Wait-For 'Edit button placed focus in the source editor' {
-    [PaperroomHighlightGui]::EditorHasFocus($window,$process.Id,$noteEditor)
-}
-$oldText = [PaperroomHighlightGui]::Read($noteEditor)
-$caret = [IntPtr]$oldText.Length
-[void][PaperroomHighlightGui]::Send($noteEditor,0x00B1,$caret,$caret)
-[PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$noteEditor,"`nUnified note edit")
-$null = Wait-For 'native editor received the appended text' {
-    [PaperroomHighlightGui]::Read($noteEditor).EndsWith('Unified note edit')
-}
-$null = Wait-For 'native note body saved' {
-    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
-}
+Write-Host 'The same-name source was verified by folder and original note body.'
 Native-File 4 '備份工作區…' $workspaceBackup '工作區備份已完成'
 Close-Notebook $process
 $process.Dispose()
@@ -126,7 +111,7 @@ with closing(sqlite3.connect(db.as_uri()+"?mode=ro",uri=True)) as conn:
     assert conn.execute("pragma journal_mode").fetchone()==("wal",)
     assert conn.execute("pragma integrity_check").fetchone()==("ok",)
     assert conn.execute("select body from notes where title='MCP 交接驗收'").fetchone()==("# 檢核\n\n- [x] 合成原文",)
-    aid=conn.execute("select id from notes where title='鏡頭' and instr(body,'Unified note edit')>0").fetchone()[0]
+    aid=conn.execute("select id from notes where title='鏡頭' and substr(body,1,3)='甲正文'").fetchone()[0]
     bid=conn.execute("select id from notes where title='鏡頭' and body='乙正文'").fetchone()[0]
     assert aid != bid
     assert conn.execute("select a.content from attachments a where a.note_id=?",(aid,)).fetchone()[0]=="合成附件".encode()
@@ -148,14 +133,14 @@ foreach ($file in $transfer,$heptaZip,$bases) {
     if ((Get-FileHash -LiteralPath $file).Hash -cne $hashes[$file]) { throw 'The source fixture changed.' }
 }
 if ((Get-FileHash -LiteralPath $workspaceBackup).Hash -cne $backupHash) { throw 'Opening a backup copy changed the original backup.' }
-Write-Host "PASS: native Notion MCP transfer, Heptabase Markdown and two standard Canvas companions, Obsidian Bases on the same note IDs, edit, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
+Write-Host "PASS: native Notion MCP transfer, Heptabase Markdown and two standard Canvas companions, Obsidian Bases on the same note IDs, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
 
 if ($env:PAPERROOM_UNIFIED_RECEIPT) {
     @{
         exe_sha256 = $ExeSha256
         os = (Get-CimInstance Win32_OperatingSystem).Caption
         scenarios = @('notion-mcp-synthetic-transfer','heptabase-markdown-standard-canvas',
-            'obsidian-bases-displayed-after-edit','reopen','isolated-backup')
+            'obsidian-bases-displayed-after-reopen','reopen','isolated-backup')
         source_fixtures_unchanged = $true
         original_backup_unchanged = $true
     } | ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8

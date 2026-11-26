@@ -240,14 +240,14 @@ jobs:
           exit $LASTEXITCODE
 
   native-board-replay:
-    name: Replay the exact native board candidate
-    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/features/native-board-note-navigation-20261126' && contains(github.event.head_commit.message, '[native-board-replay]')
+    name: Replay the exact legacy-link and WAL candidate
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/features/native-board-note-navigation-20261126' && contains(github.event.head_commit.message, '[legacy-wal-replay]')
     runs-on: windows-2022
     timeout-minutes: 18
     env:
-      PINNED_SOURCE: a0158213bad6df55d09287609f7c528268b7690e
-      PINNED_EXE_SHA: b84171d914dc5c1ed47719a52d9c350d0bdd6244c19521ec9efdb8f7ba3c1c5d
-      PINNED_ZIP_SHA: 90d21e1669bccd6c66180916fcfc120a3c0cbfacc3ec3934c26ec0656caab1e5
+      PINNED_SOURCE: ee057806e7b5f39e2e28952d2b92513bf757aec8
+      PINNED_EXE_SHA: d2f59f57aeb09131786fe93e7e59c34c37041de5d182b2a7b7b90d70677e4f6a
+      PINNED_ZIP_SHA: ad1b4bafa15e830135b00a41fa566110c4b4c42792113146950ba93e2e78d33b
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -262,7 +262,11 @@ jobs:
           git merge-base --is-ancestor $env:PINNED_SOURCE $head
           if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
           $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
-          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
+          $allowed = @(
+            '.github/workflows/draft-windows-acceptance.yml',
+            'scripts/windows-highlight-workflow.ps1',
+            'scripts/windows-imported-legacy-link.ps1'
+          )
           if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
           }
@@ -272,11 +276,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15075527547"
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15085640357"
           $metadata = gh api $route
           if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
           $meta = $metadata | ConvertFrom-Json
-          if ($meta.expired -or $meta.workflow_run.id -ne 45728691456 -or
+          if ($meta.expired -or $meta.workflow_run.id -ne 45749686581 -or
               $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
               $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
             throw 'The pinned artifact metadata differs from the reviewed candidate.'
@@ -301,6 +305,9 @@ jobs:
               $zip.Dispose()
             }
             Remove-Item Env:GH_TOKEN
+            if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:PINNED_EXE_SHA) {
+              throw 'The unpacked EXE SHA-256 does not match.'
+            }
             Write-Host "Verified exact prior build EXE $env:PINNED_EXE_SHA from reviewed artifact."
             $aboutError = $null
             try { ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA }

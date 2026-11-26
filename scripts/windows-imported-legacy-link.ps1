@@ -31,7 +31,10 @@ with closing(sqlite3.connect(Path(path).as_uri()+'?mode=ro',uri=True)) as db:
 
 function Assert-NoNativeLegacyJump {
     Click-WorkspaceButton 120
-    $options = @(Collection-MenuLabels)
+    $menu = Wait-For 'owned native Links popup' {
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
+    }
+    $options = @([PaperroomHighlightGui]::CurrentMenuLabels($window,$process.Id,$menu,$false))
     if ($options.Count -ne 5 -or
         @($options | Where-Object { $_ -match '^(前往|反向連結)' }).Count -ne 0) {
         throw "Imported legacy link unexpectedly became a native menu entry: $($options -join ', ')."

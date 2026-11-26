@@ -435,6 +435,9 @@ public static class PaperroomHighlightGui {
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
     public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup) {
+        return CurrentMenuLabels(owner, pid, popup, true);
+    }
+    public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup, bool requireSequentialIds) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
         IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
@@ -443,9 +446,10 @@ public static class PaperroomHighlightGui {
         var labels = new string[count];
         for (int i = 0; i < count; ++i) {
             var label = new StringBuilder(256);
-            if (GetMenuItemID(menu, i) != (uint)(i + 1) ||
-                GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+            if (requireSequentialIds && GetMenuItemID(menu, i) != (uint)(i + 1))
                 throw new InvalidOperationException("Expected a sequential Paperroom list.");
+            if (GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+                throw new InvalidOperationException("Expected a labeled Paperroom command.");
             labels[i] = label.ToString();
         }
         return labels;

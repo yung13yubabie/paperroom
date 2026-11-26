@@ -28,6 +28,8 @@ if ($inputZip.PSIsContainer -or $inputZip.Length -gt 64MB -or
     (Fingerprint $inputZip.FullName) -ine $OuterSha256) {
     throw 'The outer ZIP does not match the independent download receipt.'
 }
+$zoneProbe = Join-Path $PSScriptRoot 'observe-zone-identifiers.ps1'
+$outerZone = (& $zoneProbe -OuterZip $inputZip.FullName | ConvertFrom-Json).outer_zip
 $root = [IO.Path]::GetFullPath($Destination)
 if ($root.StartsWith('\\') -or (Test-Path -LiteralPath $root)) {
     throw 'Use a new, local destination directory. Existing files were left in place.'
@@ -76,6 +78,7 @@ foreach ($mode in 'default','portable','restore') {
     if ($actual -ine $ExeSha256) { throw "The EXE differs in staged mode $mode." }
     $copies[$mode] = $actual
 }
+$stagedZone = & $zoneProbe -InnerZip $inner -DefaultExe (Join-Path $root 'default/Paperroom.exe') -PortableExe (Join-Path $root 'portable/Paperroom.exe') -RestoreExe (Join-Path $root 'restore/Paperroom.exe') | ConvertFrom-Json
 $fixture = Join-Path $root 'fixture.md'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixture.md') -Destination $fixture
 $checkpointScript = Join-Path $root 'checkpoint.ps1'
@@ -93,6 +96,13 @@ $checkpoint = $record | ConvertFrom-Json
     inner_zip_name = [IO.Path]::GetFileName($inner)
     inner_zip_sha256 = $innerActual
     exe_sha256_by_mode = $copies
+    zone_identifier = [ordered]@{
+        outer_zip = $outerZone
+        inner_zip = $stagedZone.inner_zip
+        default_exe = $stagedZone.default_exe
+        portable_exe = $stagedZone.portable_exe
+        restore_exe = $stagedZone.restore_exe
+    }
     fixture_sha256 = Fingerprint $fixture
     checkpoint_sha256 = Fingerprint $checkpointScript
     client_check_ok = ($status -eq 0 -and $checkpoint.checkpoint_ok -eq $true -and $checkpoint.os_family -ceq $ExpectedFamily)

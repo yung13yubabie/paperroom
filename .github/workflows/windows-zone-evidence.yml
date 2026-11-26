@@ -1,0 +1,26 @@
+name: Windows download-zone evidence QA
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'qa/windows-client-offline/**'
+      - 'scripts/test-windows-zone-evidence.ps1'
+      - '.github/workflows/windows-zone-evidence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify the evidence and staging entry with synthetic files
+        shell: powershell
+        run: ./scripts/test-windows-zone-evidence.ps1

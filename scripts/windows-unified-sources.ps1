@@ -72,8 +72,10 @@ $null = Wait-For 'same card title is editable in the native note Open result' {
     [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) -and
     [PaperroomHighlightGui]::Read((Control $window 104)).StartsWith('甲正文')
 }
-Replace-EditorText (Control $window 103) 'Unified Renamed Note'
-$null = Wait-For 'native note title saved' {
+$body = (Control $window 104)
+$beforeEdit = [PaperroomHighlightGui]::Read($body).Replace("`r`n", "`n").TrimEnd("`n")
+Replace-EditorText $body ($beforeEdit + "`n`nUnified note edit")
+$null = Wait-For 'native note body saved' {
     [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
 }
 Native-File 4 '備份工作區…' $workspaceBackup '工作區備份已完成'
@@ -89,7 +91,7 @@ Copy-Item -LiteralPath $workspaceBackup -Destination $restoredDb
 foreach ($case in @(@($testHome,$db),@($restoredHome,$restoredDb))) {
     $process = Start-Notebook $case[0]
     $window = $process.MainWindowHandle
-    Select-Note 'Unified Renamed Note'
+    Open-LinkedFixture '鏡頭' '甲'
     Open-SortCollection '場次／甲場'
     Native-Menu 120 11 '集合檢視…'
     Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
@@ -98,12 +100,12 @@ foreach ($case in @(@($testHome,$db),@($restoredHome,$restoredDb))) {
     Native-Menu 120 4 '查看資料列的顯示欄位…' -MenuOpen
     $rows = @(Collection-MenuLabels)
     if ($rows.Count -ne 1) { throw 'The saved Bases view displayed an unexpected number of rows.' }
-    Choose-CollectionRow '已匯入　Unified Renamed Note  ('
+    Choose-CollectionRow '已匯入　鏡頭  ('
     $display = Wait-For 'actual imported Bases values' {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','資料列的顯示欄位',1)
     }
     $projection = [PaperroomHighlightGui]::Read((Control $display 101))
-    foreach ($expected in @('筆記標題　Unified Renamed Note','file.folder　甲','file.name　鏡頭.md')) {
+    foreach ($expected in @('筆記標題　鏡頭','file.folder　甲','file.name　鏡頭.md')) {
         if (!$projection.Contains($expected)) { throw 'The named collection view lost a file snapshot.' }
     }
     Finish-Revision $display 1
@@ -116,7 +118,7 @@ with closing(sqlite3.connect(db.as_uri()+"?mode=ro",uri=True)) as conn:
     assert conn.execute("pragma journal_mode").fetchone()==("wal",)
     assert conn.execute("pragma integrity_check").fetchone()==("ok",)
     assert conn.execute("select body from notes where title='MCP 交接驗收'").fetchone()==("# 檢核\n\n- [x] 合成原文",)
-    aid=conn.execute("select id from notes where title='Unified Renamed Note'").fetchone()[0]
+    aid=conn.execute("select id from notes where title='鏡頭' and instr(body,'Unified note edit')>0").fetchone()[0]
     bid=conn.execute("select id from notes where title='鏡頭' and body='乙正文'").fetchone()[0]
     assert aid != bid
     assert conn.execute("select a.content from attachments a where a.note_id=?",(aid,)).fetchone()[0]=="合成附件".encode()

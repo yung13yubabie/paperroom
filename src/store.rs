@@ -110,6 +110,9 @@ mod formula_service;
 pub use groups::BoardGroup;
 #[path = "boards.rs"]
 mod boards;
+#[cfg(any(windows, test))]
+#[path = "native_board_locations.rs"]
+pub(crate) mod native_board_locations;
 #[path = "tasks.rs"]
 pub(crate) mod tasks;
 #[path = "board_images.rs"]

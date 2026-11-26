@@ -36,6 +36,8 @@ mod note_highlight_ui;
 mod board_objects_ui;
 #[path = "board_image_ui.rs"]
 mod board_image_ui;
+#[path = "native_board_location_ui.rs"]
+mod native_board_location_ui;
 #[path = "board_shape_input.rs"]
 mod board_shape_input;
 #[path = "board_shape_tag_ui.rs"]
@@ -183,6 +185,8 @@ struct Extras {
     board_selection: Option<(i64, String)>,
     dragging: Option<(i64, i32, i32)>,
     scroll: i32,
+    board_scroll_x: i32,
+    native_board_focus: Option<crate::store::native_board_locations::NativeBoardLocation>,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -1965,8 +1969,10 @@ impl App {
                 labels.push((graph, "開啟筆記關聯圖…".to_owned()));
                 let named = (graph + 1).max(60001);
                 let canvas = named + 1;
+                let native_board = named + 2;
                 labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
                 labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
+                labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
                 let items = labels
                     .iter()
                     .map(|(id, label)| (*id, label.as_str()))
@@ -1979,6 +1985,7 @@ impl App {
                     index if index == graph => app.open_note_graph(source)?,
                     index if index == named => app.show_named_relation_navigation(source)?,
                     index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == native_board => app.show_native_board_locations(source)?,
                     index => {
                         if let Some((id, _, heading, syntax)) = related.get(index - 2) {
                             app.open_anchored_link(*id, heading.as_deref(), *syntax)?;
@@ -2117,7 +2124,10 @@ impl App {
             }
             self.extras.board_drop_target = None;
             self.extras.board_selected.clear();
+            self.extras.native_board_focus = None;
             self.extras.scroll = 0;
+            self.extras.board_scroll_x = 0;
+            self.refresh_board_image_cache();
             self.present();
             Ok(())
         }
@@ -2142,6 +2152,10 @@ impl App {
                 .filter(|card| !self.board_card_collapsed(card.id)).map(|card| BoardItem::Card(card.id))
                 .chain(self.extras.objects.iter().map(|object| BoardItem::Object(object.id))).collect();
             self.extras.board_selected.retain(|item| visible.contains(item));
+            if self.focused_native_card().is_some_and(|note| !visible.contains(&BoardItem::Card(note))) {
+                self.extras.native_board_focus = None;
+            }
+            self.extras.board_scroll_x = self.extras.board_scroll_x.min(self.board_scroll_end_x());
             let end = self.board_scroll_end();
             self.extras.scroll = self.extras.scroll.clamp(0, end);
             self.refresh_board_image_cache();
@@ -2157,6 +2171,16 @@ impl App {
             .max().unwrap_or(0)
     }
 
+    fn board_scroll_end_x(&self) -> i32 {
+        let area = unsafe { self.board_area() };
+        let width = (area.right - area.left).max(0) * 96 / self.dpi as i32;
+        let bound = |x, size| crate::store::native_board_locations::pan_limit(x, size, width);
+        self.extras.cards.iter().map(|card| bound(card.x, card.size().width))
+            .chain(self.extras.objects.iter().map(|object| bound(object.x, 232)))
+            .chain(self.extras.board_shapes.iter().map(|shape| bound(shape.rect.x, shape.rect.width)))
+            .max().unwrap_or(0)
+    }
+
     unsafe fn board_toggle(&mut self) {
         unsafe {
             self.mutate(|app| {
@@ -2167,6 +2191,7 @@ impl App {
                 app.extras.workspace = None;
                 app.extras.board = !app.extras.board;
                 app.extras.board_selected.clear();
+                app.extras.native_board_focus = None;
                 if app.extras.board {
                     app.refresh_board()?;
                 }
@@ -2198,13 +2223,13 @@ impl App {
             if x < area.left || y < area.top || x >= area.right || y >= area.bottom {
                 return None;
             }
-            self.extras
-                .cards
-                .iter()
-                .rev()
+            let focus = self.focused_native_card();
+            let cards = self.extras.cards.iter().rev();
+            cards.clone().filter(|card| Some(card.id) == focus)
+                .chain(cards.filter(|card| Some(card.id) != focus))
                 .filter(|card| !self.board_card_collapsed(card.id))
                 .find(|card| {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     (left..left + self.scaled(size.width)).contains(&x)
@@ -2231,7 +2256,11 @@ impl App {
             if self.board_batch_input(msg, wp, x, y) {
                 return;
             }
-            if self.board_object_input(msg, x, y) {
+            let hit_focused = self.focused_native_card().is_some_and(|id| self.card_at(x, y) == Some(id));
+            if !(hit_focused && self.extras.object_drag.is_none()
+                && matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONUP))
+                && self.board_object_input(msg, x, y)
+            {
                 return;
             }
             match msg {
@@ -2242,7 +2271,7 @@ impl App {
                         let area = self.board_area();
                         self.extras.dragging = Some((
                             id,
-                            x - area.left - self.scaled(card.x),
+                            x - self.board_screen_x(area, card.x),
                             y - area.top - self.scaled(card.y - self.extras.scroll),
                         ));
                         SetCapture(self.hwnd);
@@ -2256,8 +2285,9 @@ impl App {
                         let dpi = self.dpi as i32;
                         let width = self.extras.cards.iter().find(|card| card.id == id)
                             .map_or(232, |card| card.size().width);
-                        let max_x = (area.right - area.left) * 96 / dpi - width;
-                        let new_x = ((x - area.left - dx) * 96 / dpi).clamp(0, max_x.max(0));
+                        let scroll_x = self.extras.board_scroll_x;
+                        let max_x = (scroll_x + (area.right - area.left) * 96 / dpi - width).clamp(0, 10000);
+                        let new_x = ((x - area.left - dx) * 96 / dpi + scroll_x).clamp(0, max_x);
                         let new_y =
                             ((y - area.top - dy) * 96 / dpi + self.extras.scroll).clamp(0, 50000);
                         if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == id) {
@@ -2288,7 +2318,17 @@ impl App {
                 }
                 WM_LBUTTONDBLCLK => {
                     if let Some(id) = self.card_at(x, y) {
-                        self.select(id);
+                        if hit_focused {
+                            self.mutate(|app| {
+                                let location = app.extras.native_board_focus.as_ref().ok_or("白板位置已變更。")?;
+                                let note = app.notebook.note_at_native_board_location(location)?;
+                                app.extras.native_board_focus = None;
+                                app.set_current_note(Some(note));
+                                Ok(())
+                            });
+                        } else {
+                            self.select(id);
+                        }
                     }
                 }
                 WM_RBUTTONUP => {
@@ -2312,8 +2352,13 @@ impl App {
                     let area = self.board_area();
                     if cursor.x >= area.left && cursor.x < area.right {
                         let delta = (wp >> 16) as u16 as i16 as i32;
-                        let max = self.board_scroll_end();
-                        self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        if wp & 0x0004 != 0 { // MK_SHIFT
+                            let max = self.board_scroll_end_x();
+                            self.extras.board_scroll_x = (self.extras.board_scroll_x - delta).clamp(0, max);
+                        } else {
+                            let max = self.board_scroll_end();
+                            self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        }
                         self.refresh_board_image_cache();
                         InvalidateRect(self.hwnd, &area, 1);
                     }
@@ -2464,7 +2509,7 @@ impl App {
             for group in &self.extras.groups {
                 let mut bounds = None::<RECT>;
                 for card in self.extras.cards.iter().filter(|card| group.members.contains(&card.id)) {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     let rect = RECT { left, top, right: left + self.scaled(size.width), bottom: top + self.scaled(size.height) };
@@ -2508,7 +2553,7 @@ impl App {
                     let prior = SelectObject(dc, pen);
                     let centers = self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)).map(|card| {
                         let size = card.size();
-                        (card.id, (area.left + self.scaled(card.x + size.width / 2),
+                        (card.id, (self.board_screen_x(area, card.x + size.width / 2),
                                    area.top + self.scaled(card.y - self.extras.scroll + size.height / 2)))
                     }).collect::<HashMap<_, _>>();
                     for edge in &self.extras.edges {
@@ -2524,55 +2569,67 @@ impl App {
                 }
             }
             self.paint_mind_map_edges(dc, area);
-            for card in self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)) {
-                let left = area.left + self.scaled(card.x);
-                let top = area.top + self.scaled(card.y - self.extras.scroll);
-                let size = card.size();
-                let rect = RECT {
-                    left,
-                    top,
-                    right: left + self.scaled(size.width),
-                    bottom: top + self.scaled(size.height),
-                };
-                if rect.bottom <= area.top || rect.top >= area.bottom {
-                    continue;
-                }
-                fill(dc, &rect, PAPER);
-                if self.paint_board_image(dc, rect, card) {
-                    self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                    continue;
-                }
-                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                let mut title = RECT {
-                    left: left + self.scaled(13),
-                    top: top + self.scaled(10),
-                    right: rect.right - self.scaled(12),
-                    bottom: top + self.scaled(37),
-                };
-                draw_text(
-                    dc,
-                    self.fonts[0],
-                    TEAL,
-                    &card.title,
-                    &mut title,
-                    DT_SINGLELINE | DT_END_ELLIPSIS,
-                );
-                let mut excerpt = RECT {
-                    top: top + self.scaled(40),
-                    bottom: rect.bottom - self.scaled(10),
-                    ..title
-                };
-                draw_text(
-                    dc,
-                    self.fonts[3],
-                    SOFT,
-                    &card.excerpt,
-                    &mut excerpt,
-                    DT_WORDBREAK | DT_END_ELLIPSIS,
-                );
+            let focus = self.focused_native_card();
+            for card in self.extras.cards.iter().filter(|card| Some(card.id) != focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
             }
             self.paint_board_objects(dc, area);
+            if let Some(card) = self.extras.cards.iter().find(|card| Some(card.id) == focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
+            }
             RestoreDC(dc, saved);
+        }
+    }
+
+    unsafe fn paint_native_board_card(&self, dc: HDC, area: RECT, card: &crate::store::Card) {
+        unsafe {
+            let left = self.board_screen_x(area, card.x);
+            let top = area.top + self.scaled(card.y - self.extras.scroll);
+            let size = card.size();
+            let rect = RECT {
+                left,
+                top,
+                right: left + self.scaled(size.width),
+                bottom: top + self.scaled(size.height),
+            };
+            if rect.bottom <= area.top || rect.top >= area.bottom
+                || rect.right <= area.left || rect.left >= area.right
+            {
+                return;
+            }
+            fill(dc, &rect, PAPER);
+            if self.paint_board_image(dc, rect, card) {
+                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+                return;
+            }
+            self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+            let mut title = RECT {
+                left: left + self.scaled(13),
+                top: top + self.scaled(10),
+                right: rect.right - self.scaled(12),
+                bottom: top + self.scaled(37),
+            };
+            draw_text(
+                dc,
+                self.fonts[0],
+                TEAL,
+                &card.title,
+                &mut title,
+                DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let mut excerpt = RECT {
+                top: top + self.scaled(40),
+                bottom: rect.bottom - self.scaled(10),
+                ..title
+            };
+            draw_text(
+                dc,
+                self.fonts[3],
+                SOFT,
+                &card.excerpt,
+                &mut excerpt,
+                DT_WORDBREAK | DT_END_ELLIPSIS,
+            );
         }
     }
 

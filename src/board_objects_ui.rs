@@ -330,6 +330,9 @@ impl App {
             if let Some(group) = action.checked_sub(1).and_then(|index| groups.get(index)) {
                 let key = (board, group.id);
                 if self.extras.collapsed_board_groups.insert(key) {
+                    if self.focused_native_card().is_some_and(|note| group.members.contains(&note)) {
+                        self.extras.native_board_focus = None;
+                    }
                     for note in &group.members {
                         self.extras.board_selected.remove(&BoardItem::Card(*note));
                     }
@@ -347,7 +350,8 @@ impl App {
 
     pub(super) unsafe fn paint_board_item_frame(&self, dc: HDC, rect: RECT, item: BoardItem) {
         unsafe {
-            let selected = self.extras.board_selected.contains(&item);
+            let selected = self.extras.board_selected.contains(&item)
+                || matches!(item, BoardItem::Card(id) if self.focused_native_card() == Some(id));
             let brush = CreateSolidBrush(if selected { TEAL } else { LINE });
             if !brush.is_null() {
                 FrameRect(dc, &rect, brush);
@@ -384,7 +388,7 @@ impl App {
                             };
                             entry.x + width
                         }).max().unwrap_or(0);
-                        let max_dx = (visible_width - edge).min(10000 - right).max(0);
+                        let max_dx = (self.extras.board_scroll_x + visible_width - edge).min(10000 - right).max(0);
                         let bottom = drag.expected.iter().map(|entry| entry.y).max().unwrap_or(0);
                         drag.delta = (((x - drag.start.0) * 96 / dpi).clamp(-min_x, max_dx),
                             ((y - drag.start.1) * 96 / dpi).clamp(-min_y, 50000 - bottom));
@@ -417,8 +421,10 @@ impl App {
             {
                 return false;
             }
-            let hit = self.board_object_at(area, x, y).map(|object| BoardItem::Object(object.id))
-                .or_else(|| self.card_at(x, y).map(BoardItem::Card));
+            let card = self.card_at(x, y);
+            let hit = card.filter(|id| self.focused_native_card() == Some(*id)).map(BoardItem::Card)
+                .or_else(|| self.board_object_at(area, x, y).map(|object| BoardItem::Object(object.id)))
+                .or_else(|| card.map(BoardItem::Card));
             const MOUSE_CONTROL: WPARAM = 0x0008; // MK_CONTROL in Win32 key-state flags.
             if wp & MOUSE_CONTROL != 0 {
                 if let Some(item) = hit
@@ -671,7 +677,7 @@ impl App {
     }
 
     fn object_rect(&self,area:RECT,object:&Object)->RECT {
-        let left=area.left+self.scaled(object.x);
+        let left=self.board_screen_x(area, object.x);
         let top=area.top+self.scaled(object.y-self.extras.scroll);
         RECT{left,top,right:left+self.scaled(232),bottom:top+self.scaled(114)}
     }
@@ -712,8 +718,9 @@ impl App {
                 match msg {
                     WM_MOUSEMOVE=>{
                         let dpi=self.dpi as i32;
-                        let max_x=((area.right-area.left)*96/dpi-232).clamp(0,10000);
-                        let left=((x-area.left-dx)*96/dpi).clamp(0,max_x);
+                        let scroll_x = self.extras.board_scroll_x;
+                        let max_x=(scroll_x+(area.right-area.left)*96/dpi-232).clamp(0,10000);
+                        let left=((x-area.left-dx)*96/dpi+scroll_x).clamp(0,max_x);
                         let top=((y-area.top-dy)*96/dpi+self.extras.scroll).clamp(0,50000);
                         if let Some(o)=self.extras.objects.iter_mut().find(|o|o.id==id){o.x=left;o.y=top;}
                         InvalidateRect(self.hwnd,&area,1);

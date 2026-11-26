@@ -353,6 +353,25 @@ public static class PaperroomHighlightGui {
             : new[] { Mouse(0x0800, unchecked((uint)(scroll * 120))) };
         SendPhysical(input);
     }
+    public static void BoardCardClick(IntPtr owner, uint pid, int slot, bool remove) {
+        BoardCardClick(owner,pid,slot,remove,false,false);
+    }
+    public static void BoardCardClick(IntPtr owner, uint pid, int slot, bool right, bool centered, bool select) {
+        if (slot != 0 && slot != 1) throw new ArgumentOutOfRangeException(nameof(slot));
+        var area = CanvasArea(owner,pid);
+        int dpi = (int)GetDpiForWindow(owner);
+        // The first two ordinary cards occupy the first two grid slots.
+        int x = centered ? (area.Left + area.Right) / 2 : area.Left + ((46 + 260 * slot) * dpi + 48) / 96;
+        int y = centered ? (area.Top + area.Bottom) / 2 : area.Top + (46 * dpi + 48) / 96;
+        var point = CanvasCursor(owner, pid, x, y);
+        if (WindowFromPoint(point) != owner || !WorkspaceInForeground(owner,pid))
+            throw new InvalidOperationException("Expected the unoccluded, foreground native board.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        if (select) SendPhysical(new[] { Key(0x11, 0, 0), Mouse(2), Mouse(4), Key(0x11, 0, 2) });
+        else if (right) SendPhysical(new[] { Mouse(8), Mouse(16) });
+        else SendPhysical(new[] { Mouse(2), Mouse(4), Mouse(2), Mouse(4) });
+    }
     private static Input Mouse(uint flags, uint delta = 0) {
         return new Input { Data = new InputData { Mouse = new MouseInput { Flags = flags, Data = delta } } };
     }
@@ -2959,6 +2978,113 @@ print("Full backup has the original stable note identity and attachment, exact C
     $null = Wait-For 'unbound and same-name other Vault occurrences are excluded' {
         [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '這篇筆記未出現在已綁定的 Canvas。'
     }
+    # Work with the same two imported notes, not a second set with similar names.
+    $nativeBodies = @('場景原本的獨特引文','另一本 Vault 的同名正文')
+    $pickRows = @'
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
+    live=db.execute("SELECT title,body FROM notes WHERE trash_root IS NULL ORDER BY id").fetchall()
+    for body in sys.argv[2:]:
+        hits=[i for i,row in enumerate(live,1) if row==("鏡頭",body)]
+        assert len(hits)==1
+        print(hits[0])
+'@ | python - $locationDb $nativeBodies[0] $nativeBodies[1]
+    if ($LASTEXITCODE -ne 0 -or @($pickRows).Count -ne 2) { throw 'Could not independently identify the two real note-picker rows.' }
+    function Assert-TwinBody([string]$Body) {
+        $null=Wait-For "native board opened the exact note: $Body" {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains($Body) -and
+            [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+        }
+    }
+    function Pick-NativePlacement([string]$Board, [int]$ExpectedCount) {
+        Native-Menu 120 60003 '查看此筆記的原生白板位置…'
+        $options=@(Collection-MenuLabels)
+        if ($options.Count -ne $ExpectedCount) { throw "Expected $ExpectedCount placements; got $($options -join ', ')." }
+        Choose-CollectionRow $Board
+        $null=Wait-For "native board focus: $Board" {
+            [PaperroomHighlightGui]::Read((Control $window 115)).Contains($Board) -and
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已定位白板上的筆記卡片。'
+        }
+    }
+    function Search-NativeTwin([string]$Body) {
+        $d=Open-WorkspaceSearch -Menu
+        Type-SearchFilter $d 101 $Body
+        Search-Workspace $d '找到 1 筆筆記。' 1
+        Finish-Revision $d 111
+        Assert-TwinBody $Body
+    }
+    Click-WorkspaceButton 119
+    Native-Menu 120 3 '新增白板…'
+    Collection-Prompt '新增白板' 'NativeNorth'
+    Native-Menu 120 1 '放入筆記…'
+    Native-Menu 120 ([uint32]$pickRows[0]) '鏡頭' -MenuOpen
+    Native-Menu 120 4 '新增分區…'
+    Collection-Prompt '新增分區' '遠端卡片'
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$true)
+    Native-Menu 120 4 '設定分區…' -MenuOpen
+    Native-Menu 120 2 '遠端卡片' -MenuOpen
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$false,$true)
+    Native-Menu 120 12 '移動選取的物件…'
+    Collection-Prompt '移動選取的物件' '4200,3600'
+    $null = Wait-For 'moved the card outside the viewport' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已移動 1 個白板物件。'
+    }
+    Native-Menu 120 13 '收合或展開分區…'
+    Native-Menu 120 1 '收合「遠端卡片」' -MenuOpen
+    Native-Menu 120 3 '新增白板…'
+    Collection-Prompt '新增白板' 'NativeSouth'
+    foreach ($index in @(1,0)) {
+        Native-Menu 120 1 '放入筆記…'
+        Native-Menu 120 ([uint32]$pickRows[$index]) '鏡頭' -MenuOpen
+    }
+    Click-WorkspaceButton 119
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeSouth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' $nativeBodies[1]
+    Pick-NativePlacement 'NativeSouth' 1
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false)
+    Assert-TwinBody $nativeBodies[1]
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' $nativeBodies[0]
+    $nativeBackup=Join-Path $root 'native-locations.sqlite3'
+    Native-File 4 '備份工作區…' $nativeBackup '工作區備份已完成'
+    $nativeBackupHash=(Get-FileHash -LiteralPath $nativeBackup).Hash
+    Pick-NativePlacement 'NativeNorth' 2
+    # The far card began inside a collapsed group. Opening it with a physical
+    # click at the read-only viewport focus verifies both scrolling and reveal.
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$true,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Pick-NativePlacement 'NativeNorth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$true,$true,$false)
+    Native-Menu 120 1 '移出白板' -MenuOpen
+    Close-Notebook $process
+    $process.Dispose()
+    $process=Start-Notebook $locationHome
+    $window=$process.MainWindowHandle
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeSouth' 1
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Close-Notebook $process
+    $process.Dispose()
+    $clone=Join-Path $root 'native-location-restore'
+    $cloneData=Join-Path $clone 'paperroom-data'
+    [void][IO.Directory]::CreateDirectory($cloneData)
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $clone 'Paperroom.exe')
+    $restoreCopy = Join-Path $cloneData 'notes.sqlite3'
+    Copy-Item -LiteralPath $nativeBackup -Destination $restoreCopy
+    if ((Get-FileHash -LiteralPath $restoreCopy).Hash -cne $nativeBackupHash) { throw 'Restored workspace copy differs from the backup before startup.' }
+    $process=Start-Notebook $clone
+    $window=$process.MainWindowHandle
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeNorth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$true,$false)
+    Assert-TwinBody $nativeBodies[0]
+    if ((Get-FileHash -LiteralPath $nativeBackup).Hash -cne $nativeBackupHash) { throw 'Opening the isolated restore changed its backup input.' }
+    Write-Host 'PASS: native board placements distinguished same-title note bodies, crossed a named relation, revealed a collapsed off-screen card, survived restart after a placement removal, and restored both placements from an isolated workspace backup.'
     Close-Notebook $process
     $process.Dispose()
     $process = $null

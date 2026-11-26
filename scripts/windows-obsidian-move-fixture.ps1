@@ -319,7 +319,7 @@ if ($HeadingProbe) {
     $null=WaitFor 'visible focused Command Palette search' {
         param($nodes)
         @($nodes | Where-Object { $_.Current.HasKeyboardFocus -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and
-            $_.Current.Name -match '^(Type a command|Command palette)' }).Count -eq 1
+            $_.Current.Name -match '^(Select a command|Type a command|Command palette)' }).Count -eq 1
     }
     Set-Clipboard -Value 'Rename heading'
     InVerifiedWindow '^v'

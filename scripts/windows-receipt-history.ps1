@@ -81,6 +81,10 @@ $confirm=Wait-For 'receipt pairing confirmation' {[PaperroomHighlightGui]::Owned
 Finish-Revision $confirm 6
 $null=Wait-For 'explicit binding saved' {[PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已保存這份畫布的 Bases 來源配對。'}
 $initial=Receipt-State $db $false
+Click-WorkspaceButton 119
+$null=Wait-For 'note interface visible before opening a receipt attachment' {
+    [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
+}
 Select-Note 'Bases 來源：Shipping.base'
 Native-Menu 113 8 '附件與 PDF 摘錄…'
 Native-Menu 113 2 '管理附件…' -MenuOpen

@@ -41,6 +41,14 @@ fn snapshot_field(tx:&Transaction<'_>, collection:i64, note:i64, key:&str, value
     Ok(())
 }
 
+fn typed_prefix(tx:&Transaction<'_>,note:i64,budget:&mut usize)->Result<String>{
+    let bytes:Vec<u8>=tx.prepare_cached("SELECT substr(CAST(body AS BLOB),1,?2) FROM notes WHERE id=?1 AND trash_root IS NULL")?
+        .query_row(params![note,(obsidian_base::FRONT_LIMIT+4)as i64],|r|r.get(0))?;
+    *budget=budget.checked_sub(bytes.len()).ok_or("型別欄位超過 32 MiB 讀取上限。")?;
+    let size=std::str::from_utf8(&bytes).map_or_else(|e|e.valid_up_to(),|s|s.len());
+    Ok(std::str::from_utf8(&bytes[..size])?.to_owned())
+}
+
 fn text_for_receipt(value:&str) -> String {
     let mut out=String::new();
     for ch in value.chars() {
@@ -73,8 +81,9 @@ impl Notebook {
         let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
         let mut created=Vec::new();
         let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
-        if live && normalized_handoff {return Err("此來源可能曾移除 Markdown 首行，請使用快照模式。".into());}
-        if live {report.push_str("\n已連結的 status 欄位使用工作區目前保存的 Markdown；編輯時只更新該筆記。\n");}
+        if (live || !base.types.is_empty()) && normalized_handoff {return Err("此 Markdown ZIP 來源可能曾移除首行，無法核對連結欄位與型別比較的位置。".into());}
+        if !base.types.is_empty(){report.push_str("\n布林與數值比較篩選會在匯入時決定成員；缺少與 null 皆不符合比較。\n");}
+        if live {report.push_str("\n已連結的來源欄位使用工作區目前保存的 Markdown；編輯時只更新該筆記。\n");}
         let mut remaining_front_bytes=32*1024*1024usize;
         if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.") && !base.formulas.contains_key(key)) {
             return Err("只支援檔案與筆記頁首欄位的顯示名稱。".into());
@@ -85,6 +94,17 @@ impl Notebook {
             let cols=columns(&base,view)?;
             for (key, col) in &cols {
                 tx.execute("INSERT INTO obsidian_base_file_columns(collection_id,key) VALUES(?1,?2)",params![collection,key])?;
+                if live {
+                    let binding=match col{
+                        Column::Front(source)=>base.types.get(source).map(|kind|(source.as_str(),*kind,None)),
+                        Column::Formula(expr)=>expr.typed().map(|t|(t.key.as_str(),t.kind,Some(t))),
+                        _=>None
+                    };
+                    if let Some((source,kind,predicate))=binding{
+                        tx.execute("INSERT INTO obsidian_base_typed_columns(collection_id,key,import_root,source_key,kind,op,operand) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                            params![collection,key,root,source,kind,predicate.map(|p|&p.op),predicate.map(|p|&p.operand)])?;
+                    }
+                }
                 let predicate=match col {
                     Column::Front(key) if key=="status"=>Some(None),
                     Column::Formula(expr)=>expr.status_literal().map(Some),
@@ -102,12 +122,21 @@ impl Notebook {
                 while let Some(row)=rows.next()? {
                     let path=row.get_ref(1)?.as_str()?;
                     if !view.matches_path(path) { continue; }
+                    if !view.typed_filters.is_empty(){
+                        let id:i64=row.get(0)?;
+                        let prefix=typed_prefix(&tx,id,&mut remaining_front_bytes)?;
+                        let mut include=true;
+                        for test in &view.typed_filters{
+                            if !super::obsidian_base_typed::filter(&prefix,test).map_err(|e|format!("「{path}」：{e}"))?{include=false;break}
+                        }
+                        if !include{continue;}
+                    }
                     if members.len()>=MAX_ITEMS as usize { return Err("檢視超過 1,000 篇筆記。".into()); }
                     members.push((row.get::<_,i64>(0)?,path.to_owned()));
                 }
             }
             let selected: std::collections::BTreeSet<_> = cols.iter().filter_map(|(_,col)| match col {
-                Column::Front(key) if !live || key != "status" => Some(key.as_str()),
+                Column::Front(key) if !base.types.contains_key(key) && (!live || key != "status") => Some(key.as_str()),
                 Column::Formula(expr) if !live && expr.status_literal().is_some() => Some("status"),
                 _ => None,
             }).collect();
@@ -128,7 +157,20 @@ impl Notebook {
                 }else{Default::default()};
                 let (folder,file)=path.rsplit_once('/').unwrap_or(("",path));
                 tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'已匯入')",params![collection,note])?;
+                let typed_source=if !live && cols.iter().any(|(_,c)|match c{Column::Front(k)=>base.types.contains_key(k),Column::Formula(e)=>e.typed().is_some(),_=>false}){
+                    Some(typed_prefix(&tx,*note,&mut remaining_front_bytes)?)
+                }else{None};
                 for (label,col) in &cols {
+                    let ty=match col{
+                        Column::Front(k)=>base.types.get(k).map(|kind|(k.as_str(),*kind,None)),
+                        Column::Formula(e)=>e.typed().map(|t|(t.key.as_str(),t.kind,Some(t))),
+                        _=>None
+                    };
+                    if let Some((source,kind,test))=ty{
+                        let value=if let Some(prefix)=&typed_source{super::obsidian_base_typed::snapshot(prefix,source,kind,test).map_err(|e|format!("「{path}」：{e}"))?}else{String::new()};
+                        snapshot_field(&tx,collection,*note,label,&value)?;
+                        continue;
+                    }
                     let value=match col {
                         // These rows fix the membership of the binding. The current value is read from the note.
                         Column::Front(key) if live && key == "status" => "",
@@ -147,6 +189,14 @@ impl Notebook {
             let list=view.layout==Layout::List;
             tx.execute("INSERT INTO collection_views(collection_id,name,layout,status,keyword,list_mode)
                 VALUES(?1,?2,'table','','',?3)",params![collection,&view.name,list])?;
+            if let Some(group)=&view.group {
+                let source=group.strip_prefix("note.").ok_or("無效的群組來源。")?;
+                let kind=base.types.get(source).ok_or("無法核對群組欄位型別。")?;
+                let label=base.display_names.get(group).map_or(source,String::as_str);
+                let view_id=tx.last_insert_rowid();
+                tx.execute("UPDATE collection_views SET group_key=?2 WHERE id=?1",params![view_id,label])?;
+                tx.execute("INSERT INTO obsidian_base_typed_groups(view_id,label,kind) VALUES(?1,?2,?3)",params![view_id,label,kind])?;
+            }
             let labels:Vec<_>=cols.iter().map(|(key,_)|key).collect();
             tx.execute("INSERT INTO collection_display_columns(collection_id,columns_json) VALUES(?1,?2)",
                 params![collection,serde_json::to_string(&labels)?])?;
@@ -167,6 +217,125 @@ mod tests {
     use crate::archive::ImportedPage;
     fn page(dir:&str)->ImportedPage {
         ImportedPage{parts:vec![dir.into(),"鏡頭.md".into()],title:"編輯後標題".into(),body:"內容".into()}
+    }
+    #[test]
+    fn typed_group_uses_numeric_order_and_recomputes_after_save_and_backup() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let mut pages=Vec::new();
+        for (folder,value) in [("A","10"),("B","2.0"),("C","2.00"),("D","-1"),("E","null"),("F","")]{
+            let mut p=page(folder);p.body=if value.is_empty(){"沒有頁首".into()}else{format!("---\ncost: {value}\n---\n保留")};pages.push(p);
+        }
+        let root=db.import_vault("分組",pages)?;
+        let raw=r#"formulas: {over: 'note.cost > 2'}
+properties: {cost: {displayName: 成本}}
+views: [{type: table, name: 費用, order: [cost,formula.over], groupBy: {property: note.cost, direction: ASC}}]"#;
+        let (_,views)=db.import_obsidian_base_mode(root,"group.base",raw.as_bytes().to_vec(),true)?;
+        let col=views[0].0;
+        let layout=|db:&Notebook|->Result<Vec<(String,usize)>>{
+            let view=db.collection_views(col)?.into_iter().find(|v|v.name=="費用").unwrap();
+            let (lanes,values)=db.collection_lanes_and_display(col,&view)?;
+            assert_eq!(values.unwrap().len(),2);
+            Ok(lanes.into_iter().map(|(group,rows)|(group.0.unwrap(),rows.len())).collect())
+        };
+        let want=|items:&[(&str,usize)]|items.iter().map(|(s,n)|(s.to_string(),*n)).collect::<Vec<_>>();
+        assert_eq!(layout(&db)?,want(&[("-1",1),("2",2),("10",1),("（缺少）",1),("null",1)]));
+        let id=db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path LIKE 'A/%'",[root],|r|r.get(0))?;
+        let (ver,_)=db.typed_base_current(col,"成本",id)?;
+        db.edit_typed_base(col,"成本",id,ver,"2")?;
+        let expected=want(&[("-1",1),("2",3),("（缺少）",1),("null",1)]);
+        assert_eq!(layout(&db)?,expected);
+        let view=db.collection_views(col)?.remove(0);
+        let two=super::super::collection_group_folds::GroupValue(Some("2".into()));
+        let axes=db.collection_group_folds(&view)?.unwrap();
+        db.set_collection_group_fold(col,&view,&axes,Some((&two,true)))?;
+        db.compare_set_property_type("成本",None,Some(super::super::typed_properties::PropertyType::Date))?;
+        assert!(db.collection_group_folds(&view)?.unwrap().contains(&two));
+        let duplicate_id=db.duplicate_collection_view(col,&view,"分組副本")?;
+        let duplicate=db.collection_views(col)?.into_iter().find(|v|v.id==duplicate_id).unwrap();
+        assert_eq!(db.presented_collection_lanes(col,Some(&duplicate))?.into_iter().map(|(g,r)|(g.0.unwrap(),r.len())).collect::<Vec<_>>(),expected);
+        assert!(!db.collection_group_folds(&duplicate)?.unwrap().contains(&two));
+        let destination=db.create_collection("無對應來源")?;
+        assert!(db.copy_collection_view_to(col,&view,destination,"不可複製").is_err());
+        assert!(db.collection_views(destination)?.is_empty());
+        let dir=std::env::temp_dir().join(format!("paperroom-bases-groups-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir(&dir)?;
+        let file=dir.join("backup.sqlite");db.backup(&file)?;
+        let reopened=Notebook::open(&file,false)?;
+        assert_eq!(layout(&reopened)?,expected);
+        assert!(reopened.collection_group_folds(&view)?.unwrap().contains(&two));
+        assert_eq!(reopened.presented_collection_lanes(col,Some(&duplicate))?.into_iter().map(|(g,r)|(g.0.unwrap(),r.len())).collect::<Vec<_>>(),expected);
+        assert_eq!(reopened.typed_base_current(col,"成本",id)?.1,"2");
+        drop(reopened);std::fs::remove_dir_all(dir)?;
+        assert!(db.import_obsidian_base_mode(root,"bad.base",raw.replace("direction: ASC","direction: DESC").into_bytes(),true).is_err());
+        for invalid in ["note.true == false","note.null == 0","note.0 >= 1"]{
+            assert!(db.import_obsidian_base_mode(root,"invalid.base",raw.replace("note.cost > 2",invalid).into_bytes(),true).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn typed_booleans_and_exact_decimals_share_aliases_with_null_missing_and_named_filters() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let mut pages=Vec::new();
+        for (folder,body) in [("A","\u{feff}---\r\napproved: false # 保留註解\r\ncost: 0  # 價格\r\n---\r\n後文🙂"),("B","---\napproved: # 未決\ncost: null\n---\nB"),("C","原始正文"),("D","---\napproved: true\ncost: 2.500001\n---\nD")] {
+            let mut p=page(folder);p.body=body.into();pages.push(p);
+        }
+        let root=db.import_vault("專案",pages)?;
+        let mut other=page("A");other.body="---\napproved: false\ncost: 100\n---".into();
+        db.import_vault("另庫",vec![other])?;
+        let raw=r#"properties: {approved: {displayName: 已核准}, cost: {displayName: 價格}}
+formulas: {yes: 'note.approved == true', over: 'note.cost >= 2.5'}
+views:
+  - {type: table, name: 全部, order: [approved, cost, formula.yes, formula.over]}
+  - {type: list, name: 初始篩選, filters: 'note.cost >= 2.5', order: [cost]}
+"#;
+        let (_,views)=db.import_obsidian_base_mode(root,"A.base",raw.as_bytes().to_vec(),true)?;
+        let (col,filtered)=(views[0].0,views[1].0);
+        assert_eq!((views[0].2,views[1].2),(4,1));
+        let (_,bviews)=db.import_obsidian_base_mode(root,"B.base",raw.replace("價格","成本").into_bytes(),true)?;
+        let (_,snap)=db.import_obsidian_base_mode(root,"S.base",raw.as_bytes().to_vec(),false)?;
+        let ids:Vec<i64>=db.connection.prepare("SELECT note_id FROM vault_paths WHERE import_root=?1 ORDER BY relative_path")?
+            .query_map([root],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let (a,b,c,d)=(ids[0],ids[1],ids[2],ids[3]);
+        for (id,approved,cost,yes,over) in [(a,"false","0","false","false"),(b,"null","null","null","null"),(c,"（缺少）","（缺少）","（缺少）","（缺少）"),(d,"true","2.500001","true","true")] {
+            for (label,want) in [("已核准",approved),("價格",cost),("yes",yes),("over",over)] {
+                assert_eq!(&db.collection_display_values(col,label)?[&id],want);
+            }
+        }
+        db.set_property(a,"價格",Some("原生值"))?;
+        let first=db.note(a)?.unwrap();
+        let start=first.body.find("後文").unwrap();
+        db.connection.execute("INSERT INTO note_highlights(note_id,start_byte,end_byte) VALUES(?1,?2,?3)",params![a,start as i64,first.body.len() as i64])?;
+        db.edit_typed_base(col,"價格",a,first.version,"2.499999")?;
+        assert!(db.edit_typed_base(col,"價格",a,first.version,"7").is_err());
+        let current=db.note(a)?.unwrap();
+        assert_eq!(current.body,first.body.replace("cost: 0","cost: 2.499999"));
+        let marks=db.note_highlights(a,&current.body)?;
+        assert_eq!(&current.body[marks[0].clone()],"後文🙂");
+        assert_eq!(db.note_revision(a,db.note_revisions(a)?[0].id)?.1,first.body);
+        assert_eq!(&db.collection_display_values(bviews[0].0,"成本")?[&a],"2.499999");
+        assert_eq!(&db.collection_display_values(bviews[0].0,"over")?[&a],"false");
+        db.edit_typed_base(bviews[0].0,"成本",a,current.version,"2.500000")?;
+        assert_eq!(&db.collection_display_values(col,"over")?[&a],"true");
+        assert!(!db.collection_display_values(filtered,"價格")?.contains_key(&a));
+        assert_eq!(&db.collection_display_values(snap[0].0,"價格")?[&a],"0");
+        assert_eq!(db.properties(a)?,vec![("價格".into(),"原生值".into())]);
+        for (id,key,val) in [(b,"已核准","false"),(b,"價格","0"),(c,"已核准","true"),(c,"價格","-2.125"),(c,"已核准","null")] {
+            let (v,_)=db.typed_base_current(col,key,id)?;db.edit_typed_base(col,key,id,v,val)?;
+            assert_eq!(&db.collection_display_values(col,key)?[&id],val);
+        }
+        assert_eq!(db.note(c)?.unwrap().body,"---\ncost: -2.125\napproved: null\n---\n原始正文");
+        let (v,_)=db.typed_base_current(col,"價格",a)?;
+        for invalid in ["1e2","1.2345678","1000000000000000","true","NaN","01",""] {
+            assert!(db.edit_typed_base(col,"價格",a,v,invalid).is_err());
+        }
+        assert_eq!(db.note(a)?.unwrap().version,v);
+        let malformed="---\ncost: \"2.5\"\napproved: [false]\n---";
+        db.save(a,v,"仍是同一篇",malformed)?;
+        assert_eq!(&db.collection_display_values(col,"over")?[&a],"（型別或格式不符）");
+        assert!(!db.typed_base_rows(col,"價格")?.contains_key(&a));
+        assert_eq!(&db.collection_display_values(col,"價格")?[&b],"0");
+        assert!(db.import_obsidian_base_mode(root,"conflict.base",raw.replace("note.cost >= 2.5","note.approved >= 2.5").into_bytes(),true).is_err());
+        Ok(())
     }
     #[test]
     fn bad_live_status_is_local_to_its_row_and_recovers_after_normal_edit() -> Result<()> {

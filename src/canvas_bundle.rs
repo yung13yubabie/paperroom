@@ -91,6 +91,33 @@ fn portable(path: &str) -> bool {
     })
 }
 
+pub(crate) fn companion_image_paths(doc:&canvas::Document) -> impl Iterator<Item=&str> {
+    doc.json()["nodes"].as_array().into_iter().flatten().filter_map(|node| match node["type"].as_str() {
+        Some("file") => node["file"].as_str(),
+        Some("group") => node["background"].as_str(),
+        _ => None,
+    }).filter(|path| portable(path) && path.rsplit_once('.').is_some_and(|(_,ext)|
+        ["png","jpg","jpeg"].iter().any(|kind| ext.eq_ignore_ascii_case(kind))))
+}
+
+pub(super) fn attach_companion_images(db:&rusqlite::Connection,id:i64,member:&str,doc:&canvas::Document,images:&BTreeMap<String,Vec<u8>>) -> Result<(usize,usize)> {
+    let paths = companion_image_paths(doc).collect::<BTreeSet<_>>();
+    if paths.is_empty() { return Ok((0,0)); }
+    let filename = member.rsplit('/').next().ok_or("找不到畫布檔名。")?;
+    let kept = paths.iter().filter(|path| !path.split('/').next().is_some_and(|part|part.to_lowercase()==filename.to_lowercase()))
+        .filter_map(|path|images.get(*path).map(|bytes|(*path,bytes))).collect::<BTreeMap<_,_>>();
+    let needed = kept.values().map(|bytes| bytes.len() as i64).sum::<i64>();
+    let used = db.query_row("SELECT coalesce(sum(length(bytes)),0) FROM canvas_bundle_assets",[],|row|row.get::<_,i64>(0))?;
+    if needed > TOTAL_ASSETS.saturating_sub(used) {return Err("已達工作區 Canvas 附件儲存上限。".into());}
+    // The handoff uses ZIP-root references. Publish the drawing at that root
+    // so the standard bundle resolver has no parent-folder search alternatives.
+    db.execute("INSERT INTO canvas_bundles(canvas_id,canvas_path,inventory) VALUES(?1,?2,?3)",
+        params![id,filename,serde_json::to_string(&kept.keys().collect::<Vec<_>>())?])?;
+    let mut insert = db.prepare_cached("INSERT INTO canvas_bundle_assets(canvas_id,path,bytes) VALUES(?1,?2,?3)")?;
+    for (path,bytes) in &kept { insert.execute(params![id,path,bytes])?; }
+    Ok((kept.len(),paths.len()-kept.len()))
+}
+
 fn canvas_name(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("canvas"))
 }
@@ -327,7 +354,13 @@ impl Notebook {
         let Some((path, raw, inventory)) = self.canvas_bundle_source(id)? else { return Ok(None) };
         let names = self.canvas_bundle_paths(id)?;
         let inventory: BTreeSet<String> = serde_json::from_str(&inventory)?;
-        let mut report = report(&canvas::parse_bundle(raw)?, &path, &inventory);
+        let doc = canvas::parse_bundle(raw)?;
+        let mut report = report(&doc, &path, &inventory);
+        if self.is_companion_canvas(id)? {
+            // Markdown nodes in a companion have their own source-note bindings.
+            report.references.retain(|path,_| path.rsplit_once('.').is_some_and(|(_,ext)|
+                ["png","jpg","jpeg"].iter().any(|kind| ext.eq_ignore_ascii_case(kind))));
+        }
         for state in report.references.values_mut() {
             if matches!(state, CanvasAssetState::Stored(name) if !names.contains(name)) {
                 *state = CanvasAssetState::Missing;

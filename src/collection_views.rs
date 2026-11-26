@@ -1075,6 +1075,9 @@ impl Notebook {
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)", [destination], |row| row.get(0),
         )?;
         if !exists { return Err("找不到目標集合。".into()); }
+        let base_group:Option<(String,String)>=tx.query_row("SELECT label,kind FROM obsidian_base_typed_groups WHERE view_id=?1",
+            [source.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if base_group.is_some() && destination!=origin {return Err("Bases 型別分組使用這個集合的來源欄位，只能在同一集合複製。".into());}
         if destination != origin {
             for rule in source.sort_rules() {
                 if matches!(rule.source, SortSource::Formula(_)) {
@@ -1096,6 +1099,9 @@ impl Notebook {
         )?;
         if changed != 1 { return Err("每個集合最多可儲存 64 個檢視。".into()); }
         let id = tx.last_insert_rowid();
+        if let Some((label,kind))=base_group{
+            tx.execute("INSERT INTO obsidian_base_typed_groups(view_id,label,kind) VALUES(?1,?2,?3)",params![id,label,kind])?;
+        }
         tx.commit()?;
         Ok(id)
     }
@@ -1334,6 +1340,19 @@ impl Notebook {
     ) -> Result<Vec<(GroupValue,Vec<Row>)>> {
         let rows = self.filtered_collection_rows(collection, view)?;
         let group_key = view.and_then(|view| view.presentation.group_key.as_deref());
+        if let (Some(key),Some(view))=(group_key,view){
+            let kind:Option<String>=self.connection.query_row("SELECT kind FROM obsidian_base_typed_groups WHERE view_id=?1 AND label=?2",
+                params![view.id,key],|r|r.get(0)).optional()?;
+            if let Some(kind)=kind{
+                let values=self.collection_display_values(collection,key)?;
+                let mut lanes=BTreeMap::<(u8,i128),(GroupValue,Vec<Row>)>::new();
+                for (row,_) in rows{
+                    let (order,caption)=super::obsidian_base_typed::group(values.get(&row.id),&kind);
+                    lanes.entry(order).or_insert_with(||(GroupValue(Some(caption)),Vec::new())).1.push(row);
+                }
+                return Ok(lanes.into_values().collect())
+            }
+        }
         let group = group_key.map(|key| self.collection_values(collection,key)).transpose()?;
         if group.is_none() && view.is_some_and(|view| view.layout == CollectionLayout::Table && view.rules.as_ref()
             .is_some_and(|rules| !rules.sorts.is_empty()))

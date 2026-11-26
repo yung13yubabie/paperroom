@@ -107,7 +107,7 @@ impl Notebook {
                         ON CONFLICT(key) DO UPDATE SET kind=excluded.kind",params![key,kind.code()])?;
         } else { tx.execute("DELETE FROM property_definitions WHERE key=?1",[key])?; }
         if next != expected {
-            tx.execute("DELETE FROM collection_group_folds WHERE grouping_key=?1 AND grouping_kind<>'status'", [key])?;
+            tx.execute("DELETE FROM collection_group_folds WHERE grouping_key=?1 AND grouping_kind IN ('text','number','checkbox','date')", [key])?;
         }
         tx.commit()?;
         Ok(())

@@ -165,20 +165,18 @@ impl App {
             let month = view.presentation.calendar_month.unwrap_or_else(current_month);
             Some((month,self.notebook.calendar_collection_rows(id,view,month)?))
         } else { None };
-        let lanes = if timeline.is_some() || week.is_some() || calendar.is_some() {
-            Vec::new()
-        } else { self.notebook.presented_collection_lanes(id, saved_view.as_ref())? };
+        let (lanes,display)=if timeline.is_some() || week.is_some() || calendar.is_some() {
+            (Vec::new(),None)
+        } else if let Some(view)=saved_view.as_ref().filter(|v|v.layout==CollectionLayout::Table){
+            self.notebook.collection_lanes_and_display(id,view)?
+        } else {(self.notebook.presented_collection_lanes(id,saved_view.as_ref())?,None)};
         let (column,row) = match &self.extras.workspace {
             Some(WorkspaceView::Kanban(old)) if old.id == id && old.saved_view == saved_view => (old.column,old.row),
             _ => (0,0),
         };
         let column = column.min(lanes.len().saturating_sub(1));
-        let display_columns = if saved_view.as_ref().is_some_and(|view| view.layout == CollectionLayout::Table)
-            && timeline.is_none() && week.is_none() && calendar.is_none()
-        {
-            self.notebook.collection_display_snapshot(id)?.map(|columns|columns.into_iter()
-                .map(|(key,values)|DisplayProperty{key,values}).collect())
-        } else { None };
+        let display_columns=display.map(|columns|columns.into_iter()
+            .map(|(key,values)|DisplayProperty{key,values}).collect());
         let checkbox = if display_columns.is_none() && let Some(filter) = saved_view.as_ref()
             .filter(|view| view.layout == CollectionLayout::Table && view.presentation.group_key.is_none()
                 && !view.presentation.list_mode && view.presentation.calendar_key.is_none())

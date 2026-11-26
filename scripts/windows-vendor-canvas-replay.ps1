@@ -15,6 +15,10 @@ $process=Start-Notebook $crossHome
 $window=$process.MainWindowHandle
 Native-Menu 109 12 '開啟已匯入的 Canvas…'
 Native-Menu 109 1 'Canvas-saved' -MenuOpen
+$null=Wait-For 'the exact vendor Canvas finished opening' {
+    [PaperroomHighlightGui]::Read((Control $window 120)) -ceq 'Canvas 操作' -and
+    [PaperroomHighlightGui]::Read((Control $window 115)) -ceq 'Canvas-saved'
+}
 $out=Join-Path $root 'obsi-roundtrip.canvas'
 Native-Menu 120 1 '匯出原始 JSON Canvas…'
 Native-File 1 '匯出原始 JSON Canvas…' $out '已匯出原始 JSON Canvas。' -AlreadyOpened -CanvasSave

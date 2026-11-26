@@ -152,7 +152,9 @@ mod obsidian_base_typed;
 mod obsidian_base_dynamic;
 #[path="canvas_base_cards.rs"]
 pub(crate) mod canvas_base_cards;
-const SCHEMA_VERSION: i32 = 42;
+#[path = "relation_fields.rs"]
+pub(crate) mod relation_fields;
+const SCHEMA_VERSION: i32 = 43;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -443,6 +445,7 @@ impl Notebook {
             tx.execute_batch(canvas_base_cards::SCHEMA)?;
         }
         if version < 42 {tx.execute_batch(obsidian_base_import::scope::SCHEMA)?;}
+        if version < 43 { tx.execute_batch(relation_fields::SCHEMA)?; }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -875,7 +878,9 @@ mod tests {
 
     pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "DROP TABLE IF EXISTS canvas_base_paths;
+            "DROP TABLE IF EXISTS relation_field_values;
+             DROP TABLE IF EXISTS relation_fields;
+             DROP TABLE IF EXISTS canvas_base_paths;
              DROP TABLE IF EXISTS base_card_views;
              DROP TABLE IF EXISTS base_card_receipts;
              DROP TABLE IF EXISTS obsidian_base_file_values;

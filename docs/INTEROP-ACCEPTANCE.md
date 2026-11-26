@@ -22,4 +22,4 @@
 | 發佈說明的相容性聲明 | 有原廠匯出和相符驗收的流程才可標成原廠往返。Notion 原廠 ZIP 和 Heptabase 原廠 All-Data 尚缺經授權的樣本，會阻擋這兩項相容性聲明。 |
 | 發行範圍與權限 | 正式發行另需核對候選、授權和版本範圍後才執行。草稿套件供驗證。 |
 
-本輪整合的固定來源、下載 SHA-256 與驗收工作連結以[草稿 PR #26](https://github.com/yung13yubabie/paperroom/pull/26) 最終描述為準。
+本輪整合的固定來源、下載 SHA-256 與驗收工作連結以[草稿 PR #27](https://github.com/yung13yubabie/paperroom/pull/27) 最終描述為準。

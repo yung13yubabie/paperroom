@@ -198,10 +198,18 @@ impl Notebook {
     pub(crate) fn move_cards_between_boards(
         &self, source: i64, destination: i64, expected: &[BoardPosition], dx: i32, dy: i32,
     ) -> Result<usize> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Self::move_cards_on(&tx,source,destination,expected,dx,dy)?;
+        tx.commit()?;
+        Ok(expected.len())
+    }
+
+    pub(super) fn move_cards_on(
+        tx:&Transaction<'_>, source:i64, destination:i64, expected:&[BoardPosition], dx:i32, dy:i32,
+    )->Result<()> {
         if source == destination || expected.is_empty() || expected.len() as i64 > MAX_CARDS {
             return Err("請選取卡片與另一張目的白板。".into());
         }
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let (exists, capacity): (bool, i64) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM boards WHERE id=?1),
                     (SELECT count(*) FROM board_cards WHERE board_id=?1)",
@@ -273,7 +281,7 @@ impl Notebook {
                 }
             }
         }
-        let groups = transferable_groups(&tx, source, destination, &selected)?;
+        let groups = transferable_groups(tx, source, destination, &selected)?;
         for (note, x, y) in moved {
             tx.execute("INSERT INTO board_cards(board_id,note_id,x,y,image_width,image_height)
                 SELECT ?1,note_id,?3,?4,image_width,image_height FROM board_cards
@@ -285,7 +293,7 @@ impl Notebook {
                 params![destination, from, to])?;
         }
         for (group, members) in groups {
-            move_whole_board_group(&tx, source, destination, group, &members)?;
+            move_whole_board_group(tx, source, destination, group, &members)?;
         }
         for note in selected {
             if tx.execute("DELETE FROM board_cards WHERE board_id=?1 AND note_id=?2",
@@ -294,8 +302,7 @@ impl Notebook {
                 return Err("來源位置已變更，未搬移任何卡片。".into());
             }
         }
-        tx.commit()?;
-        Ok(expected.len())
+        Ok(())
     }
 
     /// Persist the move only if this placement is still where the gesture began.

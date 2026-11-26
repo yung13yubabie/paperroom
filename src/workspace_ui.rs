@@ -684,6 +684,7 @@ impl App {
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
                 (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
                 (24, "表格與清單欄位…"), (25, "群組收合…"),
+                (26, "資料列附件…"), (27, "編輯資料列的關聯欄位…"),
             ]);
             match action {
                 1 => {
@@ -696,6 +697,15 @@ impl App {
                 23 => return self.collection_rule_menu(id),
                 24 => return self.collection_display_menu(id, title),
                 25 => return self.collection_fold_menu(id, title),
+                26 => return self.collection_attachment_ui(id),
+                27 => {
+                    let rows = self.visible_collection_rows(id)?;
+                    let Some(index) = navigation_ui::choose_navigation_page(hwnd, anchor, rows.len(), |i| {
+                        let (row, status) = &rows[i];
+                        format!("{status}　{}　[#{}]", row.title, row.id)
+                    }) else { return Ok(()); };
+                    return self.edit_relation_fields(rows[index].0.id);
+                }
                 2 | 3 | 6 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = choose(hwnd, anchor, &rows, |(row, status)| {
@@ -715,7 +725,17 @@ impl App {
                             self.open_import(note, "已開啟集合資料列");
                             return Ok(());
                         }
-                        _ => self.notebook.remove_from_collection(id, row.id, old_status)?,
+                        _ => {
+                            let edges = self.notebook.member_field_edges(id, row.id)?;
+                            if !edges.is_empty() && message(hwnd, "從集合移除資料列",
+                                &format!("移除「{}」[#{}] 也會移除 {} 條只屬於此集合成員的關聯。筆記與附件仍會保留。",
+                                         row.title, row.id, edges.len()),
+                                MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES
+                            {
+                                return Ok(());
+                            }
+                            self.notebook.remove_collection_member(id, row.id, old_status, Some(&edges))?;
+                        }
                     }
                 }
                 4 => {
@@ -772,6 +792,43 @@ impl App {
                 _ => return Ok(()),
             }
             self.open_kanban(id, title)
+        }
+    }
+
+    unsafe fn collection_attachment_ui(&mut self, collection: i64) -> Result<()> {
+        unsafe {
+            let hwnd = self.hwnd;
+            let anchor = self.widgets.links;
+            let files = self.notebook.collection_attachments(collection)?;
+            let rows = self.visible_collection_rows(collection)?.into_iter()
+                .filter(|(row, _)| files.contains_key(&row.id)).collect::<Vec<_>>();
+            if rows.is_empty() {
+                label(self.widgets.status, "目前檢視的資料列沒有附件。");
+                return Ok(());
+            }
+            let Some(row_index) = navigation_ui::choose_navigation_page(hwnd, anchor, rows.len(), |i| {
+                let (row, status) = &rows[i];
+                format!("{status}　{}　[#{}]　{} 個附件", row.title, row.id, files[&row.id].files.len())
+            }) else { return Ok(()); };
+            let row = &rows[row_index].0;
+            let selection = &files[&row.id];
+            let attachments = &selection.files;
+            let Some(file_index) = choose(hwnd, anchor, attachments, |file| {
+                format!("{}　[#{}]　{} B", file.name, file.id, file.size)
+            }) else { return Ok(()); };
+            let file = &attachments[file_index];
+            let expected = self.notebook.collection_attachment_bytes(collection, row.id, &selection.owner_token, file)?;
+            let command = [(1, "儲存此資料列的附件副本…")];
+            if popup(hwnd, anchor, None, &command) == 1
+                && let Some(path) = file_dialog(hwnd, "所有檔案\0*.*\0\0", "", Some(&file.name))?
+            {
+                if !self.visible_collection_rows(collection)?.iter().any(|(current, _)| current.id == row.id) {
+                    return Err("資料列已不在目前檢視，請重新選取。".into());
+                }
+                self.notebook.save_collection_attachment(collection, row.id, &selection.owner_token, file, &expected, &path)?;
+                label(self.widgets.status, &format!("已儲存資料列 #{} 的附件副本。", row.id));
+            }
+            Ok(())
         }
     }
 

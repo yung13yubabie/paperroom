@@ -17,7 +17,8 @@ if ((Get-FileHash $canvasFile).Hash -ine $canvasSha) { throw 'Original Obsidian 
 @'
 from pathlib import Path
 import sys
-root,other=map(Path,sys.argv[1:])
+root,other=map(Path,sys.argv[1:3])
+conflict=sys.argv[3]=="True"
 def write(path,body):
     path.parent.mkdir(exist_ok=True,parents=True)
     path.write_bytes(body.encode("utf-8"))
@@ -29,6 +30,10 @@ for p,a,n in [
     ("Witness.md","false","4")]:
     write(root/p,f"---\napproved: {a}\ncost: {n}\n---\nStable source {p}.")
 write(other/"Active/Tie-1.md","---\napproved: true\ncost: 0\n---\nOther imported Vault.")
+if conflict:
+    write(root/"Archive/Flip.md","---\napproved: false\ncost: 7\n---\nScope A decoy.")
+    write(root/"Moved/Keep.md","---\napproved: false\ncost: 8\n---\nKeep the destination folder visible.")
+    write(other/"Active/Flip.md","---\napproved: false\ncost: 6\n---\nScope B decoy.")
 base="""formulas:
   checked: 'note.approved == true'
   rank: 'note.cost >= 0'
@@ -44,8 +49,10 @@ views:
     order: [file.path, note.approved, note.cost, formula.checked]
     sort: [{property: note.cost, direction: ASC}]
 """
+if conflict:
+    base=base.replace("    name: Pin_A_601", "    name: Pin_A_601\n    limit: 2")
 write(root/"Shipping.base",base)
-'@ | python - $sourceVault $rivalVault
+'@ | python - $sourceVault $rivalVault $VaultRelocationConflictOnly.IsPresent
 if ($LASTEXITCODE -ne 0) { throw 'Could not create separate official-Canvas and editable-Base fixtures.' }
 $baseSha=(Get-FileHash -LiteralPath $baseFile).Hash
 
@@ -164,8 +171,13 @@ with sqlite3.connect(Path(database).as_uri()+"?mode=ro",uri=True) as c:
 
 $process=Start-Notebook $app
 $window=$process.MainWindowHandle
-Native-VaultFolder $rivalVault '匯入 1 篇筆記'
-Native-VaultFolder $sourceVault '匯入 5 篇筆記'
+if ($VaultRelocationConflictOnly) {
+    Native-VaultFolder $rivalVault '匯入 2 篇筆記'
+    Native-VaultFolder $sourceVault '匯入 7 篇筆記'
+} else {
+    Native-VaultFolder $rivalVault '匯入 1 篇筆記'
+    Native-VaultFolder $sourceVault '匯入 5 篇筆記'
+}
 Select-Note 'Witness'
 Native-MenuFromKeyboard 109 41 '匯入隨 Vault 來源變動的 Bases…'
 $confirm=Native-File 41 '匯入隨 Vault 來源變動的 Bases…' $baseFile '' -AlreadyOpened -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
@@ -187,6 +199,10 @@ $bind=Wait-For 'scope Base pairing' {
 Finish-Revision $bind 6
 $null=Wait-For 'explicit scope binding available' {
     [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已保存這份畫布的 Bases 來源配對。'
+}
+if ($VaultRelocationConflictOnly) {
+    . (Join-Path $PSScriptRoot 'windows-vault-move-conflict.ps1')
+    return
 }
 $id=Check-ScopedWorkspace $db 'Archive/Move.md' 0 0
 Confirm-CanvasPinRows 'Pin_A_601' @('Tie-1','Tie-3')

@@ -190,4 +190,116 @@ views:
         }
         fs::remove_dir_all(dir)?;Ok(())
     }
+    #[test]
+    fn pinned_edit_blocks_uncoordinated_move_and_survives_explicit_writeback() -> Result<()> {
+        let dir = super::super::super::tests::data_dir();
+        let source = dir.join("Source");
+        let other = dir.join("Other");
+        let old = "Active/Flip.md";
+        let next = "Moved/Flip.md";
+        let decoy_path = "Archive/Flip.md";
+        fs::create_dir_all(source.join("Active"))?;
+        fs::create_dir_all(source.join("Moved"))?;
+        fs::create_dir_all(source.join("Archive"))?;
+        fs::create_dir_all(other.join("Active"))?;
+        let authored = "---\napproved: false\ncost: 1\n---\nCanonical source.";
+        let decoy = "---\napproved: false\ncost: 5\n---\nDifferent note in the original Vault.";
+        let foreign = "---\napproved: false\ncost: 7\n---\nSame path in another Vault.";
+        fs::write(source.join(old), authored)?;
+        fs::write(source.join(decoy_path), decoy)?;
+        fs::write(other.join(old), foreign)?;
+        fs::write(source.join("Active/Tie.md"), "---\napproved: true\ncost: 2\n---\nPreviously first.")?;
+        let workspace = dir.join("original.sqlite");
+        let mut db = Notebook::open(&workspace, false)?;
+        let root = db.import_vault("First", crate::vault::read(&source)?.pages)?;
+        let rival = db.import_vault("Second", crate::vault::read(&other)?.pages)?;
+        let mapped = |db: &Notebook, root, path| db.connection.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
+            params![root, path], |row| row.get::<_, i64>(0),
+        );
+        let note = mapped(&db, root, old)?;
+        let wrong = mapped(&db, root, decoy_path)?;
+        let alien = mapped(&db, rival, old)?;
+        let rank = mapped(&db, root, "Active/Tie.md")?;
+        let base = br#"formulas: {rank: 'note.cost >= 0'}
+views:
+  - type: table
+    name: Accepted
+    limit: 1
+    filters: {and: ['file.inFolder("Active")', 'note.approved == true']}
+    order: [file.path, approved, cost]
+    sort: [{property: note.cost, direction: ASC}]
+  - type: table
+    name: Pending
+    filters: {and: ['file.inFolder("Active")', 'note.approved == false']}
+    order: [file.path, approved, cost]
+    sort: [{property: note.cost, direction: ASC}]
+"#;
+        let (receipt, _) = db.import_vault_scope_base(root, "Shared.base", base.to_vec())?;
+        let raw = r##"{"nodes":[{"id":"accepted","type":"file","file":"Shared.base","subpath":"#Accepted","x":0,"y":0,"width":160,"height":160},{"id":"pending","type":"file","file":"Shared.base","subpath":"#Pending","x":180,"y":0,"width":160,"height":160}],"edges":[]}"##;
+        let doc = crate::canvas::parse(raw.into())?;
+        let board = db.save_canvas("Shared", &doc)?;
+        db.set_canvas_vault(board, Some(root))?;
+        db.bind_base_card(board, &doc, root, "pending", receipt, None)?;
+        let rows = |db: &Notebook, node: &str| -> Result<Vec<i64>> {
+            Ok(db.start_pin_edit(board, &doc, root, node)?.1.into_iter().map(|row| row.id).collect())
+        };
+        assert_eq!(rows(&db, "accepted")?, [rank]);
+        assert_eq!(rows(&db, "pending")?, [note]);
+        let (pin, pending) = db.start_pin_edit(board, &doc, root, "pending")?;
+        let selected = &pending[0];
+        let field = db.pin_fields(&doc, &pin, selected)?.into_iter().find(|f| f.key == "approved").unwrap();
+        db.save_pin_field(&doc, &pin, selected, &field, "true")?;
+        assert_eq!(rows(&db, "accepted")?, [note]);
+        assert!(rows(&db, "pending")?.is_empty());
+        let changed = authored.replace("approved: false", "approved: true");
+        assert_eq!(fs::read_to_string(source.join(old))?, authored);
+
+        // The filesystem operation models the vendor's action; the native
+        // acceptance invokes the actual Obsidian desktop separately.
+        fs::rename(source.join(old), source.join(next))?;
+        let error = db.preview_vault_relocation(note, &source, next).err().unwrap();
+        assert!(error.to_string().contains("未協調變更"), "{error}");
+        assert_eq!(fs::read_to_string(source.join(next))?, authored);
+        assert!(!source.join(old).exists());
+        let copy = dir.join("unreconciled.sqlite");
+        db.backup(&copy)?;
+        drop(db);
+        for file in [&workspace, &copy] {
+            let reopened = Notebook::open(file, false)?;
+            assert_eq!(mapped(&reopened, root, old)?, note);
+            assert_eq!(reopened.note(note)?.unwrap().body, changed);
+            assert_eq!(reopened.note(wrong)?.unwrap().body, decoy);
+            assert_eq!(reopened.note(alien)?.unwrap().body, foreign);
+            assert_eq!(rows(&reopened, "accepted")?, [note]);
+            assert!(rows(&reopened, "pending")?.is_empty());
+        }
+        // Verified writeback uses the Windows local-file publishing API.
+        #[cfg(windows)]
+        {
+            let mut db = Notebook::open(&workspace, false)?;
+            fs::rename(source.join(next), source.join(old))?;
+            let push = db.preview_vault_push(root, &source)?;
+            assert_eq!(push.select("安全")?.len(), 1);
+            db.apply_vault_push(&push, "安全", &dir.join("before-push.sqlite"))?;
+            assert_eq!(fs::read_to_string(source.join(old))?, changed);
+            fs::rename(source.join(old), source.join(next))?;
+            let plan = db.preview_vault_relocation(note, &source, next)?;
+            db.apply_vault_relocation(&plan, &dir.join("before-move.sqlite"))?;
+            assert_eq!(mapped(&db, root, next)?, note);
+            assert!(mapped(&db, root, old).is_err());
+            assert_eq!(db.note(note)?.unwrap().body, changed);
+            assert_eq!(rows(&db, "accepted")?, [rank]);
+            assert!(rows(&db, "pending")?.is_empty());
+            assert_eq!(db.note(wrong)?.unwrap().body, decoy);
+            assert_eq!(db.note(alien)?.unwrap().body, foreign);
+            assert_eq!(fs::read_to_string(source.join(decoy_path))?, decoy);
+            assert_eq!(fs::read_to_string(other.join(old))?, foreign);
+            assert_eq!(db.read_canvas(board)?.as_str(), raw);
+            drop(db);
+        }
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
 }

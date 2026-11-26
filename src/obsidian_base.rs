@@ -22,6 +22,7 @@ pub(crate) struct View {
     pub typed_filters: Vec<Test>,
     pub group: Option<String>,
     pub sorts: Vec<(String,bool)>,
+    pub limit: Option<usize>,
 }
 
 impl View {
@@ -51,7 +52,7 @@ pub(crate) struct Base {
 
 impl Base {
     pub(crate) fn has_dynamic_rules(&self) -> bool {
-        self.views.iter().any(|view| !view.typed_filters.is_empty() || !view.sorts.is_empty())
+        self.views.iter().any(|view| !view.typed_filters.is_empty() || !view.sorts.is_empty() || view.limit.is_some())
     }
 
     pub(crate) fn has_live_status(&self)->bool {
@@ -116,7 +117,7 @@ impl FileFormula {
     }
 }
 
-enum Node { Text(String), Map(BTreeMap<String, Node>), Seq(Vec<Node>) }
+enum Node { Integer(usize), Text(String), Map(BTreeMap<String, Node>), Seq(Vec<Node>) }
 
 impl Node {
     fn map(self) -> R<BTreeMap<String, Node>> {
@@ -133,6 +134,9 @@ impl Node {
 fn node(events: &mut std::iter::Peekable<std::vec::IntoIter<Event>>, depth: usize) -> R<Node> {
     if depth > 12 { return Err("Bases YAML 超過 12 層。".into()); }
     match events.next() {
+        Some(Event::Scalar(s, TScalarStyle::Plain, 0, None))
+            if s.len() <= 4 && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()) && !s.is_empty() =>
+            Ok(Node::Integer(s.parse().map_err(|_| "無效的整數。")?)),
         Some(Event::Scalar(s, style, 0, None)) if !s.is_empty() && s.len() <= 1024
             && !s.chars().any(char::is_control)
             && (style != TScalarStyle::Plain || matches!(Yaml::from_str(&s), Yaml::String(_))) => Ok(Node::Text(s)),
@@ -393,8 +397,13 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
             if !order.contains(&key){return Err("型別群組的來源欄必須出現在 order。".into())}
             Some(key)
         }else{None};
+        let limit = match row.remove("limit") {
+            None => None,
+            Some(Node::Integer(n @ 1..=1000)) if group.is_none() => Some(n),
+            _ => return Err("limit 僅支援未分組檢視及 1 至 1000 的十進位正整數。".into()),
+        };
         supported(row)?;
-        views.push(View {name, layout, order, folders,typed_filters,group,sorts});
+        views.push(View {name, layout, order, folders,typed_filters,group,sorts,limit});
     }
     for key in display_names.keys().chain(views.iter().flat_map(|view|view.order.iter())) {
         if key.starts_with("formula.") && !formulas.contains_key(key) { return Err(format!("找不到公式：{key}")); }

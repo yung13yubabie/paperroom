@@ -27,6 +27,12 @@ pub struct Attachment {
     pub size: i64,
 }
 
+#[cfg(any(windows, test))]
+pub(crate) struct CollectionAttachments {
+    pub owner_token: String,
+    pub files: Vec<Attachment>,
+}
+
 pub struct PdfAnnotation {
     pub id: i64,
     pub page: u32,
@@ -208,6 +214,21 @@ pub(super) fn read_local_attachment_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(content)
 }
 
+fn publish_attachment(path: &Path, content: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let (absolute, parents) = pin_local_parents(path)?;
+        let parent = parents.last().ok_or("找不到目標資料夾。")?;
+        let leaf = absolute.file_name().ok_or("找不到目標檔名。")?;
+        win_attachment_publish::publish(parent, leaf, content)
+    }
+    #[cfg(not(windows))]
+    crate::output::publish_new(path, |file, _| {
+        file.write_all(content)?;
+        Ok(())
+    })
+}
+
 impl Notebook {
     pub fn list_attachments(&self, note: i64) -> Result<Vec<Attachment>> {
         let mut query = self.connection.prepare(
@@ -224,6 +245,51 @@ impl Notebook {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn collection_attachments(&self, collection: i64) -> Result<std::collections::HashMap<i64, CollectionAttachments>> {
+        let mut query = self.connection.prepare(
+            "SELECT a.note_id,i.token,a.id,a.name,a.kind,length(a.content)
+             FROM collection_notes c JOIN notes n ON n.id=c.note_id
+             JOIN note_link_identities i ON i.note_id=n.id JOIN attachments a ON a.note_id=n.id
+             WHERE c.collection_id=?1 AND n.trash_root IS NULL ORDER BY a.id",
+        )?;
+        let mut files = std::collections::HashMap::<i64, CollectionAttachments>::new();
+        let rows = query.query_map([collection], |row| Ok((row.get(0)?, row.get(1)?, Attachment {
+            id: row.get(2)?,
+            name: row.get(3)?,
+            kind: row.get(4)?,
+            size: row.get(5)?,
+        })))?;
+        for entry in rows {
+            let (note, owner_token, file) = entry?;
+            files.entry(note).or_insert_with(|| CollectionAttachments { owner_token, files: Vec::new() })
+                .files.push(file);
+        }
+        Ok(files)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn collection_attachment_bytes(&self, collection: i64, note: i64, owner: &str, file: &Attachment) -> Result<Vec<u8>> {
+        self.connection.query_row(
+            "SELECT a.content FROM collection_notes c JOIN notes n ON n.id=c.note_id
+             JOIN note_link_identities i ON i.note_id=n.id JOIN attachments a ON a.note_id=n.id
+             WHERE c.collection_id=?1 AND n.id=?2 AND i.token=?3 AND n.trash_root IS NULL
+               AND a.id=?4 AND a.name=?5 COLLATE BINARY AND a.kind=?6 AND length(a.content)=?7",
+            params![collection, note, owner, file.id, file.name, file.kind, file.size], |row| row.get(0),
+        ).optional()?.ok_or_else(|| "資料列、筆記或附件已變更，請重新選取。".into())
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn save_collection_attachment(
+        &self, collection: i64, note: i64, owner: &str, file: &Attachment, expected: &[u8], path: &Path,
+    ) -> Result<()> {
+        let actual = self.collection_attachment_bytes(collection, note, owner, file)?;
+        if actual != expected {
+            return Err("附件內容已變更，請重新選取。".into());
+        }
+        publish_attachment(path, &actual)
     }
 
     pub fn import_attachment(&mut self, note: i64, path: &Path) -> Result<i64> {
@@ -277,18 +343,7 @@ impl Notebook {
             [attachment],
             |row| row.get(0),
         ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
-        #[cfg(windows)]
-        {
-            let (absolute, parents) = pin_local_parents(path)?;
-            let parent = parents.last().ok_or("找不到目標資料夾。")?;
-            let leaf = absolute.file_name().ok_or("找不到目標檔名。")?;
-            win_attachment_publish::publish(parent, leaf, &content)
-        }
-        #[cfg(not(windows))]
-        crate::output::publish_new(path, |file, _| {
-            file.write_all(&content)?;
-            Ok(())
-        })
+        publish_attachment(path, &content)
     }
 
     pub fn remove_attachment(&self, attachment: i64) -> Result<()> {
@@ -531,4 +586,44 @@ mod tests {
         fs::remove_dir_all(dir)?;
         Ok(())
     }
+    #[test]
+    fn collection_export_checks_exact_bytes_and_membership_before_creating_a_copy() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("workspace.sqlite3");
+        let mut notebook = Notebook::open(&path, false)?;
+        let writer = Notebook::open(&path, false)?;
+        let collection = notebook.create_collection("Sources")?;
+        let a = notebook.add(None, "同名", "Current")?;
+        let b = notebook.add(None, "同名", "Other")?;
+        notebook.add_to_collection(collection, a, "保留")?;
+        notebook.add_to_collection(collection, b, "保留")?;
+        let source = dir.join("same.txt");
+        fs::write(&source, b"first file")?;
+        notebook.import_attachment(a, &source)?;
+        fs::write(&source, b"other file")?;
+        notebook.import_attachment(b, &source)?;
+        let receipts = notebook.collection_attachments(collection)?;
+        let receipt = &receipts[&a];
+        let file = &receipt.files[0];
+        let data = notebook.collection_attachment_bytes(collection, a, &receipt.owner_token, file)?;
+        assert_eq!(data, b"first file");
+        let destination = dir.join("copy.txt");
+        assert!(notebook.save_collection_attachment(collection, b, &receipts[&b].owner_token, file, &data, &destination).is_err());
+        assert!(!destination.exists());
+        writer.connection.execute("UPDATE attachments SET content=?2 WHERE id=?1", params![file.id,b"newer file"])?;
+        assert!(notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &destination).is_err());
+        assert!(!destination.exists());
+        let data = notebook.collection_attachment_bytes(collection, a, &receipt.owner_token, file)?;
+        notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &destination)?;
+        assert_eq!(fs::read(destination)?, b"newer file");
+        writer.remove_from_collection(collection, a, "保留")?;
+        let missing = dir.join("removed.txt");
+        assert!(notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &missing).is_err());
+        assert!(!missing.exists());
+        drop(writer);
+        drop(notebook);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
 }

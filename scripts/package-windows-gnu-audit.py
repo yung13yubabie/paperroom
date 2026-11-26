@@ -15,6 +15,7 @@ from windows_gnu_dependency_evidence import INDEX as DEPENDENCY_INDEX, live_rust
 
 TARGET = "x86_64-pc-windows-gnu"
 EXE = "Paperroom.exe"
+MAX_EXE_BYTES = 24 << 20
 INDEX = "evidence/gnu-candidate.json"
 ROOT = Path(__file__).resolve().parents[1]
 KNOWN_DLLS = {
@@ -36,9 +37,15 @@ def json_bytes(value):
     return (json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode()
 
 
+def check_exe_size(size):
+    if not 0 < size <= MAX_EXE_BYTES:
+        raise ValueError(f"GNU candidate EXE size {size} exceeds the allowed range of 1–{MAX_EXE_BYTES} bytes")
+
+
 def pe(exe, path):
-    if len(exe) > 16 << 20 or not exe.startswith(b"MZ"):
-        raise ValueError("Expected bounded Windows executable")
+    check_exe_size(len(exe))
+    if not exe.startswith(b"MZ"):
+        raise ValueError("Expected the Windows executable MZ signature")
     offset = struct.unpack_from("<I", exe, 0x3C)[0]
     header = offset + 24
     if exe[offset:offset+4] != b"PE\0\0" or struct.unpack_from("<H", exe, offset+4)[0] != 0x8664:
@@ -223,6 +230,10 @@ def verify(path, commit, exe_sha, zip_sha, require_dependency_evidence=False):
             raise ValueError("The package contains an unsafe or ambiguous path")
         if any(re.search(r"(?i)\.(?:dll|lib|pdb|a|deb)$", n) for n in names):
             raise ValueError("The package contains a raw toolchain or runtime file")
+        if EXE not in names:
+            raise ValueError("The package does not contain Paperroom.exe")
+        exe_size = archive.getinfo(EXE).file_size
+        check_exe_size(exe_size)
         if archive.testzip() is not None:
             raise ValueError("A ZIP member has a CRC error")
         index = json.loads(archive.read(INDEX))
@@ -252,7 +263,7 @@ def verify(path, commit, exe_sha, zip_sha, require_dependency_evidence=False):
                 raise ValueError("Dependency evidence references different underlying receipts")
         elif require_dependency_evidence:
             raise ValueError("The package has no per-dependency redistribution evidence")
-    print(f"Verified GNU ZIP readback, including all {len(names)} members.")
+    print(f"Verified GNU ZIP readback, including all {len(names)} members and the {exe_size}-byte EXE.")
 
 
 def describe_difference(first, second):

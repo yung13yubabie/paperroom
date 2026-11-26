@@ -12,6 +12,8 @@
 
 沿用相同 build 腳本產出新包後，可用 `package-windows-gnu-audit.py verify --require-dependency-evidence` 與其既有必要參數重新核對下載檔。舊包仍可用一般 `verify` 查驗其原有證據。若要做真正的用戶端斷網測試，使用 [Windows GNU 候選的斷網驗收](../qa/windows-client-offline/GNU-CANDIDATE.md)。Windows Server CI 不填入用戶端結果欄。
 
+GNU 封裝會在建置及 ZIP 讀回時檢查 EXE 大小，兩處均以 24 MiB 為上限。ZIP 壓縮大小及所有解壓成員合計上限仍是 48 MiB 和 64 MiB。
+
 ## GCC／MinGW 執行階段與再散布證據
 
 以下核對 #30 草稿 `2b442a77a9e4bad034832c07c1eba72cd42167f7` 的實際下載物。EXE SHA-256 為 `a101eb041173c80b1a360095e116dc1c83bec462d952c323aa8b8c5d445c1787`，GNU ZIP SHA-256 為 `60a2a0060d7083247e4fc6b149afbd1185d725a55bc4a5910aa1734135fb74cd`。其他候選以自己的封裝收據核對。

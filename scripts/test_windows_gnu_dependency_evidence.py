@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
+import runpy
+from tempfile import TemporaryDirectory
 import unittest
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import windows_gnu_dependency_evidence as evidence
 
@@ -31,6 +34,21 @@ def lockfile(packages):
         f'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{CHECKSUM}"'
         for name, version in packages
     ).encode()
+
+
+class GnuCandidateBounds(unittest.TestCase):
+    def test_package_and_pe_apply_the_same_finite_executable_limit(self):
+        audit = runpy.run_path(str(ASSET.parents[3] / "scripts/package-windows-gnu-audit.py"))
+        maximum = audit["MAX_EXE_BYTES"]
+        audit["check_exe_size"](maximum)
+        with self.assertRaisesRegex(ValueError, "MZ signature"):
+            audit["pe"](b"not a PE", None)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "candidate.zip"
+            with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+                archive.writestr("Paperroom.exe", b"MZ" + bytes(maximum - 1))
+            with self.assertRaisesRegex(ValueError, f"EXE size {maximum + 1}"):
+                audit["verify"](path, SOURCE_COMMIT, EXE_SHA, audit["digest"](path.read_bytes()))
 
 
 class GnuDependencyEvidence(unittest.TestCase):

@@ -56,7 +56,7 @@ function Create-EdgeBoard31([string]$Name,[string]$Peer,[bool]$Far) {
     if ($Far) {
         [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false,$false,$true)
         Native-Menu 120 12 '移動選取的物件…'
-        Collection-Prompt '移動選取的物件' '4200,3600'
+        Rule-Prompt '移動選取的物件' '0,0' '4200,3600'
         $null=Wait-For 'moved the true endpoint beyond viewport' {
             [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已移動 1 個白板物件。'
         }

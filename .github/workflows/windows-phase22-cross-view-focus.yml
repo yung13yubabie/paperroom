@@ -1,0 +1,70 @@
+name: Verify cross-view editing and focus on the exact #21 EXE
+on:
+  push:
+    branches: ['dev/qa/phase22-cross-view-focus']
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: 261443dc574b8a2932b4f6b4d3c7cf59abc55ff4
+  PAPERROOM_EXE_SHA256: 78e09cc9448b9e50abe0e10e97915ce02c4d2ac40fa1d9a271cd97695897d58a
+  PAPERROOM_ZIP_SHA256: 2297fb663389031f000677d489e897b7e3e41e96e863988b505054e2e6ff77fb
+
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the replay to the reviewed production source
+        run: |
+          git merge-base --is-ancestor $env:PAPERROOM_SOURCE HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'The product revision is not an ancestor.' }
+          $actual = @(git diff --name-only ef37c898eb0bc2669cb40ccc517d7b42aaf54d09 HEAD)
+          $allowed = @('.github/workflows/windows-phase22-cross-view-focus.yml','scripts/windows-unified-sources.ps1')
+          if ($LASTEXITCODE -ne 0 -or $actual.Count -ne $allowed.Count -or @($actual | Where-Object { $_ -cnotin $allowed }).Count) {
+            throw 'Replay checkout differs outside the reviewed QA files.'
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-source-details-windows-x64-gnu-draft
+          path: ${{ runner.temp }}/unified-draft
+          run-id: 45755984817
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-source-details-GNU-draft-exe
+          path: ${{ runner.temp }}/unified-exe
+          run-id: 45755984817
+          github-token: ${{ github.token }}
+      - name: Verify both original artifacts and complete the GUI workflow
+        run: |
+          $base = Join-Path $env:RUNNER_TEMP 'unified-draft'
+          $zip = Join-Path $base 'Paperroom-source-details-windows-x64-gnu-draft.zip'
+          python -B scripts/package-windows-gnu-audit.py verify --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:PAPERROOM_EXE_SHA256 --zip-sha256 $env:PAPERROOM_ZIP_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'The downloaded package failed verification.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $base 'verified')
+          $exe = Join-Path $base 'verified/Paperroom.exe'
+          $standalone = Join-Path $env:RUNNER_TEMP 'unified-exe/Paperroom.exe'
+          if ((Get-FileHash -LiteralPath $exe).Hash -ine $env:PAPERROOM_EXE_SHA256 -or
+              (Get-FileHash -LiteralPath $standalone).Hash -ine $env:PAPERROOM_EXE_SHA256) {
+            throw 'The originally uploaded EXEs differ.'
+          }
+          $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $base 'unified-reopen-restore.json'
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PAPERROOM_EXE_SHA256 -UnifiedSourcesOnly
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
+            throw 'Missing native unified-workspace receipt.'
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-21-cross-view-focus-receipt
+          path: ${{ runner.temp }}/unified-draft/unified-reopen-restore.json
+          if-no-files-found: error

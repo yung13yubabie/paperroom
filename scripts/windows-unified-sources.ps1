@@ -1,150 +1,157 @@
-# Uses the verified downloaded executable and a single fresh synthetic workspace.
-$testHome = Join-Path $root 'unified-source-fixture'
-[void][IO.Directory]::CreateDirectory((Join-Path $testHome 'paperroom-data'))
-Copy-Item -LiteralPath $Exe -Destination (Join-Path $testHome 'Paperroom.exe')
-$db = Join-Path $testHome 'paperroom-data/notes.sqlite3'
-$transfer = Join-Path $root 'NotionTransfer.zip'
-$heptaZip = Join-Path $root 'MarkdownAndCanvases.zip'
-$bases = Join-Path $root '場次.base'
-$workspaceBackup = Join-Path $root 'unified.sqlite3'
-$enc = [Text.UTF8Encoding]::new($false)
-'{"schema":"paperroom-notion-mcp-transfer/1","confirmed_page_ids":["11111111-1111-1111-1111-111111111111"],"pages":[{"id":"11111111-1111-1111-1111-111111111111","title":"MCP 交接驗收","markdown":"# 檢核\n\n- [x] 合成原文","truncated":false,"unknown_block_count":0,"unknown_block_ids":[]}]}' |
-    python -B (Join-Path $PSScriptRoot 'notion_mcp_transfer.py') $transfer
-if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the synthetic MCP handoff.' }
+# Exercise a real search-to-editor transition through an immutable #21 Windows EXE.
+$focusHome = Join-Path $root 'focus-live'
+$focusDb = Join-Path $focusHome 'paperroom-data/notes.sqlite3'
+$focusZip = Join-Path $root 'FocusBoards.zip'
+$focusBase = Join-Path $root 'Focus.base'
+$focusBackup = Join-Path $root 'focus-backup.sqlite3'
+[void][IO.Directory]::CreateDirectory((Split-Path $focusDb -Parent))
+Copy-Item -LiteralPath $Exe -Destination (Join-Path $focusHome 'Paperroom.exe')
 @'
 import json,sys,zipfile
 with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as out:
-    out.writestr("All-Data.json","Synthetic marker only. Not vendor JSON.")
-    out.writestr("甲/鏡頭.md","# 鏡頭\n\n甲正文\n[乙卡](../乙/鏡頭.md)\n[媒體](../媒體/來源.txt)")
-    out.writestr("乙/鏡頭.md","# 鏡頭\n\n乙正文")
-    out.writestr("媒體/來源.txt","合成附件")
-    for board, pos in (("分鏡",20),("參考",50)):
-        nodes = [
-            dict(id="a",type="file",file="甲/鏡頭.md",x=pos,y=20,width=232,height=114),
-            dict(id="b",type="file",file="乙/鏡頭.md",x=350,y=190,width=232,height=114),
-        ]
-        edge = dict(id="ab",fromNode="a",toNode="b",toEnd="none")
-        out.writestr(f"Boards/{board}.canvas",json.dumps(dict(nodes=nodes,edges=[edge])))
-'@ | python - $heptaZip
-if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the synthetic Markdown and JSON Canvas handoff.' }
-[IO.File]::WriteAllText($bases, @'
+    out.writestr("All-Data.json", "Synthetic marker only.")
+    out.writestr("甲/鏡頭.md", "# 鏡頭\n\n甲正文\n[乙卡](../乙/鏡頭.md)")
+    out.writestr("乙/鏡頭.md", "# 鏡頭\n\n乙正文")
+    for name,x in (("分鏡",20),("參考",30)):
+        doc = {"nodes":[{"id":"a","type":"file","file":"甲/鏡頭.md","x":x,"y":20,"width":232,"height":114}]}
+        out.writestr(f"Boards/{name}.canvas",json.dumps(doc))
+'@ | python - $focusZip
+if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the actual import ZIP.' }
+[IO.File]::WriteAllText($focusBase, @'
 views:
   - type: list
     name: 甲場
     filters: 'file.folder == "甲"'
-    order: [file.folder, file.name]
-'@, $enc)
-$hashes = @{}
-foreach ($file in $transfer,$heptaZip,$bases) { $hashes[$file] = (Get-FileHash -LiteralPath $file).Hash }
+    order: [file.path, file.name]
+'@, [Text.UTF8Encoding]::new($false))
+$zipHash = (Get-FileHash -LiteralPath $focusZip).Hash
+$baseHash = (Get-FileHash -LiteralPath $focusBase).Hash
 
-function Confirm-SourceReport([IntPtr]$Dialog, [string]$Expected) {
-    $report = [PaperroomHighlightGui]::Read((Control $Dialog 101))
-    if (!$report.Contains($Expected)) { throw "The native report did not describe the expected operation." }
-    Finish-Revision $Dialog 1
-    $null = Wait-For 'closed import report' { ![PaperroomHighlightGui]::IsWindowVisible($Dialog) }
+function Search-ExactFocusNote([string]$Query) {
+    $dialog = Open-WorkspaceSearch
+    Type-SearchFilter $dialog 101 $Query
+    Type-SearchFilter $dialog 103 '甲'
+    Search-Workspace $dialog '找到 1 筆筆記。' 1
+    Finish-Revision $dialog 111
+    $null = Wait-For 'exact same-title note from folder 甲' {
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭'
+    }
 }
-$process = Start-Notebook $testHome
-$window = $process.MainWindowHandle
-$report = Native-File 2 '匯入 Notion Markdown ZIP…' $transfer '已匯入 1 篇 Markdown' -NextDialog '匯入報告'
-Confirm-SourceReport $report '紙間 MCP 文字交接標記'
-
-$notice = Native-File 20 '匯入 Markdown ZIP（相對附件）…' $heptaZip '已建立 2 張紙間白板' -NextDialog 'Markdown ZIP 匯入範圍' -NextDialogButton 6
-Finish-Revision $notice 6
-$report = Wait-For 'Heptabase companion report' {
-    [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','匯入報告',1)
+function Assert-FocusPreview([string]$Expected) {
+    $preview = Control $window 121
+    $null = Wait-For 'exact saved note preview' {
+        [PaperroomHighlightGui]::IsWindowVisible($preview) -and
+        [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+        [PaperroomHighlightGui]::Read($preview).Contains($Expected) -and
+        ![PaperroomHighlightGui]::Read($preview).Contains('乙正文')
+    }
 }
-Confirm-SourceReport $report '已建立 2 張紙間白板'
-$null = Wait-For 'the imported Markdown root is selected' {
-    [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '匯入：MarkdownAndCanvases'
-}
-
-$prompt = Native-File 40 '匯入 Obsidian Bases 檢視…' $bases '已匯入 1 個 Bases 檢視' -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
-Finish-Revision $prompt 6
-$null = Wait-For 'native Bases source receipt opened' {
-    [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'Bases 來源：場次.base' -and
-    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已匯入 1 個 Bases 檢視。'
-}
-
-Open-LinkedFixture '鏡頭' '甲'
-Click-WorkspaceButton 110
-$null = Wait-For 'same card title is editable in the native note Open result' {
-    [PaperroomHighlightGui]::IsWindowVisible((Control $window 104))
-}
-Replace-EditorText (Control $window 103) '甲板上與集合共用'
-$null = Wait-For 'native note title saved' {
-    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
-}
-Native-File 4 '備份工作區…' $workspaceBackup '工作區備份已完成'
-Close-Notebook $process
-$process.Dispose()
-$process = $null
-$backupHash = (Get-FileHash -LiteralPath $workspaceBackup).Hash
-$restoredHome = Join-Path $root 'unified-source-restore'
-$restoredDb = Join-Path $restoredHome 'paperroom-data/notes.sqlite3'
-[void][IO.Directory]::CreateDirectory((Split-Path $restoredDb -Parent))
-Copy-Item -LiteralPath $Exe -Destination (Join-Path $restoredHome 'Paperroom.exe')
-Copy-Item -LiteralPath $workspaceBackup -Destination $restoredDb
-foreach ($case in @(@($testHome,$db),@($restoredHome,$restoredDb))) {
-    $process = Start-Notebook $case[0]
-    $window = $process.MainWindowHandle
-    Select-Note '甲板上與集合共用'
-    Open-SortCollection '場次／甲場'
+function Open-FocusCollection {
+    Open-SortCollection 'Focus／甲場'
     Native-Menu 120 11 '集合檢視…'
     Native-Menu 120 2 '開啟已儲存的檢視…' -MenuOpen
     Native-Menu 120 1 '甲場（清單）' -MenuOpen
-    Native-Menu 120 24 '表格與清單欄位…'
-    Native-Menu 120 4 '查看資料列的顯示欄位…' -MenuOpen
+    Native-Menu 120 3 '開啟資料列…'
+    Choose-CollectionRow '已匯入　鏡頭  ('
+}
+function Open-FocusBoardCard([string]$Name) {
+    Native-Menu 120 60003 '查看此筆記的原生白板位置…'
     $rows = @(Collection-MenuLabels)
-    if ($rows.Count -ne 1) { throw 'The saved Bases view displayed an unexpected number of rows.' }
-    Choose-CollectionRow '已匯入　甲板上與集合共用  ('
-    $display = Wait-For 'actual imported Bases values' {
-        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','資料列的顯示欄位',1)
+    if ($rows.Count -ne 2 -or $Name -cnotin $rows) { throw 'The original note must occur on both boards.' }
+    $index = [Array]::IndexOf([string[]]$rows,$Name) + 1
+    Native-Menu 120 $index $Name -MenuOpen
+    $null = Wait-For 'the app located the original board card' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已定位白板上的筆記卡片。'
     }
-    $projection = [PaperroomHighlightGui]::Read((Control $display 101))
-    foreach ($expected in @('筆記標題　甲板上與集合共用','file.folder　甲','file.name　鏡頭.md')) {
-        if (!$projection.Contains($expected)) { throw 'The named collection view lost a file snapshot.' }
-    }
-    Finish-Revision $display 1
-    @'
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false)
+}
+function Read-FocusIdentity([string]$Path, [string]$Expected) {
+    $identity = @'
 from contextlib import closing
 from pathlib import Path
 import sqlite3,sys
-db=Path(sys.argv[1])
-with closing(sqlite3.connect(db.as_uri()+"?mode=ro",uri=True)) as conn:
-    assert conn.execute("pragma journal_mode").fetchone()==("wal",)
-    assert conn.execute("pragma integrity_check").fetchone()==("ok",)
-    assert conn.execute("select body from notes where title='MCP 交接驗收'").fetchone()==("# 檢核\n\n- [x] 合成原文",)
-    aid=conn.execute("select id from notes where title='甲板上與集合共用'").fetchone()[0]
-    bid=conn.execute("select id from notes where title='鏡頭' and body='乙正文'").fetchone()[0]
-    assert aid != bid
-    assert conn.execute("select a.content from attachments a where a.note_id=?",(aid,)).fetchone()[0]=="合成附件".encode()
-    assert conn.execute("select count(*) from board_cards where note_id=?",(aid,)).fetchone()==(2,)
-    assert conn.execute("select count(*) from board_edges where from_note=? and to_note=?",(min(aid,bid),max(aid,bid))).fetchone()==(2,)
-    assert conn.execute("select note_id from collection_notes cn join collections c on c.id=cn.collection_id where c.name='場次／甲場'").fetchall()==[(aid,)]
-    assert dict(conn.execute("select key,value from obsidian_base_file_values where note_id=?",(aid,)))=={
-        "file.folder":"甲", "file.name":"鏡頭.md"}
-    assert conn.execute("select count(*) from note_properties where note_id=? and key in ('file.folder','file.name')",(aid,)).fetchone()==(0,)
-    assert conn.execute("select list_mode from collection_views where name='甲場'").fetchone()==(1,)
-    assert conn.execute("select content from attachments where name='場次.base'").fetchone()[0]==Path(sys.argv[2]).read_bytes()
-'@ | python - $case[1] $bases
-    if ($LASTEXITCODE -ne 0) { throw 'Unified workspace readback disagrees with the exact source, IDs or backup.' }
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    ident=db.execute("SELECT n.id,i.token,n.body,n.version FROM notes n JOIN vault_paths p ON p.note_id=n.id JOIN note_link_identities i ON i.note_id=n.id WHERE p.relative_path='甲/鏡頭.md'").fetchone()
+    note,token,body,version=ident
+    assert body == sys.argv[2]+"\n[乙卡](../乙/鏡頭.md)",repr(body)
+    assert db.execute("SELECT n.body FROM notes n JOIN vault_paths p ON p.note_id=n.id WHERE p.relative_path='乙/鏡頭.md'").fetchall()==[("乙正文",)]
+    assert db.execute("SELECT b.title,c.x,c.y FROM board_cards c JOIN boards b ON b.id=c.board_id WHERE c.note_id=? ORDER BY c.x",(note,)).fetchall()==[("分鏡",20,20),("參考",30,20)]
+    assert db.execute("SELECT cn.note_id FROM collection_notes cn JOIN collections c ON c.id=cn.collection_id WHERE c.name='Focus／甲場'").fetchall()==[(note,)]
+    assert db.execute("pragma integrity_check").fetchone()==("ok",)
+    print(f"{note}:{token}:{version}")
+'@ | python - $Path $Expected
+    if ($LASTEXITCODE -ne 0 -or !$identity) { throw 'The saved note, identity or projection did not match.' }
+    return [string]$identity
+}
+
+$process = Start-Notebook $focusHome
+$window = $process.MainWindowHandle
+$notice = Native-File 20 '匯入 Markdown ZIP（相對附件）…' $focusZip '已建立 2 張原生白板' -NextDialog 'Markdown ZIP 匯入範圍' -NextDialogButton 6
+Finish-Revision $notice 6
+$report = Wait-For 'two original board imports' {
+    [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','匯入報告',1)
+}
+if (![PaperroomHighlightGui]::Read((Control $report 101)).Contains('已建立 2 張原生白板')) { throw 'Missing both boards.' }
+Finish-Revision $report 1
+Native-MenuFromKeyboard 109 40 '匯入 Obsidian Bases 檢視…'
+$prompt = Native-File 40 '匯入 Obsidian Bases 檢視…' $focusBase '已匯入 1 個 Bases 檢視' -AlreadyOpened -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
+Finish-Revision $prompt 6
+$null = Wait-For 'the collection is ready' {
+    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已匯入 1 個 Bases 檢視。'
+}
+$original = Read-FocusIdentity $focusDb '甲正文'
+# A body hit already opens the editor. Clicking Edit here would switch to reading.
+Search-ExactFocusNote '甲正文'
+Assert-SearchSelection 104 '甲正文' '全域搜尋：正文第 1 行'
+$editor = Control $window 104
+[PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$editor,'甲正文已修改')
+$null = Wait-For 'first physical edit saved' {
+    [PaperroomHighlightGui]::Read($editor).StartsWith('甲正文已修改') -and
+    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
+}
+$first = Read-FocusIdentity $focusDb '甲正文已修改'
+$before = $original.Split(':')
+$after = $first.Split(':')
+if ($before[0] -cne $after[0] -or $before[1] -cne $after[1] -or [int]$after[2] -le [int]$before[2]) {
+    throw 'The first edit must advance the very same note.'
+}
+Open-FocusCollection
+Assert-FocusPreview '甲正文已修改'
+Open-FocusBoardCard '分鏡'
+Assert-FocusPreview '甲正文已修改'
+Open-FocusBoardCard '參考'
+Assert-FocusPreview '甲正文已修改'
+Native-File 4 '備份工作區…' $focusBackup '工作區備份已完成'
+Close-Notebook $process
+$process.Dispose()
+$process = $null
+$backupHash = (Get-FileHash -LiteralPath $focusBackup).Hash
+$focusRestore = Join-Path $root 'focus-restore'
+$restoredDb = Join-Path $focusRestore 'paperroom-data/notes.sqlite3'
+[void][IO.Directory]::CreateDirectory((Split-Path $restoredDb -Parent))
+Copy-Item -LiteralPath $Exe -Destination (Join-Path $focusRestore 'Paperroom.exe')
+Copy-Item -LiteralPath $focusBackup -Destination $restoredDb
+foreach ($check in @(@($focusHome,$focusDb),@($focusRestore,$restoredDb))) {
+    $process = Start-Notebook $check[0]
+    $window = $process.MainWindowHandle
+    Open-FocusCollection
+    Assert-FocusPreview '甲正文已修改'
+    Open-FocusBoardCard '參考'
+    Assert-FocusPreview '甲正文已修改'
+    if ((Read-FocusIdentity $check[1] '甲正文已修改') -cne $first) { throw 'The note identity changed across reopen or backup.' }
     Close-Notebook $process
     $process.Dispose()
     $process = $null
 }
-foreach ($file in $transfer,$heptaZip,$bases) {
-    if ((Get-FileHash -LiteralPath $file).Hash -cne $hashes[$file]) { throw 'The source fixture changed.' }
+if ((Get-FileHash -LiteralPath $focusZip).Hash -cne $zipHash -or
+    (Get-FileHash -LiteralPath $focusBase).Hash -cne $baseHash -or
+    (Get-FileHash -LiteralPath $focusBackup).Hash -cne $backupHash) {
+    throw 'An input or the original backup changed.'
 }
-if ((Get-FileHash -LiteralPath $workspaceBackup).Hash -cne $backupHash) { throw 'Opening a backup copy changed the original backup.' }
-Write-Host "PASS: native Notion MCP transfer, Heptabase Markdown and two standard Canvas companions, Obsidian Bases on the same note IDs, edit, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
-
-if ($env:PAPERROOM_UNIFIED_RECEIPT) {
-    @{
-        exe_sha256 = $ExeSha256
-        os = (Get-CimInstance Win32_OperatingSystem).Caption
-        scenarios = @('notion-mcp-synthetic-transfer','heptabase-markdown-standard-canvas',
-            'obsidian-bases-displayed-after-edit','reopen','isolated-backup')
-        source_fixtures_unchanged = $true
-        original_backup_unchanged = $true
-    } | ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8
-}
+@{
+    exe_sha256=$ExeSha256
+    os=(Get-CimInstance Win32_OperatingSystem).Caption
+    scenarios=@('body-search-enters-editing','focused-utf16-selection-and-physical-input',
+       'same-id-two-board-cards-and-collection','reopen','isolated-backup-restore','unchanged-decoy-and-sources')
+} | ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8
+Write-Host "PASS: the exact EXE changes the focused note and shows the saved body through both boards, the collection, reopen and isolated restore."

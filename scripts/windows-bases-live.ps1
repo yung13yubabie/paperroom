@@ -54,7 +54,15 @@ function Open-NamedLiveBase([string]$Name) {
     Native-Menu 109 10 '資料集合與看板…'
     Native-Menu 109 1 '開啟集合看板…' -MenuOpen
     Choose-CollectionRow "$Name／進度表"
+    $null=Wait-For "collection $Name finished opening" {
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' -and
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains("$Name／進度表")
+    }
     Open-SortNamedView 1 '進度表'
+    $null=Wait-For "named table for $Name finished opening" {
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' -and
+        [PaperroomHighlightGui]::Read((Control $window 115)) -ceq '進度表'
+    }
 }
 function Read-LiveColumn([string]$Alias,[string]$Value,[string]$Formula) {
     Native-Menu 120 24 '表格與清單欄位…'

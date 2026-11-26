@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flow: [companion, vendor]
+        flow: [bases, companion, vendor]
     timeout-minutes: 12
     env:
       FLOW: ${{ matrix.flow }}
@@ -35,7 +35,7 @@ jobs:
           git merge-base --is-ancestor $env:PAPERROOM_SOURCE HEAD
           if ($LASTEXITCODE -ne 0) { throw 'The product revision is not an ancestor.' }
           $actual = @(git diff --name-only a792acbc227a8743c7eb7ad7ef64e6ed409d2663 HEAD)
-          $allowed = @('.github/workflows/windows-phase23-exact-replay.yml','scripts/windows-companion-placement.ps1','scripts/windows-highlight-workflow.ps1','scripts/windows-vendor-canvas-replay.ps1')
+          $allowed = @('.github/workflows/windows-phase23-exact-replay.yml','scripts/windows-companion-placement.ps1','scripts/windows-highlight-workflow.ps1','scripts/windows-vendor-canvas-replay.ps1','scripts/windows-bases-live.ps1')
           if ($LASTEXITCODE -ne 0 -or $actual.Count -ne $allowed.Count -or @($actual | Where-Object { $_ -cnotin $allowed }).Count) {
             throw 'Replay checkout differs outside the reviewed QA files.'
           }
@@ -73,7 +73,12 @@ jobs:
           }
           $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $base 'companion-exact-receipt.json'
           $env:PAPERROOM_VERIFIED_VENDOR_CANVAS = Join-Path $env:RUNNER_TEMP 'verified-vendor/Canvas-saved.canvas'
-          $scenario = if ($env:FLOW -eq 'vendor') { @{VendorCanvasOnly=$true} } else { @{CompanionPlacementOnly=$true} }
+          $scenario = switch ($env:FLOW) {
+            'vendor' { @{VendorCanvasOnly=$true} }
+            'companion' { @{CompanionPlacementOnly=$true} }
+            'bases' { @{BasesLiveOnly=$true} }
+            default { throw 'Unexpected scenario.' }
+          }
           ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PAPERROOM_EXE_SHA256 @scenario
           if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
             throw 'Missing native unified-workspace receipt.'

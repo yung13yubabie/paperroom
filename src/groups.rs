@@ -286,6 +286,9 @@ mod tests {
             legacy.execute_batch(
                 "CREATE TABLE notes(id INTEGER PRIMARY KEY,parent INTEGER,title TEXT NOT NULL,body TEXT NOT NULL,
                     pinned INTEGER NOT NULL,trash_root INTEGER,version INTEGER NOT NULL);
+                 CREATE TABLE vault_paths(note_id INTEGER PRIMARY KEY REFERENCES notes(id),
+                    import_root INTEGER NOT NULL REFERENCES notes(id), relative_path TEXT NOT NULL,
+                    UNIQUE(import_root,relative_path));
                  CREATE TABLE boards(id INTEGER PRIMARY KEY,title TEXT NOT NULL);
                  CREATE TABLE board_cards(board_id INTEGER NOT NULL REFERENCES boards(id),
                     note_id INTEGER NOT NULL REFERENCES notes(id),x INTEGER NOT NULL,y INTEGER NOT NULL,

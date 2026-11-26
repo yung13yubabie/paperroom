@@ -61,7 +61,7 @@ impl Notebook {
                     let Some(block) = anchor.strip_prefix('^') else { continue; };
                     if destination.is_empty() { continue; }
                     let id = if destination.starts_with(NATIVE_NOTE_PREFIX) {
-                        native_note_target(&tx, destination)?
+                        native_note_target(&tx, Some(source), destination)?
                     } else {
                         mapped_link_target(&index, path, &parts, reference.syntax, &reference.destination, destination)
                     };

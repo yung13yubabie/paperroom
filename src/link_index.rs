@@ -127,7 +127,7 @@ impl Notebook {
                     let key = reference.destination.as_str();
                     let path = key.split_once('#').map_or(key, |(path, _)| path);
                     if path.starts_with(NATIVE_NOTE_PREFIX) {
-                        return native_note_target(&tx, path);
+                        return native_note_target(&tx, Some(id), path);
                     }
                     Ok(if let Some((root, source)) = location {
                         mapped_link_target(&indexes[root], source, parts.as_deref().unwrap_or_default(),
@@ -181,12 +181,15 @@ mod tests {
     fn workspace_path_is_directed_vault_isolated_and_snapshot_refreshes() -> Result<()> {
         let mut db=Notebook::open(Path::new(":memory:"),false)?;
         let outside=db.add(None,"同名","")?;
+        let token: String = db.connection.query_row(
+            "SELECT token FROM note_link_identities WHERE note_id=?1", [outside], |row| row.get(0),
+        )?;
         let make=|folder:&str,title:&str,body:&str| ImportedPage {
             title:title.into(),body:body.into(),parts:vec![folder.into(),format!("{title}.md")],
         };
         let root=db.import_vault("圖測試",vec![
             make("A","入口","[[../B/同名#段落|前往]] [[同名]] `[[./同名]]`"),
-            make("A","同名",""), make("B","同名",&format!("[[paperroom:note:{outside}|外部]]")),
+            make("A","同名",""), make("B","同名",&crate::store::note_links::note_link_markup(outside, &token, "外部")),
         ])?;
         let local=db.link_index(Scope::Vault(root),None)?;
         let id=|path:&str|local.nodes.values().find(|node|

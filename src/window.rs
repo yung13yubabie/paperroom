@@ -36,6 +36,8 @@ mod note_highlight_ui;
 mod board_objects_ui;
 #[path = "board_image_ui.rs"]
 mod board_image_ui;
+#[path = "native_board_location_ui.rs"]
+mod native_board_location_ui;
 #[path = "board_shape_input.rs"]
 mod board_shape_input;
 #[path = "board_shape_tag_ui.rs"]
@@ -148,6 +150,7 @@ struct App {
     widgets: Widgets,
     notebook: Notebook,
     data_dir: PathBuf,
+    portable_workspace: bool,
     current: Option<Note>,
     tree_items: HashMap<i64, HTREEITEM>,
     editing: bool,
@@ -159,6 +162,15 @@ struct App {
     fonts: Vec<HFONT>,
     brushes: [HBRUSH; 2],
     extras: Extras,
+}
+
+#[derive(Clone, Copy)]
+struct CardDrag {
+    board: i64,
+    note: i64,
+    origin: (i32, i32),
+    pointer: (i32, i32),
+    scroll: (i32, i32),
 }
 
 #[derive(Default)]
@@ -181,8 +193,10 @@ struct Extras {
     block_returns: Vec<navigation_ui::BlockReturn>,
     workspace: Option<WorkspaceView>,
     board_selection: Option<(i64, String)>,
-    dragging: Option<(i64, i32, i32)>,
+    dragging: Option<CardDrag>,
     scroll: i32,
+    board_scroll_x: i32,
+    native_board_focus: Option<crate::store::native_board_locations::NativeBoardLocation>,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -269,8 +283,12 @@ fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<Path
         Ok(metadata) if metadata.is_dir() => return Ok(adjacent),
         Ok(_) => return Err("程式旁的 paperroom-data 必須是資料夾。紙間沒有切換到其他資料位置。".into()),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        Err(_) if portable => return Ok(adjacent),
-        Err(_) => {}
+        Err(_) => match std::fs::symlink_metadata(&adjacent) {
+            Ok(_) => return Err("程式旁的 paperroom-data 無法開啟。紙間沒有切換到其他資料位置。".into()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) if portable => return Ok(adjacent),
+            Err(_) => {}
+        },
     }
     let local = local.filter(|path| path.is_absolute())
         .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
@@ -282,18 +300,87 @@ fn check_workspace_volume(path: &Path, drive_type: impl FnOnce(&Path) -> u32) ->
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return Err("工作區需要完整的 Windows 路徑。".into());
     };
-    let remote = match prefix.kind() {
-        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+    match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => {}
         Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
             let root = PathBuf::from(format!("{}:\\", char::from(letter)));
-            drive_type(&root) == 4 // Win32 DRIVE_REMOTE
+            if is_local_workspace_drive(drive_type(&root)) {
+                return Ok(());
+            }
         }
         _ => return Err("工作區需要本機磁碟路徑。".into()),
-    };
-    if remote {
-        return Err("工作區使用 SQLite WAL，需要本機磁碟。請將工作區移至本機後再開啟。".into());
     }
-    Ok(())
+    Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into())
+}
+
+fn is_local_workspace_drive(drive_type: u32) -> bool {
+    // Win32 DRIVE_REMOVABLE, DRIVE_FIXED, and DRIVE_RAMDISK.
+    matches!(drive_type, 2 | 3 | 6)
+}
+
+fn native_drive_type(root: &Path) -> u32 {
+    unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr()) }
+}
+
+fn resolved_workspace_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    check_workspace_volume(&resolved, native_drive_type)?;
+    if !std::fs::metadata(&resolved)?.is_dir() {
+        return Err("工作區位置必須是資料夾。".into());
+    }
+    // A mounted volume can have a different type from the drive-letter root.
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    let mut volume = vec![0_u16; 32_768];
+    if unsafe { GetVolumePathNameW(wide_path(&resolved).as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !is_local_workspace_drive(unsafe { GetDriveTypeW(volume.as_ptr()) }) {
+        return Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into());
+    }
+    Ok(resolved)
+}
+
+fn prepare_workspace_directory(path: &Path) -> Result<PathBuf> {
+    use std::io::ErrorKind;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    check_workspace_volume(path, native_drive_type)?;
+    // Resolve the nearest existing directory before creating anything. Walk
+    // missing components on the checked path, verifying each actual target.
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    let mut directory = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break resolved_workspace_directory(ancestor)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                missing.push(ancestor.file_name().ok_or("找不到工作區路徑。")?);
+                ancestor = ancestor.parent().ok_or("找不到工作區的上層資料夾。")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    for name in missing.into_iter().rev() {
+        let child = directory.join(crate::output::windows_output_name(name)?);
+        match std::fs::create_dir(&child) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = resolved_workspace_directory(&child)?;
+    }
+
+    // SQLite must open ordinary files beside each other in the resolved
+    // directory. Never follow an existing redirect for an individual file.
+    for name in ["notes.sqlite3", "notes.sqlite3-wal", "notes.sqlite3-shm", "notes.sqlite3-journal"] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Ok(entry) if entry.is_file() && entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(format!("工作區的 {name} 必須是本機資料夾內的一般檔案。").into()),
+        }
+    }
+    Ok(directory)
 }
 
 fn init_tree_control() -> Result<()> {
@@ -361,9 +448,8 @@ unsafe fn start() -> Result<()> {
             std::env::args_os().skip(1).any(|arg| arg == "--portable"),
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         )?;
-        check_workspace_volume(&dir, |root| {
-            windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr())
-        })?;
+        check_workspace_volume(&dir, native_drive_type)?;
+        let portable_workspace = dir.ends_with("paperroom-data");
         let module = GetModuleHandleW(null());
         if LoadLibraryExW(
             wide("Msftedit.dll").as_ptr(),
@@ -408,13 +494,14 @@ unsafe fn start() -> Result<()> {
         }
         let widgets = Widgets::create(hwnd, module)?;
         // Native editor initialization must succeed before writing workspace state.
-        std::fs::create_dir_all(&dir)?;
+        let dir = prepare_workspace_directory(&dir)?;
         let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let app = Box::new(RefCell::new(App {
             hwnd,
             widgets,
             notebook,
             data_dir: dir,
+            portable_workspace,
             current: None,
             tree_items: HashMap::new(),
             editing: false,
@@ -763,7 +850,7 @@ impl App {
             InvalidateRect(tree, null(), 1);
             let hint = if !query.trim().is_empty() {
                 format!("{} 筆搜尋結果", rows.len())
-            } else if self.data_dir.ends_with("paperroom-data") {
+            } else if self.portable_workspace {
                 "●　可攜工作區".to_owned()
             } else {
                 "●　本機工作區".to_owned()
@@ -1965,8 +2052,10 @@ impl App {
                 labels.push((graph, "開啟筆記關聯圖…".to_owned()));
                 let named = (graph + 1).max(60001);
                 let canvas = named + 1;
+                let native_board = named + 2;
                 labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
                 labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
+                labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
                 let items = labels
                     .iter()
                     .map(|(id, label)| (*id, label.as_str()))
@@ -1979,6 +2068,7 @@ impl App {
                     index if index == graph => app.open_note_graph(source)?,
                     index if index == named => app.show_named_relation_navigation(source)?,
                     index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == native_board => app.show_native_board_locations(source)?,
                     index => {
                         if let Some((id, _, heading, syntax)) = related.get(index - 2) {
                             app.open_anchored_link(*id, heading.as_deref(), *syntax)?;
@@ -2117,7 +2207,10 @@ impl App {
             }
             self.extras.board_drop_target = None;
             self.extras.board_selected.clear();
+            self.extras.native_board_focus = None;
             self.extras.scroll = 0;
+            self.extras.board_scroll_x = 0;
+            self.refresh_board_image_cache();
             self.present();
             Ok(())
         }
@@ -2142,6 +2235,10 @@ impl App {
                 .filter(|card| !self.board_card_collapsed(card.id)).map(|card| BoardItem::Card(card.id))
                 .chain(self.extras.objects.iter().map(|object| BoardItem::Object(object.id))).collect();
             self.extras.board_selected.retain(|item| visible.contains(item));
+            if self.focused_native_card().is_some_and(|note| !visible.contains(&BoardItem::Card(note))) {
+                self.extras.native_board_focus = None;
+            }
+            self.extras.board_scroll_x = self.extras.board_scroll_x.min(self.board_scroll_end_x());
             let end = self.board_scroll_end();
             self.extras.scroll = self.extras.scroll.clamp(0, end);
             self.refresh_board_image_cache();
@@ -2157,6 +2254,16 @@ impl App {
             .max().unwrap_or(0)
     }
 
+    fn board_scroll_end_x(&self) -> i32 {
+        let area = unsafe { self.board_area() };
+        let width = (area.right - area.left).max(0) * 96 / self.dpi as i32;
+        let bound = |x, size| crate::store::native_board_locations::pan_limit(x, size, width);
+        self.extras.cards.iter().map(|card| bound(card.x, card.size().width))
+            .chain(self.extras.objects.iter().map(|object| bound(object.x, 232)))
+            .chain(self.extras.board_shapes.iter().map(|shape| bound(shape.rect.x, shape.rect.width)))
+            .max().unwrap_or(0)
+    }
+
     unsafe fn board_toggle(&mut self) {
         unsafe {
             self.mutate(|app| {
@@ -2167,6 +2274,7 @@ impl App {
                 app.extras.workspace = None;
                 app.extras.board = !app.extras.board;
                 app.extras.board_selected.clear();
+                app.extras.native_board_focus = None;
                 if app.extras.board {
                     app.refresh_board()?;
                 }
@@ -2198,13 +2306,13 @@ impl App {
             if x < area.left || y < area.top || x >= area.right || y >= area.bottom {
                 return None;
             }
-            self.extras
-                .cards
-                .iter()
-                .rev()
+            let focus = self.focused_native_card();
+            let cards = self.extras.cards.iter().rev();
+            cards.clone().filter(|card| Some(card.id) == focus)
+                .chain(cards.filter(|card| Some(card.id) != focus))
                 .filter(|card| !self.board_card_collapsed(card.id))
                 .find(|card| {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     (left..left + self.scaled(size.width)).contains(&x)
@@ -2212,6 +2320,21 @@ impl App {
                 })
                 .map(|card| card.id)
         }
+    }
+
+    fn card_drag_position(&self, drag: CardDrag, x: i32, y: i32, area: RECT) -> Option<(i32, i32)> {
+        if self.board_id() != drag.board { return None; }
+        let card = self.extras.cards.iter().find(|card| card.id == drag.note)?;
+        if (x, y) == drag.pointer { return Some(drag.origin); }
+        let dpi = self.dpi as i32;
+        let scroll_x = self.extras.board_scroll_x;
+        let max_x = (scroll_x + (area.right - area.left) * 96 / dpi - card.size().width).clamp(0, 10000);
+        let dx = (x - drag.pointer.0) * 96 / dpi + scroll_x - drag.scroll.0;
+        let dy = (y - drag.pointer.1) * 96 / dpi + self.extras.scroll - drag.scroll.1;
+        Some((
+            if dx == 0 { drag.origin.0 } else { (drag.origin.0 + dx).clamp(0, max_x) },
+            (drag.origin.1 + dy).clamp(0, 50000),
+        ))
     }
 
     unsafe fn board_input(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) {
@@ -2231,7 +2354,11 @@ impl App {
             if self.board_batch_input(msg, wp, x, y) {
                 return;
             }
-            if self.board_object_input(msg, x, y) {
+            let hit_focused = self.focused_native_card().is_some_and(|id| self.card_at(x, y) == Some(id));
+            if !(hit_focused && self.extras.object_drag.is_none()
+                && matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONUP))
+                && self.board_object_input(msg, x, y)
+            {
                 return;
             }
             match msg {
@@ -2239,44 +2366,44 @@ impl App {
                     if let Some(id) = self.card_at(x, y)
                         && let Some(card) = self.extras.cards.iter().find(|c| c.id == id)
                     {
-                        let area = self.board_area();
-                        self.extras.dragging = Some((
-                            id,
-                            x - area.left - self.scaled(card.x),
-                            y - area.top - self.scaled(card.y - self.extras.scroll),
-                        ));
+                        self.extras.dragging = Some(CardDrag {
+                            board: self.board_id(),
+                            note: id,
+                            origin: (card.x, card.y),
+                            pointer: (x, y),
+                            scroll: (self.extras.board_scroll_x, self.extras.scroll),
+                        });
                         SetCapture(self.hwnd);
                     } else if let Some(shape) = self.board_shape_at(x, y) {
                         self.begin_board_shape_drag(shape, x, y);
                     }
                 }
                 WM_MOUSEMOVE => {
-                    if let Some((id, dx, dy)) = self.extras.dragging {
+                    if let Some(drag) = self.extras.dragging {
                         let area = self.board_area();
-                        let dpi = self.dpi as i32;
-                        let width = self.extras.cards.iter().find(|card| card.id == id)
-                            .map_or(232, |card| card.size().width);
-                        let max_x = (area.right - area.left) * 96 / dpi - width;
-                        let new_x = ((x - area.left - dx) * 96 / dpi).clamp(0, max_x.max(0));
-                        let new_y =
-                            ((y - area.top - dy) * 96 / dpi + self.extras.scroll).clamp(0, 50000);
-                        if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == id) {
-                            card.x = new_x;
-                            card.y = new_y;
+                        if let Some(position) = self.card_drag_position(drag, x, y, area)
+                            && let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note)
+                        {
+                            (card.x, card.y) = position;
                             InvalidateRect(self.hwnd, &area, 1);
                         }
                     }
                 }
                 WM_LBUTTONUP => {
-                    if let Some((id, _, _)) = self.extras.dragging.take() {
+                    if let Some(drag) = self.extras.dragging.take() {
                         ReleaseCapture();
-                        if let Some(card) = self.extras.cards.iter().find(|c| c.id == id) {
-                            if let Err(error) = self.notebook.move_card_on(self.board_id(), id, card.x, card.y) {
+                        let area = self.board_area();
+                        if let Some(position) = self.card_drag_position(drag, x, y, area) {
+                            if let Err(error) = self.notebook.finish_card_drag(drag.board, drag.note, drag.origin, position) {
                                 let _ = self.refresh_board();
+                                InvalidateRect(self.hwnd, &area, 1);
                                 self.show_error(error);
                             } else {
+                                if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note) {
+                                    (card.x, card.y) = position;
+                                }
                                 self.refresh_board_image_cache();
-                                InvalidateRect(self.hwnd, null(), 1);
+                                InvalidateRect(self.hwnd, &area, 1);
                             }
                         }
                     }
@@ -2288,7 +2415,17 @@ impl App {
                 }
                 WM_LBUTTONDBLCLK => {
                     if let Some(id) = self.card_at(x, y) {
-                        self.select(id);
+                        if hit_focused {
+                            self.mutate(|app| {
+                                let location = app.extras.native_board_focus.as_ref().ok_or("白板位置已變更。")?;
+                                let note = app.notebook.note_at_native_board_location(location)?;
+                                app.extras.native_board_focus = None;
+                                app.set_current_note(Some(note));
+                                Ok(())
+                            });
+                        } else {
+                            self.select(id);
+                        }
                     }
                 }
                 WM_RBUTTONUP => {
@@ -2312,8 +2449,13 @@ impl App {
                     let area = self.board_area();
                     if cursor.x >= area.left && cursor.x < area.right {
                         let delta = (wp >> 16) as u16 as i16 as i32;
-                        let max = self.board_scroll_end();
-                        self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        if wp & 0x0004 != 0 { // MK_SHIFT
+                            let max = self.board_scroll_end_x();
+                            self.extras.board_scroll_x = (self.extras.board_scroll_x - delta).clamp(0, max);
+                        } else {
+                            let max = self.board_scroll_end();
+                            self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        }
                         self.refresh_board_image_cache();
                         InvalidateRect(self.hwnd, &area, 1);
                     }
@@ -2464,7 +2606,7 @@ impl App {
             for group in &self.extras.groups {
                 let mut bounds = None::<RECT>;
                 for card in self.extras.cards.iter().filter(|card| group.members.contains(&card.id)) {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     let rect = RECT { left, top, right: left + self.scaled(size.width), bottom: top + self.scaled(size.height) };
@@ -2508,7 +2650,7 @@ impl App {
                     let prior = SelectObject(dc, pen);
                     let centers = self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)).map(|card| {
                         let size = card.size();
-                        (card.id, (area.left + self.scaled(card.x + size.width / 2),
+                        (card.id, (self.board_screen_x(area, card.x + size.width / 2),
                                    area.top + self.scaled(card.y - self.extras.scroll + size.height / 2)))
                     }).collect::<HashMap<_, _>>();
                     for edge in &self.extras.edges {
@@ -2524,55 +2666,67 @@ impl App {
                 }
             }
             self.paint_mind_map_edges(dc, area);
-            for card in self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)) {
-                let left = area.left + self.scaled(card.x);
-                let top = area.top + self.scaled(card.y - self.extras.scroll);
-                let size = card.size();
-                let rect = RECT {
-                    left,
-                    top,
-                    right: left + self.scaled(size.width),
-                    bottom: top + self.scaled(size.height),
-                };
-                if rect.bottom <= area.top || rect.top >= area.bottom {
-                    continue;
-                }
-                fill(dc, &rect, PAPER);
-                if self.paint_board_image(dc, rect, card) {
-                    self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                    continue;
-                }
-                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                let mut title = RECT {
-                    left: left + self.scaled(13),
-                    top: top + self.scaled(10),
-                    right: rect.right - self.scaled(12),
-                    bottom: top + self.scaled(37),
-                };
-                draw_text(
-                    dc,
-                    self.fonts[0],
-                    TEAL,
-                    &card.title,
-                    &mut title,
-                    DT_SINGLELINE | DT_END_ELLIPSIS,
-                );
-                let mut excerpt = RECT {
-                    top: top + self.scaled(40),
-                    bottom: rect.bottom - self.scaled(10),
-                    ..title
-                };
-                draw_text(
-                    dc,
-                    self.fonts[3],
-                    SOFT,
-                    &card.excerpt,
-                    &mut excerpt,
-                    DT_WORDBREAK | DT_END_ELLIPSIS,
-                );
+            let focus = self.focused_native_card();
+            for card in self.extras.cards.iter().filter(|card| Some(card.id) != focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
             }
             self.paint_board_objects(dc, area);
+            if let Some(card) = self.extras.cards.iter().find(|card| Some(card.id) == focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
+            }
             RestoreDC(dc, saved);
+        }
+    }
+
+    unsafe fn paint_native_board_card(&self, dc: HDC, area: RECT, card: &crate::store::Card) {
+        unsafe {
+            let left = self.board_screen_x(area, card.x);
+            let top = area.top + self.scaled(card.y - self.extras.scroll);
+            let size = card.size();
+            let rect = RECT {
+                left,
+                top,
+                right: left + self.scaled(size.width),
+                bottom: top + self.scaled(size.height),
+            };
+            if rect.bottom <= area.top || rect.top >= area.bottom
+                || rect.right <= area.left || rect.left >= area.right
+            {
+                return;
+            }
+            fill(dc, &rect, PAPER);
+            if self.paint_board_image(dc, rect, card) {
+                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+                return;
+            }
+            self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+            let mut title = RECT {
+                left: left + self.scaled(13),
+                top: top + self.scaled(10),
+                right: rect.right - self.scaled(12),
+                bottom: top + self.scaled(37),
+            };
+            draw_text(
+                dc,
+                self.fonts[0],
+                TEAL,
+                &card.title,
+                &mut title,
+                DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let mut excerpt = RECT {
+                top: top + self.scaled(40),
+                bottom: rect.bottom - self.scaled(10),
+                ..title
+            };
+            draw_text(
+                dc,
+                self.fonts[3],
+                SOFT,
+                &card.excerpt,
+                &mut excerpt,
+                DT_WORDBREAK | DT_END_ELLIPSIS,
+            );
         }
     }
 
@@ -2846,6 +3000,7 @@ mod tests {
             4
         }).is_err());
         assert!(check_workspace_volume(Path::new(r"\\?\C:\notes"), |_| 3).is_ok());
+        assert!(check_workspace_volume(Path::new(r"C:\notes"), |_| 0).is_err());
     }
 
     #[test]
@@ -2871,6 +3026,32 @@ mod tests {
         assert_eq!(workspace_directory(&exe, false, Some(local))?, adjacent);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn workspace_uses_resolved_local_directory_and_rejects_nonfile_members() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("paperroom-resolved-paths-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            let workspace = root.join("本機資料").join("nested");
+            let resolved = prepare_workspace_directory(&workspace)?;
+            assert_eq!(resolved, std::fs::canonicalize(&workspace)?);
+            let db = workspace.join("notes.sqlite3");
+            drop(Notebook::open(&resolved.join("notes.sqlite3"), true)?);
+            assert!(db.is_file());
+            assert_eq!(prepare_workspace_directory(&workspace)?, resolved);
+            let original = std::fs::read(&db)?;
+            std::fs::create_dir(workspace.join("notes.sqlite3-wal"))?;
+            assert!(prepare_workspace_directory(&workspace).is_err());
+            assert_eq!(std::fs::read(&db)?, original);
+            let deep = (0..15).fold(root.clone(), |path, _| path.join("深層工作區資料目錄驗證長路徑"));
+            let long = prepare_workspace_directory(&deep)?;
+            assert_eq!(long, std::fs::canonicalize(deep)?);
+            drop(Notebook::open(&long.join("notes.sqlite3"), true)?);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]

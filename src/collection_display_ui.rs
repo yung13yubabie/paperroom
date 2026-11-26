@@ -19,6 +19,7 @@ impl App {
             let action = popup(self.hwnd, self.widgets.links, None, &[
                 (1, "檢視可用屬性…"), (2, "設定顯示順序…"),
                 (3, "恢復原有欄位"), (4, "查看資料列的顯示欄位…"),
+                (5,"編輯連結的 status…"),(6,"編輯連結的布林或數值…"),
             ]);
             match action {
                 1 => {
@@ -60,6 +61,34 @@ impl App {
                     Ok(())
                 }
                 4 => self.show_collection_display_row(id),
+                5 | 6 => {
+                    let typed=action==6;
+                    let keys=if typed{self.notebook.typed_base_keys(id)?}else{
+                        self.notebook.live_status_keys(id)?.into_iter().map(|k|(k,String::new())).collect()
+                    };
+                    if keys.is_empty(){return Err("這個集合沒有此類可編輯欄位。".into());}
+                    let Some(k)=choose(self.hwnd,self.widgets.links,&keys,|(label,_)|label.clone()) else{return Ok(())};
+                    let (key,kind)=&keys[k];
+                    let Some(WorkspaceView::Kanban(view))=&self.extras.workspace else{return Ok(())};
+                    let visible=if typed{self.notebook.typed_base_rows(id,key)?}else{self.notebook.editable_status_rows(id,key)?};
+                    let rows:Vec<_>=view.expanded_lanes().flat_map(|(_,rows)|rows.iter()).filter(|note|visible.contains_key(&note.id)).map(|note|(note.id,note.title.clone())).collect();
+                    if rows.is_empty(){return Err("目前沒有可編輯的來源資料列。".into());}
+                    let Some(n)=choose(self.hwnd,self.widgets.links,&rows,|(id,title)|format!("{title} (#{id})")) else{return Ok(())};
+                    let note=rows[n].0;
+                    let (version,value)=if typed{self.notebook.typed_base_current(id,key,note)?}else{self.notebook.live_status_snapshot(id,key,note)?};
+                    let (title_text,hint)=if typed{("編輯工作區型別欄位",if kind=="number"{"輸入十進位數（整數最多 15 位、小數最多 6 位）或 null。"}else{"輸入 true、false 或 null。"})}else{("編輯工作區 status","儲存後，同一篇來源筆記的連結欄位將顯示新值。")};
+                    let Some(draft)=crate::dialog::prompt(self.hwnd,title_text,hint,&value,1024)? else{return Ok(())};
+                    let outcome=if typed{self.notebook.edit_typed_base(id,key,note,version,&draft)}else{self.notebook.edit_live_status(id,key,note,version,&draft)};
+                    if let Err(e)=outcome{
+                        return crate::dialog::show_text(self.hwnd,"欄位未儲存（可複製）",&format!("{e}\r\n\r\n{draft}"));
+                    }
+                    if !self.dirty && !self.failed && self.current.as_ref().is_some_and(|current|current.row.id==note) {
+                        self.current=self.notebook.note(note)?;
+                    }
+                    let saved=self.active_collection_view(id);
+                    self.open_collection_layout(id,title,saved)?;
+                    Ok(())
+                }
                 _ => Ok(()),
             }
         }

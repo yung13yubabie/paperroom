@@ -60,6 +60,8 @@ pub(crate) mod migration_media;
 #[cfg(any(windows, test))]
 #[path = "vault_import_review.rs"]
 pub(crate) mod vault_import_review;
+#[path = "notion_typed_relations.rs"]
+pub(crate) mod notion_typed_relations;
 #[path = "notion_handoff.rs"]
 pub(crate) mod notion_handoff;
 #[path = "notion_page_links.rs"]
@@ -87,6 +89,9 @@ mod attachments;
 pub use attachments::{MAX_PDF_SEARCH_QUERY, PdfAnnotationHit};
 #[path = "collections.rs"]
 mod collections;
+#[cfg(any(windows, test))]
+#[path = "named_relation_navigation.rs"]
+pub(crate) mod named_relation_navigation;
 #[cfg(windows)]
 pub(crate) use collections::CollectionEntry;
 #[path = "collection_display.rs"]
@@ -107,12 +112,21 @@ mod formula_service;
 pub use groups::BoardGroup;
 #[path = "boards.rs"]
 mod boards;
+#[cfg(any(windows, test))]
+#[path = "native_board_locations.rs"]
+pub(crate) mod native_board_locations;
 #[path = "tasks.rs"]
 pub(crate) mod tasks;
 #[path = "board_images.rs"]
 pub(crate) mod board_images;
 #[path = "board_bundle.rs"]
 mod board_bundle;
+#[path = "heptabase_boards.rs"]
+mod heptabase_boards;
+#[path = "obsidian_base.rs"]
+pub(crate) mod obsidian_base;
+#[path = "obsidian_base_import.rs"]
+mod obsidian_base_import;
 #[path = "csv_table.rs"]
 mod csv_table;
 #[path = "properties.rs"]
@@ -129,7 +143,18 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 35;
+#[path="obsidian_base_live.rs"]
+mod obsidian_base_live;
+
+#[path="obsidian_base_typed.rs"]
+mod obsidian_base_typed;
+#[path="obsidian_base_dynamic.rs"]
+mod obsidian_base_dynamic;
+#[path="canvas_base_cards.rs"]
+pub(crate) mod canvas_base_cards;
+#[path = "relation_fields.rs"]
+pub(crate) mod relation_fields;
+const SCHEMA_VERSION: i32 = 44;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -196,6 +221,15 @@ pub fn clean_title(title: &str) -> String {
     title.chars().take(MAX_TITLE_CHARS).collect()
 }
 
+fn confirm_workspace_journal(connection: &Connection, memory: bool) -> Result<()> {
+    let actual: String = connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    let expected = if memory { "memory" } else { "wal" };
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!("工作區日誌需要 {expected} 模式，SQLite 回報 {actual}。請確認工作區仍在可寫入的本機磁碟。").into());
+    }
+    Ok(())
+}
+
 impl Notebook {
     pub fn open(path: &Path, seed: bool) -> Result<Self> {
         // The Win32 VFS ultimately opens this UTF-16 name. Use extended
@@ -221,7 +255,7 @@ impl Notebook {
         if version > SCHEMA_VERSION {
             return Err("這份筆記由較新的紙間版本建立。".into());
         }
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        confirm_workspace_journal(&connection, path == Path::new(":memory:"))?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -394,6 +428,25 @@ impl Notebook {
         if version < 35 {
             tx.execute_batch(collection_group_folds::SCHEMA)?;
         }
+        if version < 36 {
+            note_links::preserve_legacy_links(&tx)?;
+        }
+        if version < 37 {
+            tx.execute_batch(collection_display::OBSIDIAN_VALUES_SCHEMA)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS heptabase_import_roots(
+                import_root INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE
+            );")?;
+        }
+        if version < 38 { tx.execute_batch(heptabase_boards::SOURCE_SCHEMA)?; }
+        if version < 39 { tx.execute_batch(obsidian_base_live::SCHEMA)?; }
+        if version < 40 {tx.execute_batch(obsidian_base_typed::SCHEMA)?;}
+        if version < 41 {
+            tx.execute_batch(obsidian_base_dynamic::SCHEMA)?;
+            tx.execute_batch(canvas_base_cards::SCHEMA)?;
+        }
+        if version < 42 {tx.execute_batch(obsidian_base_import::scope::SCHEMA)?;}
+        if version < 43 { tx.execute_batch(relation_fields::SCHEMA)?; }
+        if version < 44 { tx.execute_batch(obsidian_base_typed::DESCENDING_GROUP_SCHEMA)?; }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -626,6 +679,13 @@ impl Notebook {
         self.import_pages(folder, import.pages, true, import.media, None, Some(import.links))
     }
 
+    pub(crate) fn import_heptabase_handoff(
+        &mut self, folder: &str, files: Vec<crate::archive::ImportedPage>,
+        media: migration_media::MediaPlan, handoff: crate::archive::HeptabaseHandoff,
+    ) -> Result<(i64, heptabase_boards::CompanionReport)> {
+        self.import_pages_with_handoff(folder, files, true, media, None, None, Some(handoff))
+    }
+
     fn import_pages(
         &mut self,
         folder: &str,
@@ -635,14 +695,32 @@ impl Notebook {
         csv: Option<notion_handoff::CsvSources>,
         portable_links: Option<vault_zip_links::LinkPlan>,
     ) -> Result<i64> {
+        self.import_pages_with_handoff(folder, files, vault, media, csv, portable_links, None)
+            .map(|(root, _)| root)
+    }
+
+    fn import_pages_with_handoff(
+        &mut self,
+        folder: &str,
+        files: Vec<crate::archive::ImportedPage>,
+        vault: bool,
+        media: migration_media::MediaPlan,
+        csv: Option<notion_handoff::CsvSources>,
+        portable_links: Option<vault_zip_links::LinkPlan>,
+        handoff: Option<crate::archive::HeptabaseHandoff>,
+    ) -> Result<(i64, heptabase_boards::CompanionReport)> {
         use std::collections::HashMap;
 
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let root = insert(&tx, None, folder, "")?;
+        if handoff.is_some() {
+            tx.execute("INSERT INTO heptabase_import_roots(import_root) VALUES(?1)", [root])?;
+        }
         let folder_title = if vault { clean_title } else { crate::archive::export_title };
         let mut ids = HashMap::new();
+        let mut exact_sources = HashMap::new();
         for page in &files {
             validate_body(&page.body)?;
             let mut parent = root;
@@ -673,15 +751,24 @@ impl Notebook {
             }
             let path = page.parts.join("/");
             if vault {
+                let source = if let Some(handoff) = &handoff {
+                    let source = handoff.paths.get(&page.parts).ok_or("找不到這篇匯入筆記的原始路徑。")?;
+                    if exact_sources.insert(source.clone(), parent).is_some() {
+                        return Err("ZIP 內 Markdown 原始路徑重複，未匯入。".into());
+                    }
+                    source
+                } else {
+                    &path
+                };
                 tx.execute(
                     "INSERT INTO vault_paths(note_id,import_root,relative_path) VALUES(?1,?2,?3)",
-                    params![parent, root, path],
+                    params![parent, root, source],
                 )?;
                 tx.execute(
                     "INSERT INTO vault_sync_base(note_id,body) VALUES(?1,?2)",
                     params![parent, page.body],
                 )?;
-                if portable_links.is_none() {
+                if portable_links.is_none() && handoff.is_none() {
                     tx.execute("INSERT INTO vault_push_verified(note_id) VALUES(?1)", [parent])?;
                 }
             }
@@ -700,8 +787,15 @@ impl Notebook {
         if let Some(links) = portable_links {
             links.rebind(&tx, root)?;
         }
+        let report = if let Some(handoff) = handoff {
+            let mut report = heptabase_boards::import_companion_with_images(&tx, root, handoff.canvases, &exact_sources, &handoff.images)?;
+            report.details.extend(handoff.warnings);
+            report
+        } else {
+            heptabase_boards::CompanionReport::default()
+        };
         tx.commit()?;
-        Ok(root)
+        Ok((root, report))
     }
 }
 
@@ -785,7 +879,17 @@ mod tests {
 
     pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "DROP TRIGGER IF EXISTS reset_collection_group_folds;
+            "DROP TABLE IF EXISTS relation_field_values;
+             DROP TABLE IF EXISTS relation_fields;
+             DROP TABLE IF EXISTS canvas_base_paths;
+             DROP TABLE IF EXISTS base_card_views;
+             DROP TABLE IF EXISTS base_card_receipts;
+             DROP TABLE IF EXISTS obsidian_base_file_values;
+             DROP TABLE IF EXISTS obsidian_base_file_columns;
+             DROP TABLE IF EXISTS companion_node_sources;
+             DROP TABLE IF EXISTS companion_canvases;
+             DROP TABLE IF EXISTS heptabase_import_roots;
+             DROP TRIGGER IF EXISTS reset_collection_group_folds;
              DROP TABLE IF EXISTS collection_group_folds;
              DROP TRIGGER record_prior_note_revision;
              DROP TRIGGER write_note_history;
@@ -1100,6 +1204,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_verifies_real_sqlite_journal_mode_before_writing() -> Result<()> {
+        let dir = data_dir();
+        let path = dir.join("workspace.sqlite3");
+        let backup = dir.join("reopened.sqlite3");
+        let read_mode = |connection: &Connection| {
+            connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+        };
+        let mut disk = Notebook::open(&path, false)?;
+        assert_eq!(read_mode(&disk.connection)?, "wal");
+        let id = disk.add(None, "日誌測試", "已儲存")?;
+        disk.backup(&backup)?;
+        drop(disk);
+
+        for opened in [&path, &backup] {
+            let live = Notebook::open(opened, false)?;
+            assert_eq!(read_mode(&live.connection)?, "wal");
+            assert_eq!(live.note(id)?.unwrap().body, "已儲存");
+        }
+        let memory = Notebook::open(Path::new(":memory:"), false)?;
+        assert_eq!(read_mode(&memory.connection)?, "memory");
+        assert!(confirm_workspace_journal(&memory.connection, false)
+            .unwrap_err().to_string().contains("SQLite 回報 memory"));
+
+        let locked_path = dir.join("locked-before-open.sqlite3");
+        let holder = Connection::open(&locked_path)?;
+        holder.execute_batch("CREATE TABLE existing_record(value TEXT);
+            INSERT INTO existing_record VALUES('原樣');
+            BEGIN IMMEDIATE;")?;
+        assert!(Notebook::open(&locked_path, true).is_err());
+        assert_eq!(read_mode(&holder)?, "delete");
+        assert_eq!(holder.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?, 0);
+        assert_eq!(holder.query_row("SELECT value FROM existing_record", [], |row| row.get::<_, String>(0))?, "原樣");
+        assert!(!holder.prepare("SELECT name FROM sqlite_schema WHERE name='notes'")?.exists([])?);
+        holder.execute_batch("ROLLBACK")?;
+        drop(holder);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn newer_database_keeps_its_journal_mode() -> Result<()> {
         let dir = data_dir();
         let path = dir.join("future.sqlite3");
@@ -1128,6 +1272,7 @@ mod tests {
         db.connection.execute_batch(
             "DROP TABLE pdf_excerpt_cards; DROP TABLE pdf_text_mark_segments; DROP TABLE vault_push_verified; DROP TABLE pdf_text_marks; DROP TABLE vault_sync_base; DROP TABLE attachment_origins; DROP TABLE board_group_sources; DROP TABLE property_definitions; DROP TABLE collection_views;
              DROP TABLE pdf_annotation_regions; DROP TABLE canvas_vault_bindings;
+             DROP TABLE IF EXISTS obsidian_base_scope; DROP TABLE obsidian_base_candidates; DROP TABLE obsidian_base_dynamic;
              DROP TABLE collection_formulas; DROP TABLE saved_canvases;
              DROP TABLE board_group_cards; DROP TABLE board_groups;
              DROP TABLE pdf_annotations; DROP TABLE attachments;
@@ -1260,7 +1405,10 @@ mod tests {
         assert_eq!(target.body, "second");
         assert_eq!(db.related(&target)?.1[0].id, source_id);
         let version = note.version;
-        db.save(source_id, version, "Source", &format!("[[paperroom:note:{local}|Outside]]"))?;
+        let token: String = db.connection.query_row(
+            "SELECT token FROM note_link_identities WHERE note_id=?1", [local], |row| row.get(0),
+        )?;
+        db.save(source_id, version, "Source", &note_links::note_link_markup(local, &token, "Outside"))?;
         assert_eq!(db.related(&db.note(source_id)?.unwrap())?.0[0].id, local);
         Ok(())
     }

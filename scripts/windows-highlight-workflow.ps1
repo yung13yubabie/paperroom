@@ -3,7 +3,27 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
-    [switch]$ProvePortableLinkGap
+    [switch]$ProvePortableLinkGap,
+    [switch]$LegacyLinkOnly,
+    [switch]$UnifiedSourcesOnly,
+    [switch]$UnifiedDetailsOnly,
+    [switch]$BasesLiveOnly,
+    [switch]$CompanionPlacementOnly,
+    [switch]$TypedBasesOnly,
+    [switch]$TypedNotionOnly,
+    [switch]$CompanionAssetsOnly,
+    [switch]$VendorRichCanvasOnly,
+    [switch]$PinnedBasesOnly,
+    [switch]$NotionSourceOnly,
+    [switch]$NodeAssetsOnly,
+    [switch]$PinnedCardScopeOnly,
+    [switch]$NotionSourceReplacementOnly,
+    [switch]$NativeChildBoardOnly,
+    [switch]$VaultRelocationConflictOnly,
+    [switch]$TypedRelationBranchOnly,
+    [switch]$RelationRollupRecoveryOnly,
+    [switch]$SharedNoteWorkflowOnly,
+    [switch]$BasesDescendingOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -283,6 +303,15 @@ public static class PaperroomHighlightGui {
             throw new InvalidOperationException("The left button target changed.");
         SendPhysical(new[] { Mouse(down ? 0x02u : 0x04u) });
     }
+
+    public static void RightCanvasClick(IntPtr owner, uint pid, int x, int y) {
+        var point = CanvasCursor(owner, pid, x, y);
+        if (WindowFromPoint(point) != owner || !WorkspaceInForeground(owner, pid))
+            throw new InvalidOperationException("Expected the exposed foreground test Canvas.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        SendPhysical(new[] { Mouse(8), Mouse(16) });
+    }
     public static bool CanvasCaptured(IntPtr owner, uint pid) {
         uint thread = GetWindowThreadProcessId(owner, out uint actual);
         var gui = new GuiThread { Size = (uint)Marshal.SizeOf<GuiThread>() };
@@ -353,6 +382,25 @@ public static class PaperroomHighlightGui {
             : new[] { Mouse(0x0800, unchecked((uint)(scroll * 120))) };
         SendPhysical(input);
     }
+    public static void BoardCardClick(IntPtr owner, uint pid, int slot, bool remove) {
+        BoardCardClick(owner,pid,slot,remove,false,false);
+    }
+    public static void BoardCardClick(IntPtr owner, uint pid, int slot, bool right, bool centered, bool select) {
+        if (slot != 0 && slot != 1) throw new ArgumentOutOfRangeException(nameof(slot));
+        var area = CanvasArea(owner,pid);
+        int dpi = (int)GetDpiForWindow(owner);
+        // The first two ordinary cards occupy the first two grid slots.
+        int x = centered ? (area.Left + area.Right) / 2 : area.Left + ((46 + 260 * slot) * dpi + 48) / 96;
+        int y = centered ? (area.Top + area.Bottom) / 2 : area.Top + (46 * dpi + 48) / 96;
+        var point = CanvasCursor(owner, pid, x, y);
+        if (WindowFromPoint(point) != owner || !WorkspaceInForeground(owner,pid))
+            throw new InvalidOperationException("Expected the unoccluded, foreground native board.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        if (select) SendPhysical(new[] { Key(0x11, 0, 0), Mouse(2), Mouse(4), Key(0x11, 0, 2) });
+        else if (right) SendPhysical(new[] { Mouse(8), Mouse(16) });
+        else SendPhysical(new[] { Mouse(2), Mouse(4), Mouse(2), Mouse(4) });
+    }
     private static Input Mouse(uint flags, uint delta = 0) {
         return new Input { Data = new InputData { Mouse = new MouseInput { Flags = flags, Data = delta } } };
     }
@@ -416,6 +464,9 @@ public static class PaperroomHighlightGui {
                 " physical changes; Win32 error " + Marshal.GetLastWin32Error() + ".");
     }
     public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup) {
+        return CurrentMenuLabels(owner, pid, popup, true);
+    }
+    public static string[] CurrentMenuLabels(IntPtr owner, uint pid, IntPtr popup, bool requireSequentialIds) {
         if (popup == IntPtr.Zero || OwnedWindow(owner, pid, "#32768", null, 0) != popup)
             throw new InvalidOperationException("The verified native menu is no longer open.");
         IntPtr menu = Send(popup, 0x01E1, IntPtr.Zero, IntPtr.Zero);
@@ -424,9 +475,10 @@ public static class PaperroomHighlightGui {
         var labels = new string[count];
         for (int i = 0; i < count; ++i) {
             var label = new StringBuilder(256);
-            if (GetMenuItemID(menu, i) != (uint)(i + 1) ||
-                GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+            if (requireSequentialIds && GetMenuItemID(menu, i) != (uint)(i + 1))
                 throw new InvalidOperationException("Expected a sequential Paperroom list.");
+            if (GetMenuStringW(menu, (uint)i, label, label.Capacity, 0x400) == 0)
+                throw new InvalidOperationException("Expected a labeled Paperroom command.");
             labels[i] = label.ToString();
         }
         return labels;
@@ -658,7 +710,7 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, 
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status,
                      [switch]$AlreadyOpened, [string]$ExpectedError = '', [switch]$CanvasSave,
-                     [string]$NextDialog = '', [string]$SaveName = '') {
+                     [string]$NextDialog = '', [string]$SaveName = '', [int]$NextDialogButton = 1) {
     if (!$AlreadyOpened) { Native-Menu 109 $Item $Caption }
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
     $defaultName = if ($SaveName) { $SaveName } elseif ($CanvasSave) { 'canvas.canvas' } else { switch ($Item) {
@@ -671,7 +723,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 31, 37, 38, 39
+    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 20, 31, 37, 38, 39, 40, 41
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -714,7 +766,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         }
         if ($NextDialog) {
             return (Wait-For "native dialog after $Caption" {
-                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $NextDialog, 1)
+                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $NextDialog, $NextDialogButton)
             })
         }
         $null = Wait-For "$Caption completed" {
@@ -883,8 +935,12 @@ print(f"Named group {phase}: standard fields, exact bytes, preserved nested grou
 }
 
 function Locate-NoteOnCanvas([int]$CanvasIndex, [string]$CanvasName, [int]$CanvasId, [int]$Count,
-                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb) {
-    Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+                            [int]$NodeIndex, [string]$NodeId, [int[]]$Rgb, [switch]$FromLinks) {
+    if ($FromLinks) {
+        Native-Menu 120 60002 '查看此筆記的 Canvas 位置…'
+    } else {
+        Native-Menu 113 27 '查看此筆記的 Canvas 位置…'
+    }
     Native-Menu 113 $CanvasIndex ("$CanvasName  (#${CanvasId}，$Count 處)") -MenuOpen
     Native-Menu 113 $NodeIndex "${NodeIndex}　同一張卡 〔$NodeId〕" -MenuOpen -CaptionPrefix
     $null = Wait-For 'exact Canvas and occurrence are active' {
@@ -1397,6 +1453,74 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($TypedRelationBranchOnly -or $RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) {
+        . (Join-Path $PSScriptRoot 'windows-typed-relation-branch.ps1')
+        return
+    }
+    if ($BasesDescendingOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-desc.ps1')
+        return
+    }
+    if ($PinnedCardScopeOnly -or $VaultRelocationConflictOnly) {
+        . (Join-Path $PSScriptRoot 'windows-pinned-card-live-scope.ps1')
+        return
+    }
+    if ($NotionSourceReplacementOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-source-replacement.ps1')
+        return
+    }
+    if ($NativeChildBoardOnly) {
+        . (Join-Path $PSScriptRoot 'windows-native-child-board.ps1')
+        return
+    }
+    if ($PinnedBasesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-pinned-bases.ps1')
+        return
+    }
+    if ($NotionSourceOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-source-edge.ps1')
+        return
+    }
+    if ($NodeAssetsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-node-assets.ps1')
+        return
+    }
+    if ($TypedBasesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-typed.ps1')
+        return
+    }
+    if ($TypedNotionOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-typed-fields.ps1')
+        return
+    }
+    if ($CompanionAssetsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-companion-assets.ps1')
+        return
+    }
+    if ($VendorRichCanvasOnly) {
+        . (Join-Path $PSScriptRoot 'windows-vendor-rich-canvas.ps1')
+        return
+    }
+    if ($BasesLiveOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-live.ps1')
+        return
+    }
+    if ($CompanionPlacementOnly) {
+        . (Join-Path $PSScriptRoot 'windows-companion-placement.ps1')
+        return
+    }
+    if ($UnifiedDetailsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-unified-source-details.ps1')
+        return
+    }
+    if ($UnifiedSourcesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-unified-sources.ps1')
+        return
+    }
+    if ($LegacyLinkOnly) {
+        . (Join-Path $PSScriptRoot 'windows-imported-legacy-link.ps1')
+        return
+    }
     foreach ($folder in $live,$restored) {
         [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
         Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
@@ -2888,7 +3012,25 @@ print("Full backup has the original stable note identity and attachment, exact C
     $null = Wait-For 'selected the only original card by unique body' {
         [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭'
     }
-    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125)
+    # The two notes share a title. Edit through the real picker (it omits the
+    # current note), then verify each destination by its distinct saved body.
+    Native-Menu 113 7 '筆記關聯…'
+    Native-Menu 113 1 '新增關聯…' -MenuOpen
+    Choose-CollectionRow '鏡頭  ('
+    Collection-Prompt '新增關聯' '取景對照'
+    function Open-TwinNamedRelation([int]$Direction, [string]$Label, [string]$Body) {
+        Native-Menu 120 60001 '具名關聯的來源與目標…'
+        Native-Menu 120 $Direction $Label -MenuOpen
+        Native-Menu 120 1 '取景對照　鏡頭' -MenuOpen -CaptionPrefix
+        $null = Wait-For "selected the exact named relation endpoint: $Body" {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已開啟具名關聯的筆記。' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains($Body)
+        }
+    }
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' '另一本 Vault 的同名正文'
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' '場景原本的獨特引文'
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 1 'west' @(237,33,125) -FromLinks
     Open-LocationSource
     Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
     Open-LocationSource
@@ -2903,7 +3045,10 @@ print("Full backup has the original stable note identity and attachment, exact C
     Search-Workspace $dialog '找到 1 筆筆記。' 1
     Finish-Revision $dialog 111
     $null = Wait-For 'reopened the original note' { [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' }
-    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116)
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' '另一本 Vault 的同名正文'
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' '場景原本的獨特引文'
+    Write-Host 'PASS: native Links button followed both named-relation directions between same-titled notes by distinct body after restart.'
+    Locate-NoteOnCanvas 1 'CanvasNorth' 1 2 2 'east' @(18,164,116) -FromLinks
     Native-Menu 120 6 '解除 Vault 綁定'
     Native-Menu 120 13 '開啟已選節點的來源筆記'
     $refusal = Wait-For 'selected node cannot open an unbound file' {
@@ -2934,9 +3079,255 @@ print("Full backup has the original stable note identity and attachment, exact C
     $null = Wait-For 'unbound and same-name other Vault occurrences are excluded' {
         [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '這篇筆記未出現在已綁定的 Canvas。'
     }
+    # Work with the same two imported notes, not a second set with similar names.
+    $nativeBodies = @('場景原本的獨特引文','另一本 Vault 的同名正文')
+    $pickRows = @'
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
+    live=db.execute("SELECT title,body FROM notes WHERE trash_root IS NULL ORDER BY id").fetchall()
+    for body in sys.argv[2:]:
+        hits=[i for i,row in enumerate(live,1) if row==("鏡頭",body)]
+        assert len(hits)==1
+        print(hits[0])
+'@ | python - $locationDb $nativeBodies[0] $nativeBodies[1]
+    if ($LASTEXITCODE -ne 0 -or @($pickRows).Count -ne 2) { throw 'Could not independently identify the two real note-picker rows.' }
+    function Assert-TwinBody([string]$Body) {
+        $null=Wait-For "native board opened the exact note: $Body" {
+            [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '鏡頭' -and
+            [PaperroomHighlightGui]::Read((Control $window 121)).Contains($Body) -and
+            [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+        }
+    }
+    function Pick-NativePlacement([string]$Board, [int]$ExpectedCount) {
+        Native-Menu 120 60003 '查看此筆記的原生白板位置…'
+        $options=@(Collection-MenuLabels)
+        if ($options.Count -ne $ExpectedCount) { throw "Expected $ExpectedCount placements; got $($options -join ', ')." }
+        Choose-CollectionRow $Board
+        $null=Wait-For "native board focus: $Board" {
+            [PaperroomHighlightGui]::Read((Control $window 115)).Contains($Board) -and
+            [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已定位白板上的筆記卡片。'
+        }
+    }
+    function Search-NativeTwin([string]$Body) {
+        $d=Open-WorkspaceSearch -Menu
+        Type-SearchFilter $d 101 $Body
+        Search-Workspace $d '找到 1 筆筆記。' 1
+        Finish-Revision $d 111
+        Assert-TwinBody $Body
+    }
+    $null = Wait-For 'ready to switch from a note to the native board' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
+    Click-WorkspaceButton 119
+    $null = Wait-For 'native board controls ready at their board positions' {
+        if ([PaperroomHighlightGui]::Read((Control $window 119)) -cne '返回筆記' -or
+            [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') { return $false }
+        try {
+            $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+            $button = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,(Control $window 120))
+            return $button.Y -lt $area.Top
+        } catch { return $false }
+    }
+    Native-Menu 120 3 '新增白板…'
+    Collection-Prompt '新增白板' 'NativeNorth'
+    $null = Wait-For 'new board NativeNorth is active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains('NativeNorth') -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '白板操作'
+    }
+    Native-Menu 120 1 '放入筆記…'
+    Native-Menu 120 ([uint32]$pickRows[0]) '鏡頭' -MenuOpen
+    Native-Menu 120 4 '新增分區…'
+    Collection-Prompt '新增分區' '遠端卡片'
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$true)
+    Native-Menu 120 4 '設定分區…' -MenuOpen
+    Native-Menu 120 2 '遠端卡片' -MenuOpen
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$false,$true)
+    Native-Menu 120 12 '移動選取的物件…'
+    Collection-Prompt '移動選取的物件' '4200,3600'
+    $null = Wait-For 'moved the card outside the viewport' {
+        [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已移動 1 個白板物件。'
+    }
+    Native-Menu 120 13 '收合或展開分區…'
+    Native-Menu 120 1 '收合「遠端卡片」' -MenuOpen
+    Native-Menu 120 3 '新增白板…'
+    Collection-Prompt '新增白板' 'NativeSouth'
+    $null = Wait-For 'new board NativeSouth is active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains('NativeSouth') -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '白板操作'
+    }
+    foreach ($index in @(1,0)) {
+        Native-Menu 120 1 '放入筆記…'
+        Native-Menu 120 ([uint32]$pickRows[$index]) '鏡頭' -MenuOpen
+    }
+    Click-WorkspaceButton 119
+    $null = Wait-For 'note controls ready after leaving the native board' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeSouth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Open-TwinNamedRelation 2 '此筆記指向的具名關聯…' $nativeBodies[1]
+    Pick-NativePlacement 'NativeSouth' 1
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false)
+    Assert-TwinBody $nativeBodies[1]
+    Open-TwinNamedRelation 1 '指向此筆記的具名關聯…' $nativeBodies[0]
+    $nativeBackup=Join-Path $root 'native-locations.sqlite3'
+    Native-File 4 '備份工作區…' $nativeBackup '工作區備份已完成'
+    $nativeBackupHash=(Get-FileHash -LiteralPath $nativeBackup).Hash
+    Pick-NativePlacement 'NativeNorth' 2
+    # The far card began inside a collapsed group. Opening it with a physical
+    # click at the read-only viewport focus verifies both scrolling and reveal.
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$true,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Pick-NativePlacement 'NativeNorth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$true,$true,$false)
+    Native-Menu 120 1 '移出白板' -MenuOpen
+    Close-Notebook $process
+    $process.Dispose()
+    $process=Start-Notebook $locationHome
+    $window=$process.MainWindowHandle
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeSouth' 1
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false)
+    Assert-TwinBody $nativeBodies[0]
+    Close-Notebook $process
+    $process.Dispose()
+    $clone=Join-Path $root 'native-location-restore'
+    $cloneData=Join-Path $clone 'paperroom-data'
+    [void][IO.Directory]::CreateDirectory($cloneData)
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $clone 'Paperroom.exe')
+    $restoreCopy = Join-Path $cloneData 'notes.sqlite3'
+    Copy-Item -LiteralPath $nativeBackup -Destination $restoreCopy
+    if ((Get-FileHash -LiteralPath $restoreCopy).Hash -cne $nativeBackupHash) { throw 'Restored workspace copy differs from the backup before startup.' }
+    $process=Start-Notebook $clone
+    $window=$process.MainWindowHandle
+    Search-NativeTwin $nativeBodies[0]
+    Pick-NativePlacement 'NativeNorth' 2
+    [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$false,$true,$false)
+    Assert-TwinBody $nativeBodies[0]
+    if ((Get-FileHash -LiteralPath $nativeBackup).Hash -cne $nativeBackupHash) { throw 'Opening the isolated restore changed its backup input.' }
+    Write-Host 'PASS: native board placements distinguished same-title note bodies, crossed a named relation, revealed a collapsed off-screen card, survived restart after a placement removal, and restored both placements from an isolated workspace backup.'
     Close-Notebook $process
     $process.Dispose()
     $process = $null
+    # Use two live windows on the isolated restored copy. Compare SQLite
+    # read-only, but move the card exclusively through native pointer input.
+    function Read-SouthCoordinates {
+        $coords = @'
+import json, sqlite3, sys
+from contextlib import closing
+from pathlib import Path
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
+    rows = db.execute("SELECT n.body,c.x,c.y FROM board_cards c JOIN notes n ON n.id=c.note_id "
+                      "JOIN boards b ON b.id=c.board_id WHERE b.title='NativeSouth' ORDER BY n.id").fetchall()
+assert len(rows) == 2
+target, = [row for row in rows if row[0] == sys.argv[2]]
+other, = [row for row in rows if row[0] != sys.argv[2]]
+print(json.dumps(dict(x=target[1], y=target[2], other=other[1:])))
+'@ | python - $restoreCopy $nativeBodies[1]
+        if ($LASTEXITCODE -ne 0 -or !$coords) { throw 'Could not read the two isolated board placements.' }
+        return $coords | ConvertFrom-Json
+    }
+    function Activate-TestBoard {
+        if (![PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)) {
+            [void][PaperroomHighlightGui]::SetForegroundWindow($window)
+            if (![PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)) {
+                $activator = New-Object -ComObject WScript.Shell
+                [void]$activator.AppActivate($process.Id)
+            }
+        }
+        $null = Wait-For 'selected isolated board window in foreground' {
+            [PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)
+        }
+    }
+    function Drag-NativeCard($Position, [int]$Dx, [int]$Dy) {
+        $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+        $dpi = [PaperroomHighlightGui]::GetDpiForWindow($window)
+        $x = $area.Left + [int][Math]::Round(($Position.x + 30) * $dpi / 96)
+        $y = $area.Top + [int][Math]::Round(($Position.y + 30) * $dpi / 96)
+        Drag-Canvas $x $y ($x+$Dx) ($y+$Dy)
+    }
+    $second = $null
+    try {
+        $process = Start-Notebook $clone
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        $first = $process
+        $firstWindow = $window
+        $startCoords = Read-SouthCoordinates
+        if ($startCoords.x -ne 16 -or $startCoords.y -ne 16) { throw 'Unexpected clean first-slot geometry.' }
+
+        $second = Start-Notebook $clone
+        $process = $second
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        Activate-TestBoard
+        Drag-NativeCard $startCoords 60 70
+        $secondCoords = Read-SouthCoordinates
+        if ($secondCoords.x -le $startCoords.x -or $secondCoords.y -le $startCoords.y) {
+            throw 'The second window did not save its physical drag.'
+        }
+
+        $process = $first
+        $window = $firstWindow
+        Activate-TestBoard
+        Drag-NativeCard $startCoords 0 0
+        $afterClick = Read-SouthCoordinates
+        if ($afterClick.x -ne $secondCoords.x -or $afterClick.y -ne $secondCoords.y) {
+            throw 'The stationary click overwrote newer coordinates.'
+        }
+        Start-Sleep -Milliseconds 700 # Keep these two gestures separate from a system double-click.
+        Drag-NativeCard $startCoords 35 40
+        $refusal = Wait-For 'native alert for a stale board gesture' {
+            [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+        }
+        if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'卡片位置或狀態已變更')) {
+            throw 'The first window did not identify a conflicting card move.'
+        }
+        [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+        $null = Wait-For 'stale board alert closed after the board refresh' {
+            ![PaperroomHighlightGui]::IsWindowVisible($refusal)
+        }
+        $afterRefusal = Read-SouthCoordinates
+        if ($afterRefusal.x -ne $secondCoords.x -or $afterRefusal.y -ne $secondCoords.y) {
+            throw 'A stale physical drag overwrote newer coordinates.'
+        }
+        Drag-NativeCard $afterRefusal 35 40
+        $fresh = Read-SouthCoordinates
+        if ($fresh.x -le $afterRefusal.x -or $fresh.y -le $afterRefusal.y -or
+            (($fresh.other -join ',') -cne ($startCoords.other -join ','))) {
+            throw 'The refreshed drag did not persist or affected the neighbor card.'
+        }
+        Close-Notebook $second
+        $second.Dispose()
+        $second = $null
+        Close-Notebook $process
+        $process.Dispose()
+        $process = Start-Notebook $clone
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        $reopened = Read-SouthCoordinates
+        if ($reopened.x -ne $fresh.x -or $reopened.y -ne $fresh.y) {
+            throw 'The latest native drag did not survive reopen.'
+        }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        Write-Host 'PASS: two native board windows kept the newer card position on a stationary click, rejected a stale drag, and persisted a refreshed move across restart.'
+    } finally {
+        if ($second) {
+            if (!$second.HasExited) { $second.Kill(); [void]$second.WaitForExit(5000) }
+            if ($process -eq $second) { $process = $first }
+            $second.Dispose()
+        }
+    }
     @'
 from contextlib import closing
 from pathlib import Path
@@ -3056,6 +3447,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     if ((Get-FileHash -LiteralPath $ruleDb).Hash -cne $sourceStamp -or
         (Get-FileHash -LiteralPath $ruleBackup).Hash -cne $backupStamp) { throw 'Isolated restore changed source or backup.' }
     Write-Host "PASS: collection rules, actual native creation and edits, rejected input and cancel without writes, legacy properties, reopen and isolated backup restore. EXE SHA-256 $ExeSha256."
+    . (Join-Path $PSScriptRoot 'windows-imported-legacy-link.ps1')
     . (Join-Path $PSScriptRoot 'windows-notion-csv-workflow.ps1')
     . (Join-Path $PSScriptRoot 'windows-notion-page-links.ps1')
     . (Join-Path $PSScriptRoot 'windows-canvas-local-assets.ps1')

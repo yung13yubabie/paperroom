@@ -198,10 +198,18 @@ impl Notebook {
     pub(crate) fn move_cards_between_boards(
         &self, source: i64, destination: i64, expected: &[BoardPosition], dx: i32, dy: i32,
     ) -> Result<usize> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Self::move_cards_on(&tx,source,destination,expected,dx,dy)?;
+        tx.commit()?;
+        Ok(expected.len())
+    }
+
+    pub(super) fn move_cards_on(
+        tx:&Transaction<'_>, source:i64, destination:i64, expected:&[BoardPosition], dx:i32, dy:i32,
+    )->Result<()> {
         if source == destination || expected.is_empty() || expected.len() as i64 > MAX_CARDS {
             return Err("請選取卡片與另一張目的白板。".into());
         }
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let (exists, capacity): (bool, i64) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM boards WHERE id=?1),
                     (SELECT count(*) FROM board_cards WHERE board_id=?1)",
@@ -273,7 +281,7 @@ impl Notebook {
                 }
             }
         }
-        let groups = transferable_groups(&tx, source, destination, &selected)?;
+        let groups = transferable_groups(tx, source, destination, &selected)?;
         for (note, x, y) in moved {
             tx.execute("INSERT INTO board_cards(board_id,note_id,x,y,image_width,image_height)
                 SELECT ?1,note_id,?3,?4,image_width,image_height FROM board_cards
@@ -285,7 +293,7 @@ impl Notebook {
                 params![destination, from, to])?;
         }
         for (group, members) in groups {
-            move_whole_board_group(&tx, source, destination, group, &members)?;
+            move_whole_board_group(tx, source, destination, group, &members)?;
         }
         for note in selected {
             if tx.execute("DELETE FROM board_cards WHERE board_id=?1 AND note_id=?2",
@@ -294,10 +302,27 @@ impl Notebook {
                 return Err("來源位置已變更，未搬移任何卡片。".into());
             }
         }
-        tx.commit()?;
-        Ok(expected.len())
+        Ok(())
     }
 
+    /// Persist the move only if this placement is still where the gesture began.
+    pub(crate) fn finish_card_drag(
+        &self, board: i64, note: i64, origin: (i32, i32), destination: (i32, i32),
+    ) -> Result<()> {
+        let (x, y) = (destination.0.clamp(0, 10000), destination.1.clamp(0, 50000));
+        if (x, y) == origin { return Ok(()); }
+        let changed = self.connection.execute(
+            "UPDATE board_cards SET x=?5,y=?6 WHERE board_id=?1 AND note_id=?2 AND x=?3 AND y=?4
+             AND EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL)",
+            params![board, note, origin.0, origin.1, x, y],
+        )?;
+        if changed != 1 {
+            return Err("卡片位置或狀態已變更，請重新整理白板後再拖曳。".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn move_card_on(&self, board: i64, note: i64, x: i32, y: i32) -> Result<()> {
         let changed = self.connection.execute(
             "UPDATE board_cards SET x=?3,y=?4 WHERE board_id=?1 AND note_id=?2
@@ -433,6 +458,44 @@ mod tests {
         Ok(db.cards_on(board)?.into_iter().map(|card| BoardPosition {
             item: BoardItem::Card(card.id), x: card.x, y: card.y, version: None,
         }).collect())
+    }
+
+    #[test]
+    fn single_card_drag_preserves_concurrent_placement_and_click_never_writes() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("workspace.sqlite");
+        let mut first = Notebook::open(&path, false)?;
+        let board = first.create_board("分鏡")?;
+        let other_board = first.create_board("另外一板")?;
+        let note = first.add(None, "第一張", "")?;
+        let neighbor = first.add(None, "第二張", "")?;
+        first.add_card_on(board, note)?;
+        first.add_card_on(board, neighbor)?;
+        first.add_card_on(other_board, note)?;
+        let position = |board, note| first.connection.query_row(
+            "SELECT x,y FROM board_cards WHERE board_id=?1 AND note_id=?2",
+            params![board, note], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?)),
+        );
+        let origin = position(board, note)?;
+        let neighbor_before = position(board, neighbor)?;
+        let other_before = position(other_board, note)?;
+        let second = Notebook::open(&path, false)?;
+        second.finish_card_drag(board, note, origin, (300, 400))?;
+        let writes = first.connection.total_changes();
+        first.finish_card_drag(board, note, origin, origin)?;
+        assert_eq!(first.connection.total_changes(), writes);
+        assert!(first.finish_card_drag(board, note, origin, (90, 80)).is_err());
+        assert_eq!(position(board, note)?, (300, 400));
+        first.finish_card_drag(board, note, (300, 400), (90, 80))?;
+        assert_eq!(position(board, note)?, (90, 80));
+        second.remove_card_on(board, note)?;
+        assert!(first.finish_card_drag(board, note, (90, 80), (9, 8)).is_err());
+        assert_eq!(position(board, neighbor)?, neighbor_before);
+        assert_eq!(position(other_board, note)?, other_before);
+        drop(second);
+        drop(first);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     #[test]

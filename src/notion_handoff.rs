@@ -11,10 +11,11 @@ const MAX_TOTAL_CSV_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_DEPTH: usize = 64;
 const FOLDER: &str = "Notion 原始 CSV";
-const SCOPE: &str = "CSV 附件保留匯出檔的原始位元組。打開來源筆記，從「管理附件」可直接將選取的 CSV 建成新集合。CSV 的欄值保留為文字，公式與關聯不會重建。Markdown 連結保留原路徑。可從筆記連結開啟同次匯入、同一 ZIP 部件內精確配對的頁面。";
+const SCOPE: &str = "CSV 附件保留匯出檔的原始位元組。打開來源筆記，從「管理附件」可直接將選取的 CSV 建成新集合。預設匯入保留文字；需要數字、核取或日期時，可選「依工作區欄位型別建立集合」並核對對應。CSV 的公式與關聯不會重建。Markdown 連結保留原路徑。可從筆記連結開啟同次匯入、同一 ZIP 部件內精確配對的頁面。";
 
 #[derive(Default)]
 pub(crate) struct CsvSources {
+    pub(crate) typed_relations: Option<super::notion_typed_relations::Plan>,
     pub(super) page_origins: BTreeMap<Vec<String>, (Option<String>, String)>,
     namespaces: BTreeSet<String>,
     files: BTreeMap<(String, String), CsvSource>,
@@ -66,33 +67,95 @@ pub(crate) fn is_notion_csv(name: &str, source: Option<&str>) -> bool {
         && source.is_some_and(|origin| origin.starts_with("外層 ZIP／") || origin.starts_with("內嵌 ZIP／"))
 }
 
+#[derive(PartialEq)]
+pub(crate) struct CsvTypePreview {
+    source_note: i64,
+    attachment: i64,
+    token: String,
+    filename: String,
+    origin: String,
+    bytes: Vec<u8>,
+    fields: Vec<(String, Option<super::typed_properties::PropertyType>)>,
+    count: usize,
+}
+
+impl CsvTypePreview {
+    pub(crate) fn summary(&self) -> String {
+        let mut text = format!("原始檔：{}\r\n{}\r\n共 {} 列。CSV 欄名移除前後空白後，套用工作區同名欄位的型別：\r\n", self.filename, self.origin, self.count);
+        for (name, kind) in &self.fields {
+            if let Some(kind) = kind {
+                let _ = write!(text, "\r\n{name}：{}", kind.hint());
+            }
+        }
+        text.push_str("\r\n\r\n其餘欄位保留文字。型別欄的空儲存格保持未設定。原始 CSV 仍可另存。");
+        text
+    }
+}
+
+fn read_csv(db: &rusqlite::Connection, source_note: i64, attachment: i64)
+    -> Result<(CsvTypePreview, Vec<Vec<String>>)> {
+    let source = db.query_row(
+        "SELECT a.name,o.relative_path,a.content,i.token FROM attachments a
+         JOIN attachment_origins o ON o.attachment_id=a.id
+         JOIN notes n ON n.id=a.note_id JOIN note_link_identities i ON i.note_id=n.id
+         WHERE a.id=?1 AND a.note_id=?2 AND a.kind='text'
+           AND n.trash_root IS NULL AND length(a.content) BETWEEN 1 AND ?3",
+        params![attachment, source_note, MAX_FILE_BYTES as i64],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?)),
+    ).optional()?;
+    let (filename, origin, bytes, token) = source.ok_or("找不到使用中的 Notion CSV 原檔。")?;
+    if !is_notion_csv(&filename, Some(&origin)) {
+        return Err("此附件沒有可辨認的 Notion CSV 來源。".into());
+    }
+    let rows = super::csv_table::parse_csv(&bytes)?;
+    let count = rows.len() - 1;
+    if count > super::collections::MAX_ITEMS as usize {
+        return Err("每個集合最多 1000 列。原始 CSV 仍可另存。".into());
+    }
+    let fields = rows[0].iter().map(|name| Ok((name.clone(), super::typed_properties::lookup(db, name)?)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((CsvTypePreview { source_note, attachment, token, filename, origin, bytes, fields, count }, rows))
+}
+
 impl Notebook {
+    pub(crate) fn preview_typed_notion_csv(&self, source_note: i64, attachment: i64) -> Result<CsvTypePreview> {
+        let tx = self.connection.unchecked_transaction()?;
+        let (preview, rows) = read_csv(&tx, source_note, attachment)?;
+        if preview.fields.iter().all(|(_, kind)| kind.is_none()) {
+            return Err("沒有相符的工作區型別欄位。請先設定屬性型別，或選擇文字匯入。".into());
+        }
+        for (index, row) in rows.iter().skip(1).enumerate() {
+            for ((name, kind), value) in preview.fields.iter().zip(row) {
+                if let Some(kind) = kind && !value.is_empty() && kind.normalized(value).is_none() {
+                    return Err(format!("資料第 {} 列的「{name}」需要{}。未建立集合。", index + 1, kind.hint()).into());
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(preview)
+    }
+
+    pub(crate) fn create_typed_notion_csv_collection(&mut self, name: &str, preview: &CsvTypePreview) -> Result<(i64, usize)> {
+        self.create_notion_csv_collection(preview.source_note, preview.attachment, name, Some(preview))
+    }
+
     pub(crate) fn create_collection_from_notion_csv(
         &mut self, source_note: i64, attachment: i64, name: &str,
     ) -> Result<(i64, usize)> {
+        self.create_notion_csv_collection(source_note, attachment, name, None)
+    }
+
+    fn create_notion_csv_collection(&mut self, source_note: i64, attachment: i64, name: &str,
+        expected: Option<&CsvTypePreview>) -> Result<(i64, usize)> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let source = tx.query_row(
-            "SELECT a.name,o.relative_path,a.content FROM attachments a
-             JOIN attachment_origins o ON o.attachment_id=a.id
-             JOIN notes n ON n.id=a.note_id
-             WHERE a.id=?1 AND a.note_id=?2 AND a.kind='text'
-               AND n.trash_root IS NULL AND length(a.content) BETWEEN 1 AND ?3",
-            params![attachment, source_note, MAX_FILE_BYTES as i64],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
-        ).optional()?;
-        let (filename, origin, bytes) = source.ok_or("找不到使用中的 Notion CSV 原檔。")?;
-        if !is_notion_csv(&filename, Some(&origin)) {
-            return Err("此附件沒有可辨認的 Notion CSV 來源。".into());
-        }
-        let rows = super::csv_table::parse_csv(&bytes)?;
-        let count = rows.len() - 1;
-        if count > super::collections::MAX_ITEMS as usize {
-            return Err("每個集合最多 1000 列。原始 CSV 仍可另存。".into());
-        }
-        for header in &rows[0] {
-            if super::typed_properties::lookup(&tx, header)?.is_some() {
-                return Err(format!("「{header}」已在工作區宣告為非文字屬性。原始 CSV 已保留。").into());
+        let (current, rows) = read_csv(&tx, source_note, attachment)?;
+        let count = current.count;
+        if let Some(preview) = expected {
+            if preview != &current {
+                return Err("原始 CSV、來源身分或工作區欄位型別已變更。請重新預覽；未建立集合。".into());
             }
+        } else if let Some((header, _)) = current.fields.iter().find(|(_, kind)| kind.is_some()) {
+            return Err(format!("「{header}」已在工作區宣告為非文字屬性。原始 CSV 已保留。").into());
         }
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collections WHERE name=?1)", [name.trim()], |row| row.get(0),
@@ -106,7 +169,17 @@ impl Notebook {
             "INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'未分類')",
         )?;
         for row in &rows[1..] {
-            let note = super::csv_table::insert_row(&tx, folder, &rows[0], row)?;
+            let note = if expected.is_some() {
+                let id = insert(&tx, Some(folder), &row[0], "")?;
+                for ((name, kind), value) in current.fields.iter().zip(row) {
+                    if kind.is_some() && value.is_empty() { continue; }
+                    super::typed_properties::validate_write(&tx, name, value)?;
+                    super::properties::write_value(&tx, id, name, value, true)?;
+                }
+                id
+            } else {
+                super::csv_table::insert_row(&tx, folder, &rows[0], row)?
+            };
             member.execute(params![collection, note])?;
         }
         drop(member);
@@ -165,6 +238,9 @@ impl CsvSources {
 
     pub(crate) fn report(&self) -> String {
         let mut text = format!("Notion CSV 原檔 {} 份，共 {} 位元組。\r\n{SCOPE}", self.count(), self.bytes);
+        if let Some(plan) = &self.typed_relations {
+            let _ = write!(text, "\r\n已確認的紙間交接具名關聯：{} 條。", plan.count());
+        }
         if self.files.is_empty() {
             return text;
         }
@@ -179,6 +255,7 @@ impl CsvSources {
     }
 
     pub(crate) fn attach(self, tx: &Transaction<'_>, root: i64) -> Result<()> {
+        if let Some(plan) = &self.typed_relations { plan.attach(tx, root)?; }
         if self.files.is_empty() {
             return Ok(());
         }
@@ -289,6 +366,91 @@ mod tests {
         assert_eq!(fs::read(archive)?, original_zip);
         drop(db);
         fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn typed_csv_preview_preserves_rows_source_and_definitions_through_restore() -> Result<()> {
+        use crate::store::typed_properties::PropertyType::{Checkbox, Date, Number};
+        let dir = super::super::tests::data_dir();
+        let zip_path = dir.join("Transfer.zip");
+        let original = "名稱,時長,完成,拍攝日,代碼,文字空欄\r\n鏡頭,0,false,2028-02-29,0001,\r\n鏡頭,9007199254740993,true,,0002,";
+        fs::write(&zip_path, zip(&[("Shots.csv",original.as_bytes())])?)?;
+        let path = dir.join("live.sqlite3");
+        let mut db = Notebook::open(&path,false)?;
+        let (pages, media, sources) = notion_archive_with_media(&zip_path)?;
+        db.import_notion_with_media("範例", pages.pages, media, sources)?;
+        let source = db.rows(View::All, "")?.into_iter().find(|row| row.title=="1｜Shots.csv").unwrap().id;
+        let file = db.list_attachments(source)?[0].id;
+        assert!(db.preview_typed_notion_csv(source,file).is_err());
+        for (key, kind) in [("時長",Number),("完成",Checkbox),("拍攝日",Date)] {
+            db.compare_set_property_type(key,None,Some(kind))?;
+        }
+        let preview = db.preview_typed_notion_csv(source,file)?;
+        assert!(preview.summary().contains("共 2 列"));
+        assert!(db.create_collection_from_notion_csv(source,file,"原文字模式").is_err());
+        let before = db.rows(View::All,"")?.len();
+        db.compare_set_property_type("代碼",None,Some(Number))?;
+        assert!(db.create_typed_notion_csv_collection("過期型別",&preview).is_err());
+        db.compare_set_property_type("代碼",Some(Number),None)?;
+        assert_eq!(db.rows(View::All,"")?.len(),before);
+        assert!(db.collections()?.is_empty());
+        let (cid, rows) = db.create_typed_notion_csv_collection("可編輯分鏡",&preview)?;
+        assert_eq!(rows,2);
+        let members = db.collection_rows(cid)?;
+        let mut by_code = BTreeMap::new();
+        for (row, _) in members {
+            assert_eq!(row.title,"鏡頭");
+            let fields: BTreeMap<_,_> = db.properties(row.id)?.into_iter().collect();
+            assert_eq!(fields["文字空欄"],"");
+            by_code.insert(fields["代碼"].clone(),(row.id,fields));
+        }
+        let first = by_code["0001"].0;
+        let second = by_code["0002"].0;
+        assert_ne!(first,second);
+        assert_eq!(by_code["0001"].1["完成"], "false");
+        assert_eq!(by_code["0001"].1["時長"], "0");
+        assert_eq!(by_code["0001"].1["拍攝日"], "2028-02-29");
+        assert!(!by_code["0002"].1.contains_key("拍攝日"));
+        assert_eq!(by_code["0002"].1["時長"],"9007199254740993");
+        assert!(db.compare_set_property(first,"拍攝日",Some("2028-02-29"),Some("2027-02-29")).is_err());
+        db.compare_set_property(first,"時長",Some("0"),Some("0012.50"))?;
+        drop(db);
+        let reopened = Notebook::open(&path,false)?;
+        reopened.backup(&dir.join("restore.sqlite3"))?;
+        drop(reopened);
+        let restored = Notebook::open(&dir.join("restore.sqlite3"),false)?;
+        assert_eq!(restored.collection_rows(cid)?.len(),2);
+        assert_eq!(restored.properties(first)?.into_iter().collect::<BTreeMap<_,_>>()["時長"], "0012.50");
+        assert_eq!(restored.properties(second)?.into_iter().collect::<BTreeMap<_,_>>()["時長"],"9007199254740993");
+        restored.save_attachment_copy(file,&dir.join("copy.csv"))?;
+        assert_eq!(fs::read(dir.join("copy.csv"))?,original.as_bytes());
+        drop(restored);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn typed_csv_refuses_invalid_and_stale_same_named_attachments_without_writes() -> Result<()> {
+        use crate::store::typed_properties::PropertyType::Date;
+        let mut db = Notebook::open(Path::new(":memory:"),false)?;
+        let mut csv = CsvSources::default();
+        csv.capture(None,"A/S.csv",b"Name,Date\nA,2028-02-29".to_vec())?;
+        csv.capture(None,"B/S.csv",b"Name,Date\nA,2028-02-30".to_vec())?;
+        db.import_notion_with_media("來源",Vec::new(),Default::default(),csv)?;
+        db.compare_set_property_type("Date",None,Some(Date))?;
+        let pairs = db.rows(View::All,"")?.into_iter().filter(|r| r.title.ends_with("｜S.csv"))
+            .map(|r| Ok((r.id,db.list_attachments(r.id)?[0].id))).collect::<Result<Vec<_>>>()?;
+        assert_eq!(pairs.len(),2);
+        let (first, file) = pairs[0];
+        assert!(db.preview_typed_notion_csv(first,pairs[1].1).is_err());
+        assert!(db.preview_typed_notion_csv(pairs[1].0,pairs[1].1).err().unwrap().to_string().contains("資料第 1 列"));
+        let plan = db.preview_typed_notion_csv(first,file)?;
+        db.connection.execute("UPDATE attachments SET content=?2 WHERE id=?1",params![file,&b"Name,Date\nA,2020-01-01"[..]])?;
+        let before = db.rows(View::All,"")?.len();
+        assert!(db.create_typed_notion_csv_collection("已換檔",&plan).is_err());
+        assert!(db.collections()?.is_empty());
+        assert_eq!(db.rows(View::All,"")?.len(),before);
         Ok(())
     }
 

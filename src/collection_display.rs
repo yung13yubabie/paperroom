@@ -1,4 +1,4 @@
-//! Collection-specific presentation stores only an ordered list of property keys.
+//! Collection-specific columns and read-only file values from imported Bases views.
 use super::{Notebook, Result, properties::key_checked};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::HashSet;
@@ -7,6 +7,24 @@ pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS collection_display_columns (
     collection_id INTEGER PRIMARY KEY REFERENCES collections(id) ON DELETE CASCADE,
     columns_json TEXT NOT NULL
+);";
+
+pub(super) const OBSIDIAN_VALUES_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS obsidian_base_file_columns (
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    PRIMARY KEY(collection_id, key)
+);
+CREATE TABLE IF NOT EXISTS obsidian_base_file_values (
+    collection_id INTEGER NOT NULL,
+    note_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY(collection_id, note_id, key),
+    FOREIGN KEY(collection_id, note_id)
+        REFERENCES collection_notes(collection_id, note_id) ON DELETE CASCADE,
+    FOREIGN KEY(collection_id, key)
+        REFERENCES obsidian_base_file_columns(collection_id, key) ON DELETE CASCADE
 );";
 
 pub(crate) const MAX_DISPLAY_COLUMNS: usize = 4;
@@ -51,6 +69,9 @@ impl Notebook {
              SELECT p.key FROM collection_notes c JOIN notes n ON n.id=c.note_id
              JOIN note_properties p ON p.note_id=n.id
              WHERE c.collection_id=?1 AND n.trash_root IS NULL AND (instr(p.key,?2)>0 OR ?2='')
+             UNION
+             SELECT f.key FROM obsidian_base_file_columns f
+             WHERE f.collection_id=?1 AND (instr(f.key,?2)>0 OR ?2='')
              ORDER BY key LIMIT ?3",
         )?;
         let mut keys = statement.query_map(params![collection, query, DISPLAY_KEY_RESULTS as i64 + 1], |r| r.get(0))?
@@ -58,6 +79,61 @@ impl Notebook {
         let more = keys.len() > DISPLAY_KEY_RESULTS;
         keys.truncate(DISPLAY_KEY_RESULTS);
         Ok((keys, more))
+    }
+
+    /// Use imported display-only snapshots in their original collection.
+    #[cfg(any(windows, test))]
+    pub(crate) fn collection_display_snapshot(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>> {
+        let tx=self.connection.unchecked_transaction()?;
+        let columns=self.collection_display_snapshot_in(collection)?;
+        tx.commit()?;
+        Ok(columns)
+    }
+    pub(crate) fn collection_display_snapshot_in(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>>{
+        let ids=super::obsidian_base_dynamic::visible_ids(&self.connection,collection)?;
+        let columns=self.collection_display_columns(collection)?.map(|keys|keys.into_iter().map(|key|{
+            let mut values=self.display_values_unfiltered(collection,&key)?;
+            if let Some(ids)=&ids {values.retain(|id,_|ids.contains(id));}
+            Ok((key,values))
+        }).collect::<Result<Vec<_>>>()).transpose()?;
+
+        Ok(columns)
+    }
+    #[cfg(any(windows,test))]
+    pub(crate) fn collection_lanes_and_display(&self,collection:i64,view:&super::collection_views::CollectionView)
+       ->Result<(Vec<(super::collection_group_folds::GroupValue,Vec<super::Row>)>,Option<Vec<(String,std::collections::HashMap<i64,String>)>>)>{
+        let tx=self.connection.unchecked_transaction()?;
+        let lanes=self.presented_collection_lanes(collection,Some(view))?;
+        let columns=self.collection_display_snapshot_in(collection)?;
+        tx.commit()?;
+        Ok((lanes,columns))
+    }
+    pub(crate) fn collection_display_values(
+        &self, collection: i64, key: &str,
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        let tx=self.connection.is_autocommit().then(||self.connection.unchecked_transaction()).transpose()?;
+        let mut values=self.display_values_unfiltered(collection,key)?;
+        if let Some(ids)=super::obsidian_base_dynamic::visible_ids(&self.connection,collection)?{values.retain(|id,_|ids.contains(id));}
+        if let Some(tx)=tx{tx.commit()?;}
+        Ok(values)
+    }
+    fn display_values_unfiltered(&self,collection:i64,key:&str)->Result<std::collections::HashMap<i64,String>>{
+        let key = key_checked(key)?;
+        if let Some(typed)=super::obsidian_base_typed::display(&self.connection,collection,&key,false)? {return Ok(typed);}
+        if let Some(live)=super::obsidian_base_live::display(&self.connection,collection,&key,false)? { return Ok(live); }
+        let mut statement = self.connection.prepare(
+            "SELECT c.note_id, CASE WHEN fc.key IS NULL THEN p.value ELSE f.value END
+             FROM collection_notes c
+             JOIN notes n ON n.id=c.note_id
+             LEFT JOIN note_properties p ON p.note_id=c.note_id AND p.key=?2
+             LEFT JOIN obsidian_base_file_columns fc ON fc.collection_id=c.collection_id AND fc.key=?2
+             LEFT JOIN obsidian_base_file_values f ON f.collection_id=c.collection_id
+                 AND f.note_id=c.note_id AND f.key=?2
+             WHERE c.collection_id=?1 AND n.trash_root IS NULL
+                 AND ((fc.key IS NULL AND p.value IS NOT NULL) OR f.value IS NOT NULL)",
+        )?;
+        Ok(statement.query_map(params![collection,key], |row| Ok((row.get(0)?,row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub(crate) fn set_collection_display_columns(
@@ -75,7 +151,9 @@ impl Notebook {
                     "SELECT EXISTS(SELECT 1 FROM property_definitions WHERE key=?2)
                        OR EXISTS(SELECT 1 FROM collection_notes c JOIN notes n ON n.id=c.note_id
                            JOIN note_properties p ON p.note_id=n.id
-                           WHERE c.collection_id=?1 AND n.trash_root IS NULL AND p.key=?2)",
+                           WHERE c.collection_id=?1 AND n.trash_root IS NULL AND p.key=?2)
+                       OR EXISTS(SELECT 1 FROM obsidian_base_file_columns f
+                           WHERE f.collection_id=?1 AND f.key=?2)",
                     params![collection, key], |row| row.get(0),
                 )?;
                 if !exists { return Err(format!("找不到可顯示的欄位「{key}」。").into()); }

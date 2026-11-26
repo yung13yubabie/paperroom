@@ -1,6 +1,6 @@
 //! Membership and ordering stay in collection views. These preferences only hide rendered groups.
 use super::{Notebook, Result, collection_views::{CollectionLayout, CollectionView, collection_view_rows}, typed_properties};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{borrow::Cow, collections::HashSet};
 
 pub(super) const SCHEMA: &str = "
@@ -55,6 +55,12 @@ impl GroupAxis {
             return Ok(None);
         }
         if let Some(key) = &view.presentation.group_key {
+            let imported:Option<String>=db.query_row("SELECT kind FROM obsidian_base_typed_groups WHERE view_id=?1 AND label=?2",
+                params![view.id,key],|r|r.get(0)).optional()?;
+            if let Some(imported)=imported {
+                let kind=match imported.as_str(){"number"=>"bases-number","boolean"=>"bases-boolean",_=>return Err("Bases 分組型別無效。".into())};
+                return Ok(Some(Self{key:key.clone(),kind}));
+            }
             let kind = typed_properties::lookup(db, key)?.map_or("text", |kind| kind.code());
             return Ok(Some(Self { key: key.clone(), kind }));
         }

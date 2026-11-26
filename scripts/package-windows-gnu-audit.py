@@ -11,6 +11,8 @@ import struct
 import subprocess
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from windows_gnu_dependency_evidence import INDEX as DEPENDENCY_INDEX, live_rust_members, make_evidence
+
 TARGET = "x86_64-pc-windows-gnu"
 EXE = "Paperroom.exe"
 INDEX = "evidence/gnu-candidate.json"
@@ -168,7 +170,17 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
     exe_sha = digest(binary)
     if registry["target"] != TARGET or receipt["target"] != TARGET or registry["exe_sha256"] != exe_sha or receipt["exe_sha256"] != exe_sha:
         raise ValueError("Dependency evidence does not apply to this GNU EXE")
-    entries["GNU-AUDIT.md"] = (ROOT / "docs/WINDOWS-GNU-AUDIT.md").read_bytes()
+    draft_notes = ROOT / "docs/WINDOWS-GNU-DRAFT.md"
+    audit_notes = draft_notes if draft_notes.is_file() else ROOT / "docs/WINDOWS-GNU-AUDIT.md"
+    entries["GNU-AUDIT.md"] = audit_notes.read_bytes()
+    observations = live_rust_members((work / "proof_a/final.map").read_text(encoding="utf-8"), exe_path.parent)
+    artifact_messages = (work / "proof_a/cargo-artifacts.jsonl").read_text(encoding="utf-8")
+    cargo_metadata = json.loads((work / "metadata/cargo.json").read_bytes())
+    lock_raw = (work / "proof_a/src/Cargo.lock").read_bytes()
+    evidence = make_evidence(entries, cargo_metadata, lock_raw, observations, artifact_messages,
+                             commit, TARGET, exe_sha,
+                             stamp["direct_dll_imports"])
+    entries[DEPENDENCY_INDEX] = json_bytes(evidence)
     details = {
         "source_commit": commit, "target": TARGET, "exe_sha256": exe_sha,
         "independent_builds_match": 2 if is_identical else 0,
@@ -190,11 +202,11 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
             info.external_attr = 0o100644 << 16
             archive.writestr(info, entries[name], compress_type=ZIP_DEFLATED, compresslevel=9)
     zip_sha = digest(output.read_bytes())
-    verify(output, commit, exe_sha, zip_sha)
+    verify(output, commit, exe_sha, zip_sha, require_dependency_evidence=True)
     print(f"GNU candidate EXE {exe_sha} ZIP {zip_sha}")
 
 
-def verify(path, commit, exe_sha, zip_sha):
+def verify(path, commit, exe_sha, zip_sha, require_dependency_evidence=False):
     if not HEX64.fullmatch(exe_sha) or not HEX64.fullmatch(zip_sha):
         raise ValueError("Expected SHA-256 digests")
     if path.stat().st_size > 48 << 20 or digest(path.read_bytes()) != zip_sha:
@@ -230,6 +242,16 @@ def verify(path, commit, exe_sha, zip_sha):
         for name, value in expected.items():
             if digest(archive.read(name)) != value:
                 raise ValueError("File SHA-256 differs: " + name)
+        if DEPENDENCY_INDEX in names:
+            evidence = json.loads(archive.read(DEPENDENCY_INDEX))
+            if (evidence["source_commit"], evidence["target"], evidence["exe_sha256"]) != (commit, TARGET, exe_sha):
+                raise ValueError("Dependency evidence has a different source or EXE identity")
+            if (evidence["cargo_provenance_sha256"] != expected["evidence/cargo-provenance.json"]
+                    or evidence["registry_notices_sha256"] != expected["evidence/registry-notices.json"]
+                    or evidence["runtime_link_inventory"]["sha256"] != expected["evidence/gnu-runtime-members.json"]):
+                raise ValueError("Dependency evidence references different underlying receipts")
+        elif require_dependency_evidence:
+            raise ValueError("The package has no per-dependency redistribution evidence")
     print(f"Verified GNU ZIP readback, including all {len(names)} members.")
 
 
@@ -284,13 +306,14 @@ def main():
     v.add_argument("--commit", required=True)
     v.add_argument("--exe-sha256", required=True)
     v.add_argument("--zip-sha256", required=True)
+    v.add_argument("--require-dependency-evidence", action="store_true")
     a = parser.parse_args()
     if a.mode == "build":
         build(a.work, a.sysroot, a.commit, a.output, a.permit_different_rebuild)
     elif a.mode == "compare":
         describe_difference(a.first, a.second)
     else:
-        verify(a.package, a.commit, a.exe_sha256, a.zip_sha256)
+        verify(a.package, a.commit, a.exe_sha256, a.zip_sha256, a.require_dependency_evidence)
 
 
 if __name__ == "__main__":

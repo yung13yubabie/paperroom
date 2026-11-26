@@ -34,6 +34,16 @@ pub(super) const MAX_ITEMS: i64 = 1000;
 const MAX_COLLECTIONS: i64 = 128;
 const MAX_RELATIONS: i64 = 1000;
 
+fn member_field_edges(db: &Connection, collection: i64, note: i64) -> Result<Vec<(i64, i64, i64)>> {
+    let mut query = db.prepare_cached(
+        "SELECT field_id, source_note, target_note FROM relation_field_values
+         WHERE (source_collection=?1 AND source_note=?2) OR (target_collection=?1 AND target_note=?2)
+         ORDER BY field_id,source_note,target_note",
+    )?;
+    Ok(query.query_map(params![collection, note], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 fn checked_label(value: &str) -> Result<&str> {
     if value.contains(['\0','\n','\r','\t']) { return Err("名稱或狀態不能包含控制字元。".into()); }
     let value = value.trim();
@@ -67,7 +77,7 @@ fn require_member(db: &Connection, collection: i64, member: RelationMember<'_>) 
     Ok(())
 }
 
-fn write_relation(tx: &Transaction<'_>, source: i64, name: &str, target: i64, present: bool) -> Result<bool> {
+pub(super) fn write_relation(tx: &Transaction<'_>, source: i64, name: &str, target: i64, present: bool) -> Result<bool> {
     let args = params![source, name, target];
     if present {
         let exists: bool = tx.query_row(
@@ -150,6 +160,7 @@ impl Notebook {
     ) -> Result<i64> {
         let status = checked_label(status)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection)?;
         let (exists, count): (bool, i64) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1),
                     (SELECT count(*) FROM collection_notes WHERE collection_id=?1)",
@@ -181,26 +192,48 @@ impl Notebook {
     pub fn move_collection_note(&self, collection_id: i64, note_id: i64, expected_status: &str, new_status: &str) -> Result<()> {
         let expected_status = checked_label(expected_status)?;
         let new_status = checked_label(new_status)?;
-        let changed = self.connection.execute(
+        let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection_id)?;
+        let changed = tx.execute(
             "UPDATE collection_notes SET status=?4 WHERE collection_id=?1 AND note_id=?2 AND status=?3
              AND EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL)",
             params![collection_id,note_id,expected_status,new_status],
         )?;
         if changed != 1 { return Err("筆記已移出集合、移到垃圾桶，或狀態已變更；請重新載入。".into()); }
+        tx.commit()?;
         Ok(())
     }
+    pub(crate) fn member_field_edges(&self, collection: i64, note: i64) -> Result<Vec<(i64, i64, i64)>> {
+        member_field_edges(&self.connection, collection, note)
+    }
+
     pub fn remove_from_collection(&self, collection_id: i64, note_id: i64, expected_status: &str) -> Result<()> {
+        self.remove_collection_member(collection_id, note_id, expected_status, None)
+    }
+
+    pub(crate) fn remove_collection_member(
+        &self, collection_id: i64, note_id: i64, expected_status: &str, expected_edges: Option<&[(i64, i64, i64)]>,
+    ) -> Result<()> {
         let status = checked_label(expected_status)?;
-        let changed = self.connection.execute(
+        let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection_id)?;
+        if let Some(edges) = expected_edges
+            && member_field_edges(&tx, collection_id, note_id)? != edges
+        {
+            return Err("這列的關聯已變更，請重新確認要移除的資料列。".into());
+        }
+        let changed = tx.execute(
             "DELETE FROM collection_notes WHERE collection_id=?1 AND note_id=?2 AND status=?3
              AND EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL)",
             params![collection_id,note_id,status],
         )?;
         if changed != 1 { return Err("筆記已移出集合、移到垃圾桶，或狀態已變更；請重新載入。".into()); }
+        tx.commit()?;
         Ok(())
     }
     /// Explicit member status; rows can be grouped into lanes by callers.
     pub fn collection_rows(&self, collection_id: i64) -> Result<Vec<(Row,String)>> {
+        if let Some(rows)=super::obsidian_base_dynamic::rows(&self.connection,collection_id)?{return Ok(rows)}
         let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)", [collection_id], |r| r.get(0))?;
         if !exists { return Err("找不到集合。".into()); }
         let mut s = self.connection.prepare(

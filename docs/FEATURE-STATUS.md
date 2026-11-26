@@ -69,7 +69,7 @@
 | 資料來源 | 部分 | 具名集合、成員與狀態，並非任意資料來源。 | [官方](https://www.notion.com/help/intro-to-databases) · [collections.rs](../src/collections.rs) |
 | 屬性模型 | 部分 | 集合內可寫入或清除已宣告的數字、核取方塊與日期，其他檢視會讀到相同的值。日期編輯會檢查既有起訖設定，下拉選項等型別仍待做。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
 | 文字欄位 | 已驗證 | 中文值可寫入、查詢、重開。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
-| 關聯 | 部分 | 從集合的可見資料列新增、移除或開啟同集合內的具名關聯。使用穩定筆記 ID，可辨認不同路徑的同名筆記。跨集合關聯欄位配置仍待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
+| 關聯 | 部分 | 可在同集合或不同集合間新增、移除或開啟具名關聯。從筆記的「連結」可看傳入及傳出方向。以穩定筆記 ID 區分同名筆記。固定目標集合的欄位配置及可雙向編輯的配對欄位待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [跨視圖導覽](UNIFIED-WORKSPACE.md) |
 | 彙總 | 部分 | 集合內可從同一資料列操作入口查看關聯和彙總。公式可依具名關聯計數或合計最新欄位值，顯示來源有問題的筆記 ID。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
 | 公式運算 | 部分 | 可編輯既有集合公式並在保存後重算。支援數字／布林／日期型別值、條件和關聯計數／加總。錯誤顯示在結果，完整語法待做。 | [官方](https://www.notion.com/help/formulas) · [formula.rs](../src/formula.rs) |
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
@@ -181,9 +181,9 @@
 | 屬性檢視 | 部分 | 本機文字屬性；匯入的 YAML 保留在原文。 | [官方](https://obsidian.md/help/plugins/properties) · [properties.rs](../src/properties.rs) |
 | 標籤面板 | 已驗證 | 可按名稱或頻率排序並切換平面或樹狀。可展開或收合單一分支及全部分支。可從標籤選單切換查詢條件並開啟正確來源，已驗同名筆記及離線重開。 | [規格與文件](https://obsidian.md/help/plugins/tags) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 巢狀標籤 | 已驗證 | 匯入 Vault 可查完全相符或含子層的標籤，能辨識內文與常見 YAML tags 欄，並從標籤樹開到原筆記。其他 YAML 語法及原廠完整查詢語言另見搜尋列。 | [官方](https://obsidian.md/help/plugins/tags) · [vault_search.rs](../src/vault_search.rs) |
-| .base 格式 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 視圖 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 公式語法 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| .base 格式 | 未實作 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 視圖 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 公式語法 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
 | 每日筆記 | 已驗證 | 日期識別碼跨改名、關閉、備份維持。 | [官方](https://obsidian.md/help/plugins/daily-notes) · [store.rs](../src/store.rs) |
 | Templates | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/web-clipper/templates) · [window.rs](../src/window.rs) |
 | Random Note | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/plugins/random-note) · [window.rs](../src/window.rs) |
@@ -222,9 +222,9 @@
 | 檔案格式與附件放置位置 | 部分 | 支援限定匯入及附件副本，資料庫位置由紙間選擇。 | [官方](https://obsidian.md/help/file-formats) · [介面驗收](UI-ACCEPTANCE.md) |
 | Web Clipper 樣板 | 未實作 | 未提供可安裝的擷取擴充套件。 | [官方](https://obsidian.md/help/web-clipper) · [介面驗收](UI-ACCEPTANCE.md) |
 | 尋找與取代 | 部分 | 可在目前筆記區分大小寫循環尋找，預覽並確認全部取代。逐筆取代與正規表示式待做。 | [官方](https://obsidian.md/help/find-and-replace) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 卡片視圖 | 未實作 | 紙間檔案交換不支援 .base。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 卡片視圖 | 未實作 | Canvas 可開啟釘選的具名 Bases 檢視；原廠 Cards 版型仍缺。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
 | Bases 地圖視圖 | 未實作 | 未實作地理位置欄位。 | [官方](https://obsidian.md/help/bases/views/map) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 清單視圖 | 未實作 | 未讀取或呈現 .base 清單。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 清單視圖 | 部分 | 可匯入支援的 .base 清單；完整選項未實作。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
 
 ## Heptabase
 
@@ -246,7 +246,7 @@
 | 卡片內嵌 | 未實作 | 本機筆記白板不提供這些物件，JSON Canvas 為獨立視圖。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [boards.rs](../src/boards.rs) |
 | 自由文字物件 | 已驗證 | 白板可新增、移動、編輯及移除獨立文字方塊。重開後可復原最近移除的一個，原位有重疊時改放空位。每個物件限 4,096 字。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |
 | 內部連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
-| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。原生筆記白板的跨板定位與其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [Canvas 位置](UI-ACCEPTANCE.md#從筆記定位-canvas-節點) |
+| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。也可從紙間筆記跨板定位同一張原生卡片，雙擊回到原筆記。其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [原生白板與 Canvas 位置](UNIFIED-WORKSPACE.md) |
 | 快捷鍵 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/keyboard-shortcuts) · [note_links.rs](../src/note_links.rs) |
 | 全域搜尋 | 部分 | 可跨工作區搜尋 PDF 引文、註解、來源名稱與頁碼，也可依摘錄卡名稱、原引文或原註解開啟卡片，或將同一張卡加入目前白板。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [pdf_search_ui.rs](../src/pdf_search_ui.rs) |
 | 側欄工具 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |

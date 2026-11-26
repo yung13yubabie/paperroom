@@ -61,7 +61,7 @@ unsafe fn pick_item<'a>(
     }
 }
 
-unsafe fn geometry(hwnd: HWND, initial: &str) -> Result<Option<[i64; 4]>> {
+pub(super) unsafe fn geometry(hwnd: HWND, initial: &str) -> Result<Option<[i64; 4]>> {
     let Some(text) = (unsafe { prompt(hwnd, "畫布位置與尺寸", "依序輸入 X、Y、寬、高，以空格分隔", initial, 128)? })
     else { return Ok(None); };
     let numbers = text.split_whitespace().map(str::parse::<i64>).collect::<std::result::Result<Vec<_>, _>>()

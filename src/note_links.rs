@@ -22,7 +22,50 @@ END;";
 
 pub(super) const NATIVE_NOTE_PREFIX: &str = "paperroom:note:";
 
-pub(super) fn native_note_target(db: &Connection, path: &str) -> Result<Option<i64>> {
+// Only references preserved during the upgrade can use an unscoped legacy ID.
+const LEGACY_LINK_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS legacy_note_link_bindings (
+    source_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    target_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    target_token TEXT NOT NULL,
+    PRIMARY KEY (source_id,target_id)
+);
+CREATE INDEX IF NOT EXISTS legacy_note_link_target ON legacy_note_link_bindings(target_id);";
+
+pub(super) fn preserve_legacy_links(db: &Connection) -> Result<()> {
+    db.execute_batch(LEGACY_LINK_SCHEMA)?;
+    // Old Vault and Notion notes have explicit external origins. Older loose
+    // Markdown imports lack origin records and cannot be distinguished from
+    // local writing. Keep their saved behavior without admitting new links.
+    let mut selected = db.prepare(
+        "SELECT n.id,n.body FROM notes n
+         WHERE instr(n.body, 'paperroom:note:') > 0
+           AND NOT EXISTS (SELECT 1 FROM vault_paths WHERE note_id=n.id)
+           AND NOT EXISTS (SELECT 1 FROM notion_page_paths WHERE note_id=n.id)",
+    )?;
+    let mut rows = selected.query([])?;
+    let mut bind = db.prepare(
+        "INSERT OR IGNORE INTO legacy_note_link_bindings (source_id,target_id,target_token)
+         SELECT ?1,note_id,token FROM note_link_identities WHERE note_id=?2",
+    )?;
+    while let Some(row) = rows.next()? {
+        let source: i64 = row.get(0)?;
+        for reference in markdown::note_references(row.get_ref(1)?.as_str()?) {
+            let path = reference.destination.split_once('#')
+                .map_or(reference.destination.as_str(), |(path, _)| path);
+            if let Some(suffix) = path.strip_prefix(NATIVE_NOTE_PREFIX)
+                && let Ok(target) = suffix.parse::<i64>()
+            {
+                bind.execute(params![source, target])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn native_note_target(
+    db: &Connection, legacy_source: Option<i64>, path: &str,
+) -> Result<Option<i64>> {
     let Some(dest) = path.strip_prefix(NATIVE_NOTE_PREFIX) else { return Ok(None); };
     let (number, token) = dest.split_once(':').map_or((dest, None), |(id, token)| (id, Some(token)));
     let Ok(id) = number.parse::<i64>() else { return Ok(None); };
@@ -33,6 +76,14 @@ pub(super) fn native_note_target(db: &Connection, path: &str) -> Result<Option<i
         let matches = db.prepare_cached(
             "SELECT 1 FROM note_link_identities WHERE note_id=?1 AND token=?2",
         )?.exists(params![id, token])?;
+        if !matches { return Ok(None); }
+    } else {
+        let Some(source) = legacy_source else { return Ok(None); };
+        let matches = db.prepare_cached(
+            "SELECT 1 FROM legacy_note_link_bindings b JOIN note_link_identities i
+             ON i.note_id=b.target_id AND i.token=b.target_token
+             WHERE b.source_id=?1 AND b.target_id=?2",
+        )?.exists(params![source, id])?;
         if !matches { return Ok(None); }
     }
     Ok(Some(id))
@@ -46,9 +97,19 @@ pub struct VaultNoteLink {
     pub notion_path: Option<String>,
 }
 
+pub(super) fn is_heptabase_root(db: &Connection, root: i64) -> Result<bool> {
+    Ok(db.prepare_cached("SELECT 1 FROM heptabase_import_roots WHERE import_root=?1")?.exists([root])?)
+}
+
 fn mapped_link_target(
-    index: &NoteLinkPaths<'_>, source: &str, parts: &[String], syntax: AnchorSyntax, destination: &str, path: &str,
+    index: &NoteLinkPaths<'_>, exact_only: bool, source: &str, parts: &[String], syntax: AnchorSyntax, destination: &str, path: &str,
 ) -> Option<i64> {
+    if exact_only {
+        return match syntax {
+            AnchorSyntax::Markdown => index.exact_markdown_target(parts, path),
+            _ => None,
+        };
+    }
     match syntax {
         AnchorSyntax::Wiki => index.wiki.resolve(source, destination),
         AnchorSyntax::Markdown => index.markdown_target(parts, path),
@@ -93,6 +154,7 @@ impl Notebook {
             files = stmt.query_map([root], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
         }
+        let exact_only = root.map(|id| is_heptabase_root(&tx, id)).transpose()?.unwrap_or(false);
         let index = NoteLinkPaths::new(&files);
         let notion_source = super::notion_page_links::Source::load(&tx, note.row.id)?;
         let parts = source_path.as_deref().unwrap_or("").split('/').map(str::to_owned).collect::<Vec<_>>();
@@ -112,7 +174,7 @@ impl Notebook {
                 }
                 Some(note.row.id)
             } else if path.starts_with(NATIVE_NOTE_PREFIX) {
-                native_note_target(&tx, path)?
+                native_note_target(&tx, Some(note.row.id), path)?
             } else if let Some(notion) = notion {
                 if let Some((id, resolved)) = notion.resolve(&tx, path)? {
                     syntax = AnchorSyntax::NotionMarkdown;
@@ -122,7 +184,7 @@ impl Notebook {
                     None
                 }
             } else if let Some(source_path) = &source_path {
-                mapped_link_target(&index, source_path, &parts, reference.syntax, &destination, path)
+                mapped_link_target(&index, exact_only, source_path, &parts, reference.syntax, &destination, path)
             } else {
                 None
             };
@@ -170,6 +232,79 @@ mod graph_tests {
     use super::*;
     use crate::archive::ImportedPage;
 
+
+    #[test]
+    fn old_local_bindings_survive_while_new_markdown_keeps_unscoped_references_inert() -> Result<()> {
+        use std::fs;
+        use zip::{ZipWriter, write::SimpleFileOptions};
+        use std::io::Write;
+
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("workspace.sqlite3");
+        let backup = dir.join("restored.sqlite3");
+        let mut previous = Notebook::open(&path, false)?;
+        let target = previous.add(None, "同編號本機筆記", "本機正文")?;
+        let bare = format!("[[paperroom:note:{target}|舊版筆記交接]]\n原文保留。");
+        let old_local = previous.add(None, "既有工作區中的舊筆記", &bare)?;
+        let from_vault = |title: &str| ImportedPage {
+            title: title.into(), body: bare.clone(), parts: vec![format!("{title}.md")],
+        };
+        previous.import_vault("已知來源", vec![from_vault("既有 Vault 筆記")])?;
+        let old_vault = previous.rows(super::super::View::All, "既有 Vault 筆記")?[0].id;
+        previous.connection.execute_batch(
+            "DROP TABLE legacy_note_link_bindings; PRAGMA user_version=35;",
+        )?;
+        drop(previous);
+
+        let mut db = Notebook::open(&path, false)?;
+        let article = dir.join("外來 Markdown.md");
+        fs::write(&article, &bare)?;
+        let page = crate::archive::markdown(&article)?;
+        let plain = db.add(None, &page.title, &page.body)?;
+        let zip_path = dir.join("資料交換.zip");
+        let mut zip = ZipWriter::new(fs::File::create(&zip_path)?);
+        zip.start_file("外來 ZIP.md", SimpleFileOptions::default())?;
+        zip.write_all(bare.as_bytes())?;
+        drop(zip.finish()?);
+        let (archive, media) = crate::archive::archive_with_media(&zip_path)?;
+        db.import_markdown_with_media("外來壓縮檔", archive.pages, media)?;
+        let zipped = db.rows(super::super::View::All, "外來 ZIP")?[0].id;
+        db.import_vault("新 Vault", vec![from_vault("新 Vault 筆記")])?;
+        let vault = db.rows(super::super::View::All, "新 Vault 筆記")?[0].id;
+        let token: String = db.connection.query_row(
+            "SELECT token FROM note_link_identities WHERE note_id=?1", [target], |row| row.get(0),
+        )?;
+        let checked = note_link_markup(target, &token, "經核對的筆記");
+        let scoped = db.add(None, "新版選取器格式", &checked)?;
+        let foreign = [plain, zipped, vault, old_vault];
+        let verify = |db: &Notebook| -> Result<()> {
+            for id in foreign {
+                let note = db.note(id)?.unwrap();
+                assert_eq!(note.body, bare);
+                assert!(db.vault_note_links(&note)?.is_empty());
+                assert!(db.graph_neighbors(&note)?.0.is_empty());
+            }
+            for id in [old_local, scoped] {
+                let note = db.note(id)?.unwrap();
+                assert_eq!(db.vault_note_links(&note)?[0].note_id, target);
+                assert_eq!(db.graph_neighbors(&note)?.0[0].0, target);
+            }
+            assert_eq!(db.note(old_local)?.unwrap().body, bare);
+            let incoming = db.graph_neighbors(&db.note(target)?.unwrap())?.1;
+            assert_eq!(incoming.iter().map(|row| row.0).collect::<Vec<_>>(), [old_local, scoped]);
+            Ok(())
+        };
+        verify(&db)?;
+        assert_eq!(fs::read_to_string(article)?, bare);
+        db.backup(&backup)?;
+        drop(db);
+        for reopened in [&path, &backup] {
+            let db = Notebook::open(reopened, false)?;
+            verify(&db)?;
+        }
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn heading_links_keep_vault_identity_and_source_caret_after_offline_reopen() -> Result<()> {

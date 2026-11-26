@@ -16,6 +16,7 @@ const STATIC_CLASS: u16 = 0x82;
 enum Content<'a> {
     Prompt { hint: &'a str, max_chars: usize, multiline: bool },
     ReadOnly,
+    ReportAction(&'a str),
     Decision { accept: &'a str, cancel: &'a str },
 }
 
@@ -73,6 +74,11 @@ pub unsafe fn show_text(owner: HWND, caption: &str, body: &str) -> Result<()> {
     unsafe { run(owner, caption, body, Content::ReadOnly).map(|_| ()) }
 }
 
+/// IDOK, Escape and the close box stay on the report's original screen.
+pub unsafe fn report_action(owner: HWND, caption: &str, body: &str, action: &str) -> Result<bool> {
+    unsafe { run(owner, caption, body, Content::ReportAction(action)).map(|(selected, _)| selected) }
+}
+
 /// Show read-only text. Closing the dialog or accepting its default stays on the current note.
 pub unsafe fn preview_with_jump(owner: HWND, caption: &str, body: &str) -> Result<bool> {
     unsafe { preview_decision(owner, caption, body, "前往區塊", "留在原處") }
@@ -97,13 +103,14 @@ fn logical_lines(text: &str) -> String {
 }
 
 unsafe fn run(owner: HWND, caption: &str, initial: &str, content: Content<'_>) -> Result<(bool, Option<String>)> {
+    let report_action = match &content { Content::ReportAction(label) => Some(*label), _ => None };
     let decision = match &content {
         Content::Decision { accept, cancel } => Some((*accept, *cancel)),
         _ => None,
     };
     let (hint, max_chars, multiline) = match content {
         Content::Prompt { hint, max_chars, multiline } => (hint, Some(max_chars), multiline),
-        Content::ReadOnly | Content::Decision { .. } => ("", None, true),
+        Content::ReadOnly | Content::Decision { .. } | Content::ReportAction(_) => ("", None, true),
     };
     let initial_display = if multiline {
         terminated(&logical_lines(initial).replace('\n', "\r\n"))?
@@ -118,7 +125,7 @@ unsafe fn run(owner: HWND, caption: &str, initial: &str, content: Content<'_>) -
         text: None,
         error: None,
     };
-    let template = template(caption, max_chars.is_some(), multiline, decision)?;
+    let template = template(caption, max_chars.is_some(), multiline, decision, report_action)?;
     unsafe {
         if !owner.is_null() && IsWindow(owner) == 0 {
             return Err("對話框的主視窗已關閉。".into());
@@ -147,7 +154,8 @@ unsafe fn run(owner: HWND, caption: &str, initial: &str, content: Content<'_>) -
             return Err(error);
         }
         match code {
-            code if code == IDOK as isize => Ok((true, state.text)),
+            code if code == IDYES as isize && report_action.is_some() => Ok((true,None)),
+            code if code == IDOK as isize => Ok((report_action.is_none(), state.text)),
             code if code == IDCANCEL as isize => Ok((false, None)),
             // A quit message can leave the dialog with no result from EndDialog.
             0 if error == 0 => Ok((false, None)),
@@ -189,6 +197,10 @@ unsafe extern "system" fn dialog_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
             return 1;
         }
 
+        if msg == WM_COMMAND && wp as u16 as i32 == IDYES && !GetDlgItem(window, IDYES).is_null() {
+            EndDialog(window, IDYES as isize);
+            return 1;
+        }
         if msg == WM_CLOSE || (msg == WM_COMMAND && wp as u16 as i32 == IDCANCEL) {
             EndDialog(window, IDCANCEL as isize);
             return 1;
@@ -250,10 +262,10 @@ unsafe fn read_edit(field: HWND) -> Result<String> {
     }
 }
 
-fn template(caption: &str, editable: bool, multiline: bool, decision: Option<(&str, &str)>) -> Result<Vec<u32>> {
+fn template(caption: &str, editable: bool, multiline: bool, decision: Option<(&str, &str)>, report_action: Option<&str>) -> Result<Vec<u32>> {
     let mut words = Vec::<u16>::new();
     let height = if multiline { 175 } else { 95 };
-    let count = if editable { 4 } else if decision.is_some() { 3 } else { 2 };
+    let count = if editable { 4 } else if decision.is_some() || report_action.is_some() { 3 } else { 2 };
     let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | (DS_SETFONT | DS_CENTER | DS_MODALFRAME) as u32;
     words.extend([(style & 0xffff) as u16, (style >> 16) as u16, 0, 0]);
     words.extend([count, 0, 0, 275, height, 0, 0]);
@@ -285,6 +297,9 @@ fn template(caption: &str, editable: bool, multiline: bool, decision: Option<(&s
             control(&mut words, [203, 151, 64, 16], IDCANCEL, BUTTON_CLASS,
                 WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, cancel);
         } else {
+            if let Some(action) = report_action {
+                control(&mut words, [116, 151, 88, 16], IDYES, BUTTON_CLASS, WS_TABSTOP, 0, action);
+            }
             control(&mut words, [212, 151, 55, 16], IDOK, BUTTON_CLASS,
                 WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, "關閉");
         }

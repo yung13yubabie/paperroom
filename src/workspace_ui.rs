@@ -207,7 +207,13 @@ impl App {
                 (id, crate::store::clean_title(title), doc)
             } else {
                 let choices = self.notebook.saved_canvases()?;
-                let Some(index) = choose(self.hwnd, self.widgets.files, &choices, |item| item.1.clone()) else {
+                let Some(index) = choose(self.hwnd, self.widgets.files, &choices, |(id, title)| {
+                    if choices.iter().filter(|(_, name)| name == title).take(2).count() > 1 {
+                        format!("{title}　(#{id})")
+                    } else {
+                        title.clone()
+                    }
+                }) else {
                     if choices.is_empty() { label(self.widgets.status, "目前沒有匯入的 Canvas。"); }
                     return Ok(());
                 };
@@ -241,7 +247,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) unsafe fn show_note_canvas_locations(&mut self, note: i64) -> Result<()> {
+    pub(super) unsafe fn show_note_canvas_locations(&mut self, note: i64, anchor: HWND) -> Result<()> {
         unsafe {
             use super::navigation_ui::choose_navigation_page;
             let placements = self.notebook.canvas_note_placements(note)?;
@@ -249,7 +255,7 @@ impl App {
                 label(self.widgets.status, "這篇筆記未出現在已綁定的 Canvas。");
                 return Ok(());
             }
-            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, placements.len(), |i| {
+            let Some(index) = choose_navigation_page(self.hwnd, anchor, placements.len(), |i| {
                 let entry = &placements[i];
                 format!("{}  (#{}，{} 處)", entry.title, entry.canvas_id, entry.occurrences)
             }) else { return Ok(()); };
@@ -262,7 +268,7 @@ impl App {
             let compact = |value: &str| -> String {
                 value.chars().take(64).map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
             };
-            let Some(index) = choose_navigation_page(self.hwnd, self.widgets.more, occurrences.len(), |i| {
+            let Some(index) = choose_navigation_page(self.hwnd, anchor, occurrences.len(), |i| {
                 let entry = &occurrences[i];
                 let link = &entry.link;
                 let name = link.label.as_deref().unwrap_or(&link.file);
@@ -420,6 +426,41 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn edit_canvas_base_card(&mut self, selected_node: &str) -> Result<()> {
+        unsafe {
+            let Some(WorkspaceView::Canvas(view)) = self.extras.workspace.as_ref() else {
+                return Err("目前未開啟 Canvas。".into());
+            };
+            let id = view.id;
+            let root = self.notebook.canvas_vault(id)?.ok_or("請先將畫布綁定到匯入 Bases 時選取的 Vault。")?;
+            let (node, file, name) = crate::store::canvas_base_cards::named_nodes(&view.doc)
+                .into_iter().find(|(node, _, _)| *node == selected_node)
+                .ok_or("找不到這張 Base 卡片。")?;
+            let hwnd = self.hwnd;
+            let anchor = self.widgets.links;
+                let (pin,rows)=self.notebook.start_pin_edit(id,&view.doc,root,node)?;
+                if rows.is_empty(){return Err("這張卡片沒有可編輯的來源資料列。".into());}
+                let Some(i)=super::navigation_ui::choose_navigation_page(hwnd,anchor,rows.len(),|i|format!("{}  (#{})　{}",rows[i].title,rows[i].id,rows[i].path)) else{return Ok(());};
+                let row=&rows[i];
+                if (self.dirty || self.failed) && self.current.as_ref().is_some_and(|n|n.row.id==row.id){
+                    return Err("來源筆記仍有未儲存內容，請先處理原稿。".into());
+                }
+                let fields=self.notebook.pin_fields(&view.doc,&pin,row)?;
+                if fields.is_empty(){return Err("此列沒有可寫回的布林或數值欄位。".into());}
+                let Some(i)=super::navigation_ui::choose_navigation_page(hwnd,anchor,fields.len(),|i|format!("{}  [{}]　{}",fields[i].key,fields[i].kind,fields[i].value)) else{return Ok(());};
+                let field=&fields[i];
+                let hint=format!("{file}#{name}　{}（#{}）　{}\r\n{}",row.title,row.id,field.key,
+                    if field.kind=="boolean"{"輸入 true、false 或 null。"}else{"輸入十進位數（整數最多 15 位，小數最多 6 位）或 null。"});
+                let Some(draft)=crate::dialog::prompt(hwnd,"編輯 Bases 卡片欄位",&hint,&field.value,1024)? else{return Ok(());};
+                if let Err(err)=self.notebook.save_pin_field(&view.doc,&pin,row,field,&draft){
+                    return crate::dialog::show_text(hwnd,"欄位未儲存（可複製）",&format!("{err}\r\n\r\n{draft}"));
+                }
+                if self.current.as_ref().is_some_and(|n|n.row.id==row.id){self.current=self.notebook.note(row.id)?;}
+                label(self.widgets.status,&format!("{name}　#{}　{} = {draft}",row.id,field.key));
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn workspace_menu(&mut self) -> Result<()> {
         unsafe {
             let hwnd = self.hwnd;
@@ -437,17 +478,82 @@ impl App {
                             (9, "匯出 JSON Canvas ZIP…"), (10, "檢視附件與相容性"), (11, "儲存封裝附件…"),
                         ]);
                     }
-                    choices.splice(3..3, [
+                    let companion = self.notebook.is_companion_canvas(id)?;
+                    if companion { choices.insert(3,(5,"開啟同包來源筆記…")); } else { choices.splice(3..3, [
                         (4, "綁定匯入的 Vault…"), (5, "開啟畫布來源筆記…"), (6, "解除 Vault 綁定"),
-                    ]);
+                    ]); }
                     let selected_file = if view.selection.len() == 1 {
                         view.doc.json()["nodes"].as_array().into_iter().flatten().find(|node|
                             node["type"].as_str() == Some("file")
                             && node["id"].as_str().is_some_and(|id| view.selection.contains(id)))
                     } else { None };
+                    if companion { choices.push((14,"新增同包筆記節點…")); }
                     if selected_file.is_some() { choices.push((13, "開啟已選節點的來源筆記")); }
+                    let bases = crate::store::canvas_base_cards::named_nodes(&view.doc);
+                    if !companion && !bases.is_empty() {
+                        choices.extend([(15,"手動配對 Bases 檔案來源…"),(16,"預覽或開啟 Bases 具名檢視…"),(17,"撤銷 Bases 路徑配對…"),(18,"編輯 Bases 卡片欄位…")]);
+                    }
                     let action = popup(hwnd, anchor, None, &choices);
-                    if action == 13 {
+                    if matches!(action,15..=18) {
+                        let root=initial_binding.ok_or("請先將畫布綁定到匯入 Bases 時選取的 Vault。")?;
+                        let index = if view.selection.len()==1 {
+                            bases.iter().position(|(node,_,_)|view.selection.contains(*node))
+                        } else {None};
+                        let pick = index.or_else(||super::navigation_ui::choose_navigation_page(hwnd,anchor,bases.len(),|i|{
+                            let (node,file,name)=bases[i];format!("{file}#{name} 〔{node}〕")
+                        }));
+                        let Some(index)=pick else {return Ok(());};
+                        let (node,file,name)=bases[index];
+                        if action==18 {
+                            let selected = node.to_owned();
+                            return self.edit_canvas_base_card(&selected);
+                        } else if action==15 {
+                            let physical=if self.notebook.base_card_needs_file(root,file)? {
+                                let Some(folder)=folder_dialog(hwnd)? else {return Ok(());};
+                                Some(folder)
+                            } else {None};
+                            let proof=physical.as_ref().map(|folder|crate::store::canvas_bundle::read_base_card_file(folder,file)).transpose()?;
+                            let receipt=self.notebook.base_card_candidate(id,&view.doc,root,node,proof.as_deref())?;
+                            let entry=format!("來源收據 #{receipt}");
+                            if popup(hwnd,anchor,None,&[(1,entry.as_str())])!=1{return Ok(());}
+                            let question=format!("Vault #{root} 的「{file}」要使用來源收據 #{receipt} 嗎？\r\n這是手動配對，會套用至這份畫布上具有相同完整檔案路徑的卡片。");
+                            if message(hwnd,"確認 Bases 來源路徑",&question,MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION)!=IDYES {return Ok(());}
+                            if let Some(folder)=physical && proof.as_deref()!=Some(crate::store::canvas_bundle::read_base_card_file(&folder,file)?.as_slice()){
+                                return Err("Bases 原檔在確認期間已變更，請重新核對。".into());
+                            }
+                            self.notebook.bind_base_card(id,&view.doc,root,node,receipt,proof.as_deref())?;
+                            label(self.widgets.status,"已保存這份畫布的 Bases 來源配對。");
+                        } else if action==17 {
+                            let receipt=self.notebook.base_path_receipt(id,root,file)?.ok_or("這個檔案尚未配對。")?;
+                            let question=format!("撤銷 Vault #{root} 中「{file}」與收據 #{receipt} 的配對？同圖同路徑卡片將停止開啟具名檢視。");
+                            if message(hwnd,"撤銷 Bases 路徑配對",&question,MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION)!=IDYES{return Ok(());}
+                            self.notebook.unbind_base_card(id,&view.doc,root,node,receipt)?;
+                            label(self.widgets.status,"已撤銷 Bases 路徑配對。");
+                        } else {
+                            let (receipt,col,_,saved)=self.notebook.resolve_base_card(id,&view.doc,root,node)?;
+                            let rows=self.notebook.filtered_collection_rows(col,Some(&saved))?;
+                            let mut preview=format!("{file}#{name}\r\nVault #{root}，來源收據 #{receipt}，檢視 #{}\r\n共 {} 筆，最多預覽 10 筆。",saved.id,rows.len());
+                            for (row,_) in rows.iter().take(10){write!(preview,"\r\n{}  (#{})",row.title,row.id)?;}
+                            crate::dialog::show_text(hwnd,"Bases 卡片預覽",&preview)?;
+                            if popup(hwnd,anchor,None,&[(1,"開啟此具名檢視"),(2,"留在畫布")])!=1{return Ok(());}
+                            let (checked,current,title,fresh)=self.notebook.resolve_base_card(id,&view.doc,root,node)?;
+                            if (checked,current,fresh.id)!=(receipt,col,saved.id){return Err("具名檢視已變更，請重新開啟預覽。".into());}
+                            self.open_collection_layout(current,title,Some(fresh))?;
+                        }
+                    } else if action == 14 {
+                        let candidates = self.notebook.companion_note_choices(id)?;
+                        if candidates.is_empty() { return Err("這份畫布沒有可使用的同包筆記。".into()); }
+                        let Some(index) = super::navigation_ui::choose_navigation_page(hwnd, anchor, candidates.len(),
+                            |i| format!("{}  (#{})", candidates[i].1, candidates[i].0)) else { return Ok(()); };
+                        let Some(rect) = canvas_editor_ui::geometry(hwnd, "0 0 232 114")? else { return Ok(()); };
+                        let (note,path) = &candidates[index];
+                        let revised = self.notebook.add_companion_note_node(id,&view.doc,*note,path,rect)?;
+                        let Some(WorkspaceView::Canvas(current)) = self.extras.workspace.as_mut() else { return Ok(()); };
+                        current.doc = revised;
+                        current.selection.clear();
+                        self.present();
+                        label(self.widgets.status,"已新增同包筆記節點。");
+                    } else if action == 13 {
                         let node = selected_file.ok_or("請先選取一個 Canvas 檔案節點。")?;
                         let node_id = node["id"].as_str().ok_or("Canvas 檔案節點缺少 ID。")?;
                         let link = self.notebook.resolve_canvas_file_link(id, initial_binding, node_id)?;
@@ -456,7 +562,7 @@ impl App {
                         {
                             return Err("Canvas 節點已更改，請重新開啟畫布。".into());
                         }
-                        let target = link.note_id.ok_or("請先綁定含有這個精確路徑的 Vault。")?;
+                        let target = link.note_id.ok_or(if companion { "此節點沒有可用的原始同包筆記。" } else { "請先綁定含有這個精確路徑的 Vault。" })?;
                         if view.focused_source.as_ref().is_some_and(|(id, source)| id == node_id && *source != target) {
                             return Err("此節點已不再指向原筆記，請重新查看出現位置。".into());
                         }
@@ -496,8 +602,12 @@ impl App {
                             let label = link.label.as_deref().unwrap_or(&link.file);
                             format!("{label} 〔{}〕 {suffix}", link.node_id)
                         }) {
-                            let link = self.notebook.resolve_canvas_file_link(id, expected, &links[index].node_id)?;
-                            let target = link.note_id.ok_or("請先綁定含有這個精確路徑的 Vault。")?;
+                            let selected = &links[index];
+                            let link = self.notebook.resolve_canvas_file_link(id, expected, &selected.node_id)?;
+                            if &link != selected {
+                                return Err("此檔案節點或來源已變更，請重新開啟清單。".into());
+                            }
+                            let target = link.note_id.ok_or(if companion { "此節點沒有可用的原始同包筆記。" } else { "請先綁定含有這個精確路徑的 Vault。" })?;
                             self.open_anchored_note(target, link.subpath.as_deref())?;
                         } else if links.is_empty() {
                             label(self.widgets.status, "畫布沒有檔案節點。");
@@ -574,6 +684,7 @@ impl App {
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
                 (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
                 (24, "表格與清單欄位…"), (25, "群組收合…"),
+                (26, "資料列附件…"), (27, "編輯資料列的關聯欄位…"),
             ]);
             match action {
                 1 => {
@@ -586,6 +697,15 @@ impl App {
                 23 => return self.collection_rule_menu(id),
                 24 => return self.collection_display_menu(id, title),
                 25 => return self.collection_fold_menu(id, title),
+                26 => return self.collection_attachment_ui(id),
+                27 => {
+                    let rows = self.visible_collection_rows(id)?;
+                    let Some(index) = navigation_ui::choose_navigation_page(hwnd, anchor, rows.len(), |i| {
+                        let (row, status) = &rows[i];
+                        format!("{status}　{}　[#{}]", row.title, row.id)
+                    }) else { return Ok(()); };
+                    return self.edit_relation_fields(rows[index].0.id);
+                }
                 2 | 3 | 6 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = choose(hwnd, anchor, &rows, |(row, status)| {
@@ -605,7 +725,17 @@ impl App {
                             self.open_import(note, "已開啟集合資料列");
                             return Ok(());
                         }
-                        _ => self.notebook.remove_from_collection(id, row.id, old_status)?,
+                        _ => {
+                            let edges = self.notebook.member_field_edges(id, row.id)?;
+                            if !edges.is_empty() && message(hwnd, "從集合移除資料列",
+                                &format!("移除「{}」[#{}] 也會移除 {} 條只屬於此集合成員的關聯。筆記與附件仍會保留。",
+                                         row.title, row.id, edges.len()),
+                                MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES
+                            {
+                                return Ok(());
+                            }
+                            self.notebook.remove_collection_member(id, row.id, old_status, Some(&edges))?;
+                        }
                     }
                 }
                 4 => {
@@ -665,7 +795,44 @@ impl App {
         }
     }
 
-    unsafe fn show_formula(&self, collection: i64) -> Result<()> {
+    unsafe fn collection_attachment_ui(&mut self, collection: i64) -> Result<()> {
+        unsafe {
+            let hwnd = self.hwnd;
+            let anchor = self.widgets.links;
+            let files = self.notebook.collection_attachments(collection)?;
+            let rows = self.visible_collection_rows(collection)?.into_iter()
+                .filter(|(row, _)| files.contains_key(&row.id)).collect::<Vec<_>>();
+            if rows.is_empty() {
+                label(self.widgets.status, "目前檢視的資料列沒有附件。");
+                return Ok(());
+            }
+            let Some(row_index) = navigation_ui::choose_navigation_page(hwnd, anchor, rows.len(), |i| {
+                let (row, status) = &rows[i];
+                format!("{status}　{}　[#{}]　{} 個附件", row.title, row.id, files[&row.id].files.len())
+            }) else { return Ok(()); };
+            let row = &rows[row_index].0;
+            let selection = &files[&row.id];
+            let attachments = &selection.files;
+            let Some(file_index) = choose(hwnd, anchor, attachments, |file| {
+                format!("{}　[#{}]　{} B", file.name, file.id, file.size)
+            }) else { return Ok(()); };
+            let file = &attachments[file_index];
+            let expected = self.notebook.collection_attachment_bytes(collection, row.id, &selection.owner_token, file)?;
+            let command = [(1, "儲存此資料列的附件副本…")];
+            if popup(hwnd, anchor, None, &command) == 1
+                && let Some(path) = file_dialog(hwnd, "所有檔案\0*.*\0\0", "", Some(&file.name))?
+            {
+                if !self.visible_collection_rows(collection)?.iter().any(|(current, _)| current.id == row.id) {
+                    return Err("資料列已不在目前檢視，請重新選取。".into());
+                }
+                self.notebook.save_collection_attachment(collection, row.id, &selection.owner_token, file, &expected, &path)?;
+                label(self.widgets.status, &format!("已儲存資料列 #{} 的附件副本。", row.id));
+            }
+            Ok(())
+        }
+    }
+
+    unsafe fn show_formula(&mut self, collection: i64) -> Result<()> {
         unsafe {
             let formulas = self.notebook.collection_formulas(collection)?;
             let Some(index) = choose(self.hwnd, self.widgets.links, &formulas, |(name, _)| name.clone()) else {
@@ -678,7 +845,45 @@ impl App {
                     .unwrap_or_else(|error| format!("錯誤：{error}"));
                 writeln!(result, "{}\t{value}\r", note.title)?;
             }
-            crate::dialog::show_text(self.hwnd, "集合公式結果", &result)
+            let direct = crate::formula::CompiledFormula::new(expr)
+                .is_ok_and(|code| code.direct_field_rollup().is_some());
+            if !direct {
+                return crate::dialog::show_text(self.hwnd, "集合公式結果", &result);
+            }
+            if !crate::dialog::report_action(self.hwnd,"集合公式結果",&result,"查看彙總來源…")? {
+                return Ok(());
+            }
+            let rows=self.visible_collection_rows(collection)?.into_iter()
+                .map(|(row,_)| self.notebook.rollup_member(collection,row.id))
+                .collect::<Result<Vec<_>>>()?;
+            let anchor=self.widgets.links;
+            if rows.is_empty() {
+                return crate::dialog::show_text(self.hwnd,"彙總來源明細","目前檢視沒有可選資料列。");
+            }
+            let Some(index)=super::navigation_ui::choose_navigation_page(self.hwnd,anchor,rows.len(),
+                |i|format!("{}　[#{}]",rows[i].title,rows[i].id)) else {return Ok(())};
+            let owner=&rows[index];
+            let trace=self.notebook.saved_rollup_trace(collection,name,expr,owner)?;
+            let mut details=format!("{name}\r\n{expr}\r\n{}　[#{}]\r\n結果：{}\r\n\r\n",owner.title,owner.id,trace.total);
+            if trace.peers.is_empty() {
+                details.push_str("沒有可用的關聯筆記。");
+                return crate::dialog::show_text(self.hwnd,"彙總來源明細",&details);
+            }
+            for peer in &trace.peers {writeln!(details,"{}\r",peer.label())?;}
+            if !crate::dialog::report_action(self.hwnd,"彙總來源明細",&details,"開啟來源筆記…")? {return Ok(())}
+            let Some(index)=super::navigation_ui::choose_navigation_page(self.hwnd,anchor,trace.peers.len(),
+                |i|trace.peers[i].label()) else {return Ok(())};
+            if !self.visible_collection_rows(collection)?.iter().any(|(r,_)|r.id==owner.id) {
+                return Err("資料列已不在目前檢視，請重新選取。".into());
+            }
+            let peer=self.notebook.open_rollup_peer(collection,name,expr,owner,&trace,index)?;
+            self.view=View::All;
+            self.editing=false;
+            label(self.widgets.search,"");
+            self.set_current_note(Some(peer));
+            self.rebuild();
+            label(self.widgets.status,"已開啟彙總來源筆記。");
+            Ok(())
         }
     }
 
@@ -754,6 +959,7 @@ impl App {
                 }
                 if crate::store::notion_handoff::is_notion_csv(&file.name, origin.as_deref()) {
                     options.push((10, "從 Notion CSV 建立新集合…"));
+                    options.push((11, "依工作區欄位型別建立集合…"));
                 }
                 let action = popup(hwnd, anchor, None, &options);
                 match action {
@@ -821,12 +1027,28 @@ impl App {
                     }
                     7 => self.open_pdf_view(file.id, 1)?,
                     8 => self.jump_pdf_annotation(file.id, anchor)?,
-                    10 => {
+                    10 | 11 => {
+                        let preview = if action == 11 {
+                            let preview = self.notebook.preview_typed_notion_csv(note, file.id)?;
+                            let detail = preview.summary();
+                            let prompt = if detail.lines().count() > 16 || detail.chars().count() > 700 {
+                                crate::dialog::show_text(hwnd, "CSV 欄位型別明細", &detail)?;
+                                "是否套用剛才預覽的完整欄位清單？"
+                            } else { &detail };
+                            if message(hwnd, "確認 CSV 欄位型別", prompt, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES {
+                                return Ok(());
+                            }
+                            Some(preview)
+                        } else { None };
                         let Some(title) = crate::dialog::prompt(
                             hwnd, "從 Notion CSV 建立新集合",
-                            "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）", "", 120,
+                            if preview.is_some() { "新集合名稱（套用已確認的欄位型別）" }
+                            else { "集合名稱（最多 1000 列，欄值為文字。原始 CSV 會保留。）" }, "", 120,
                         )? else { return Ok(()); };
-                        let (id, count) = self.notebook.create_collection_from_notion_csv(note, file.id, &title)?;
+                        let (id, count) = match preview {
+                            Some(plan) => self.notebook.create_typed_notion_csv_collection(&title, &plan)?,
+                            None => self.notebook.create_collection_from_notion_csv(note, file.id, &title)?,
+                        };
                         self.rebuild();
                         self.open_kanban(id, title.trim().to_owned())?;
                         label(self.widgets.status, &format!("已建立集合，匯入 {count} 列。原始 CSV 已保留。"));

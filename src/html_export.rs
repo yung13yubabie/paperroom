@@ -1,5 +1,7 @@
 use super::attachments::{MAX_FILE_BYTES, MAX_STORAGE_BYTES, file_kind, has_expected_signature};
-use super::note_links::{NATIVE_NOTE_PREFIX, native_note_target};
+use super::note_links::native_note_target;
+#[cfg(test)]
+use super::note_links::NATIVE_NOTE_PREFIX;
 use super::{MAX_NOTE_BYTES, Notebook, Result};
 use crate::output::{publish_new, windows_output_name};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
@@ -230,9 +232,11 @@ fn render_markdown(
             Event::Start(Tag::Link { dest_url, .. }) => {
                 // Only app-issued scoped note identities become hyperlinks.
                 // Preserve every original destination in the companion Markdown.
-                let scoped = !dest_url.contains('#') && dest_url.strip_prefix(NATIVE_NOTE_PREFIX)
-                    .is_some_and(|id| id.contains(':'));
-                let target = if scoped { native_note_target(db, &dest_url)? } else { None };
+                let target = if !dest_url.contains('#') {
+                    native_note_target(db, None, &dest_url)?
+                } else {
+                    None
+                };
                 let target = target.filter(|id| pages.contains_key(id));
                 if let Some(id) = target { write!(output, "<a href=\"{id}.html\">")?; }
                 links.push(target.is_some());

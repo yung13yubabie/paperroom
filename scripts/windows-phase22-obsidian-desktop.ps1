@@ -160,24 +160,6 @@ public static class ExactPicker {
     }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint wheel, UIntPtr extra);
-    public static void DragFixture(IntPtr window, int x, int y, int dx, int dy) {
-        Point start=new Point{X=x,Y=y};
-        if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(start),2)!=window ||
-            !SetCursorPos(x,y) || GetAncestor(WindowFromPoint(start),2)!=window)
-            throw new InvalidOperationException("The drag did not start on the verified window.");
-        mouse_event(2,0,0,0,UIntPtr.Zero);
-        try {
-            for (int i=1; i<=12; i++) {
-                Point next=new Point{X=x+dx*i/12,Y=y+dy*i/12};
-                if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(next),2)!=window ||
-                    !SetCursorPos(next.X,next.Y))
-                    throw new InvalidOperationException("The drag lost the verified window.");
-                System.Threading.Thread.Sleep(22);
-            }
-        } finally {
-            mouse_event(4,0,0,0,UIntPtr.Zero);
-        }
-    }
     public static void ClickDefault(IntPtr dialog,IntPtr button) {
         if (GetForegroundWindow()!=dialog || GetParent(button)!=dialog ||
             !IsWindowVisible(button) || !IsWindowEnabled(button) || !GetWindowRect(button,out Rect r))
@@ -309,9 +291,11 @@ function Edge-Witness($First,$After) {
     $hits=@($After.edges | Where-Object { $_.id -ceq $First.id })
     if($hits.Count -ne 1) { throw "Missing exact edge $($First.id)." }
     $actual=$hits[0]
-    foreach($field in 'id','fromNode','fromSide','toNode','toSide','label') {
+    foreach($field in 'id','fromNode','fromSide','toNode','toSide') {
         if($First.$field -cne $actual.$field) { throw "Edge $($First.id) changed $field." }
     }
+    $expectedLabel = if($First.id -ceq $editedEdgeId){$newLabel}else{$First.label}
+    if($expectedLabel -cne $actual.label) { throw "Edge $($First.id) changed its expected label." }
     if($First.color -ine $actual.color) { throw "Edge $($First.id) changed color." }
     $from=if([string]::IsNullOrEmpty($actual.fromEnd)){'none'}else{$actual.fromEnd}
     $to=if([string]::IsNullOrEmpty($actual.toEnd)){'arrow'}else{$actual.toEnd}
@@ -324,6 +308,9 @@ function Edge-Witness($First,$After) {
 }
 
 $source=Read-Canvas
+$editedEdgeId='2234567890abcde3'
+$oldLabel='無箭頭參照'
+$newLabel='無箭頭參照｜已核對'
 $media=@('媒體/場景-青.png','媒體/底圖-紫.png')
 $assets=[ordered]@{}
 foreach ($name in '白板','媒體','evidence') {
@@ -347,41 +334,49 @@ try {
     Start-Sleep -Milliseconds 850
     Zoom-Canvas $hwnd 'evidence/Canvas-opened.png'
 
-    $id='1234567890abcde3'
-    $start=Node $source $id
-    $moved=$false
-    foreach($side in 0.60,0.63,0.56) {
-        $r=[ExactPicker]::Bounds($hwnd)
-        $x=$r[0]+[int]($r[2]*$side)
-        $y=$r[1]+[int]($r[3]*0.54)
-        [ExactPicker]::ClickFixture($hwnd,$x,$y,$false)
-        Start-Sleep -Milliseconds 240
-        [ExactPicker]::DragFixture($hwnd,$x,$y,104,-76)
-        $deadline=[DateTime]::UtcNow.AddSeconds(4)
-        do {
-            try { $saved=Read-Canvas } catch { $saved=$null }
-            if($saved) {
-                $card=Node $saved $id
-                foreach ($other in ($source.nodes | Where-Object { $_.id -cne $id })) {
-                    $same=Node $saved $other.id
-                    if($other.x -ne $same.x -or $other.y -ne $same.y) { throw 'The native drag moved an unexpected node.' }
-                }
-                if($card.x -ne $start.x -or $card.y -ne $start.y) { $moved=$true;break }
-            }
-            Start-Sleep -Milliseconds 210
-        } while([DateTime]::UtcNow -lt $deadline)
-        if($moved) { break }
-        Zoom-Canvas $hwnd 'evidence/Canvas-last-drag-attempt.png'
+    $r=[ExactPicker]::Bounds($hwnd)
+    # The existing edge chip was seen near this position in the opened fixture.
+    # Prove the actual label editor before committing any desktop edit.
+    $x=$r[0]+[int]($r[2]*0.744)
+    $y=$r[1]+[int]($r[3]*0.718)
+    $foundEdit=$false
+    foreach($offset in 0,-5,6) {
+        Set-Clipboard -Value ([guid]::NewGuid().ToString('N'))
+        [ExactPicker]::ClickFixture($hwnd,$x,($y+$offset),$true)
+        Start-Sleep -Milliseconds 350
+        if ([ExactPicker]::GetForegroundWindow() -ne $hwnd) { throw 'The Canvas label edit lost foreground.' }
+        [Windows.Forms.SendKeys]::SendWait('^a')
+        [Windows.Forms.SendKeys]::SendWait('^c')
+        Start-Sleep -Milliseconds 230
+        if(([string](Get-Clipboard -Raw)).Trim() -ceq $oldLabel) { $foundEdit=$true;break }
+        [Windows.Forms.SendKeys]::SendWait('{ESC}')
     }
-    if(!$moved -or $card.text -cne $start.text -or $card.width -ne $start.width -or $card.height -ne $start.height) {
-        throw 'The expected arrangement change to the text card was not saved.'
+    if(!$foundEdit) {
+        Image 'evidence/Canvas-unconfirmed-edge-label.png' $hwnd
+        throw 'The existing edge label did not open as an editable control.'
     }
+    "Native exact edge label editor exposed $oldLabel."
+    Set-Clipboard -Value $newLabel
+    [Windows.Forms.SendKeys]::SendWait('^v')
+    [Windows.Forms.SendKeys]::SendWait('{ESC}')
+    [ExactPicker]::ClickFixture($hwnd,($r[0]+[int]($r[2]*0.58)),($r[1]+[int]($r[3]*0.24)),$false)
+    $deadline=[DateTime]::UtcNow.AddSeconds(9)
+    $edited=$false
+    do {
+        try { $saved=Read-Canvas } catch { $saved=$null }
+        if($saved) {
+            $labels=@($saved.edges | Where-Object { $_.id -ceq $editedEdgeId -and $_.label -ceq $newLabel })
+            if(@($saved.edges).Count -eq 3 -and $labels.Count -eq 1) { $edited=$true;break }
+        }
+        Start-Sleep -Milliseconds 230
+    } while([DateTime]::UtcNow -lt $deadline)
+    if(!$edited) { throw 'The exact edge edit did not reach the Canvas file.' }
     $savedHash=Digest $boardPath
     if($savedHash -ceq $result.before_sha256) { throw 'A native file write was not observed.' }
     $result['saved_sha256']=$savedHash
-    $result['dragged']=[ordered]@{id=$id;before=@($start.x,$start.y);after=@($card.x,$card.y);text=$card.text}
+    $result['edited_edge']=[ordered]@{id=$editedEdgeId;before=$oldLabel;after=$newLabel}
     Copy-Item -LiteralPath $boardPath -Destination (Join-Path $env:OBSIDIAN_RECEIPTS $relativeCanvas)
-    "Native drag saved card $id from $($start.x),$($start.y) to $($card.x),$($card.y). Canvas SHA-256 $savedHash."
+    "Native edit saved edge $editedEdgeId label $newLabel. Canvas SHA-256 $savedHash."
 
     if(!$app.CloseMainWindow() -or !$app.WaitForExit(9000)) { throw 'Obsidian did not exit after the normal window close.' }
     OpenFixture $relativeCanvas
@@ -393,6 +388,12 @@ try {
     $after=Read-Canvas
     if((Digest $boardPath) -cne $savedHash -or @($after.nodes).Count -ne 4 -or @($after.edges).Count -ne 3) {
         throw 'The Canvas or its inventory changed on reopen.'
+    }
+    foreach($originalNode in $source.nodes) {
+        $observedNode=Node $after $originalNode.id
+        foreach($part in 'x','y','width','height','text') {
+            if($observedNode.$part -cne $originalNode.$part) { throw "Canvas node $($originalNode.id) changed $part unexpectedly." }
+        }
     }
     $result['reopened']=$true
     $picture=Node $after '1234567890abcde2'
@@ -414,7 +415,7 @@ try {
         throw 'Both distinctive source colors were not established in the opened and reopened native Canvas.'
     }
     $result['pass']=$true
-    'PASS Official Obsidian Canvas retained the native card drag, original media/group paths and all three attributed edges across a new process.'
+    'PASS Official Obsidian Canvas retained the native edge edit, original media/group paths and all three attributed edges across a new process.'
 } catch {
     $result['blocked']=$_.Exception.Message
     throw

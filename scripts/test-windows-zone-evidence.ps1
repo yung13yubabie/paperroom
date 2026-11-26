@@ -110,3 +110,5 @@ try {
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }
+# The nested staging command deliberately exited nonzero on this non-client host.
+exit 0

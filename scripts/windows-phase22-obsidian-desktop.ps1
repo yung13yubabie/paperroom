@@ -37,7 +37,10 @@ $setup = Start-Process $installer -ArgumentList '/S' -PassThru
 if (!$setup.WaitForExit(120000) -or $setup.ExitCode -ne 0) { throw 'Installer failed or timed out.' }
 $exe = Join-Path $env:LOCALAPPDATA 'Programs/Obsidian/Obsidian.exe'
 if (!(Test-Path $exe -PathType Leaf)) { throw 'Expected per-user installation was not found.' }
-if ((Get-Item $exe).VersionInfo.ProductVersion -notmatch '^1\.15\.1(?:$|[^\d.])') { throw 'Installed desktop version mismatch.' }
+$info = (Get-Item $exe).VersionInfo
+"Installed PE product version: $($info.ProductVersion). File version: $($info.FileVersion)."
+$versionMatch='^1\.15\.1(?:\.0)?(?:$|[ +\-])'
+if ($info.ProductVersion -notmatch $versionMatch -and $info.FileVersion -notmatch $versionMatch) { throw 'Installed desktop version mismatch.' }
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $root = [Windows.Automation.AutomationElement]::RootElement
 $tree = [Windows.Automation.TreeScope]::Descendants

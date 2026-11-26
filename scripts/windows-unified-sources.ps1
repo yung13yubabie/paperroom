@@ -58,7 +58,8 @@ $null = Wait-For 'the imported Markdown root is selected' {
     [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '匯入：MarkdownAndCanvases'
 }
 
-$prompt = Native-File 40 '匯入 Obsidian Bases 檢視…' $bases '已匯入 1 個 Bases 檢視' -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
+Native-MenuFromKeyboard 109 40 '匯入 Obsidian Bases 檢視…'
+$prompt = Native-File 40 '匯入 Obsidian Bases 檢視…' $bases '已匯入 1 個 Bases 檢視' -AlreadyOpened -NextDialog '匯入 Bases 檢視' -NextDialogButton 6
 Finish-Revision $prompt 6
 $null = Wait-For 'native Bases source receipt opened' {
     [PaperroomHighlightGui]::Read((Control $window 103)) -ceq 'Bases 來源：場次.base' -and

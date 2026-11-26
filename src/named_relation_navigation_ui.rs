@@ -8,9 +8,11 @@ impl App {
         let direction = match unsafe { popup(self.hwnd, anchor, None, &[
             (1, "指向此筆記的具名關聯…"),
             (2, "此筆記指向的具名關聯…"),
+            (3, "編輯集合關聯屬性…"),
         ]) } {
             1 => Direction::Incoming,
             2 => Direction::Outgoing,
+            3 => return unsafe { self.edit_relation_fields(note) },
             _ => return Ok(()),
         };
         let mut page = 0;
@@ -85,5 +87,68 @@ impl App {
             unsafe { label(self.widgets.status,status); }
         }
         Ok(())
+    }
+}
+
+impl App {
+    pub(super) unsafe fn edit_relation_fields(&mut self, note: i64) -> Result<()> {
+        use super::navigation_ui::choose_navigation_page;
+        unsafe {
+            let anchor = self.widgets.links;
+            let memberships = self.notebook.relation_collections(note)?;
+            if memberships.is_empty() { return Err("請先將筆記加入可編輯的集合。".into()); }
+            let fields = self.notebook.editable_relation_fields(note)?;
+            let Some(index) = choose_navigation_page(self.hwnd,anchor,fields.len()+1,|i|{
+                if i==0 { return "新增關聯屬性…".to_owned(); }
+                let field=&fields[i-1].0;
+                let direction=if field.reverse {"反向"}else{"正向"};
+                format!("{direction}　{}　｜ {}　[#{}]",field.name,field.other,field.id)
+            }) else {return Ok(())};
+            if index==0 {
+                let Some(s)=choose_navigation_page(self.hwnd,anchor,memberships.len(),|i|
+                    format!("{}　[#{}]",memberships[i].1,memberships[i].0)) else {return Ok(())};
+                let targets=self.notebook.relation_target_collections()?;
+                let Some(t)=choose_navigation_page(self.hwnd,anchor,targets.len(),|i|
+                    format!("{}　[#{}]",targets[i].1,targets[i].0)) else {return Ok(())};
+                let Some(name)=crate::dialog::prompt(self.hwnd,"新增集合關聯屬性","關聯屬性名稱","",128)? else {return Ok(())};
+                let (id,title,origin)=&memberships[s];
+                let (target,other)=&targets[t];
+                self.notebook.create_relation_field(origin,(*id,title),(*target,other),&name)?;
+                label(self.widgets.status,"已新增集合關聯屬性。");
+                return Ok(());
+            }
+            let (field,origin)=&fields[index-1];
+            let action=popup(self.hwnd,anchor,None,&[(1,"加入關聯筆記…"),(2,"移除關聯筆記…"),(3,"開啟關聯筆記…")]);
+            if !(1..=3).contains(&action) {return Ok(())}
+            let choices=self.notebook.field_candidates(field,origin,action!=1)?;
+            if choices.is_empty() {
+                label(self.widgets.status,if action==1 {"沒有可加入的關聯筆記。"}else{"這個關聯屬性尚無可操作的筆記。"});
+                return Ok(());
+            }
+            let Some(i)=choose_navigation_page(self.hwnd,anchor,choices.len(),|i|
+                format!("{}　[#{}]",choices[i].title,choices[i].id)) else {return Ok(())};
+            let target=&choices[i];
+            match action {
+                3=>{
+                    let target=self.notebook.open_field_value(field,origin,target)?;
+                    self.view=View::All;
+                    self.editing=false;
+                    label(self.widgets.search,"");
+                    self.set_current_note(Some(target));
+                    self.rebuild();
+                    label(self.widgets.status,"已開啟集合關聯筆記。");
+                }
+                1|2=>{
+                    if action==2 {
+                        let prompt=format!("移除「{}」中 {} [#{}] 與 {} [#{}] 的關聯？",field.name,origin.title,origin.id,target.title,target.id);
+                        if message(self.hwnd,"移除集合關聯",&prompt,MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES {return Ok(())}
+                    }
+                    self.notebook.edit_field_value(field,origin,target,action==1)?;
+                    label(self.widgets.status,if action==1{"已加入集合關聯筆記。"}else{"已移除集合關聯筆記。"});
+                }
+                _=>unreachable!(),
+            }
+            Ok(())
+        }
     }
 }

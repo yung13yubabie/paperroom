@@ -84,9 +84,10 @@ impl Notebook {
         if filename.encode_utf16().count()>255 || filename.chars().any(char::is_control)
             || !attachments::has_expected_signature("text",&raw) { return Err("Bases 檔名或文字格式無效。".into()); }
         let base = obsidian_base::parse(&raw)?;
+        if !dynamic && base.views.iter().any(|v|v.limit.is_some()){return Err("含 limit 的 Bases 請以動態或跟隨 Vault 模式匯入。".into())}
         if !dynamic && base.views.iter().any(|v|!v.sorts.is_empty()){return Err("這份 Bases 含型別排序，請選擇動態模式。".into())}
         if dynamic && (!live || base.views.iter().any(|v|v.typed_filters.len()>8)){return Err("動態模式需連結來源，每個檢視最多 8 個條件。".into())}
-        if live && !scope && !base.has_live_status() {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
+        if live && !scope && !base.has_live_status() && !(dynamic && base.views.iter().any(|v|v.limit.is_some())) {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
         let token:String=tx.query_row("SELECT i.token FROM notes n JOIN note_link_identities i ON i.note_id=n.id
             WHERE n.id=?1 AND n.trash_root IS NULL AND EXISTS(SELECT 1 FROM vault_paths WHERE import_root=n.id)",
@@ -226,6 +227,7 @@ impl Notebook {
                 params![collection,serde_json::to_string(&labels)?])?;
             let count=if dynamic{super::obsidian_base_dynamic::rows(&tx,collection)?.ok_or("找不到動態候選")?.len()}else{members.len()};
             report.push_str(&format!("\n- 集合 #{}　{}（匯入時 {} 篇）",collection,text_for_receipt(&name),count));
+            if let Some(limit)=view.limit { report.push_str(&format!("，排序後最多顯示 {limit} 篇")); }
             created.push((collection,name,count as i64,list));
         }
         let receipt=insert(&tx,Some(root),&format!("Bases 來源：{filename}"),&report)?;
@@ -248,6 +250,51 @@ mod tests {
     use crate::archive::ImportedPage;
     fn page(dir:&str)->ImportedPage {
         ImportedPage{parts:vec![dir.into(),"鏡頭.md".into()],title:"編輯後標題".into(),body:"內容".into()}
+    }
+    #[test]
+    fn limited_view_applies_after_sort_and_refuses_stale_edits_after_another_writer() -> Result<()> {
+        let dir=std::env::temp_dir().join(format!("paperroom-base-limit-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir(&dir)?;
+        let path=dir.join("workspace.sqlite");
+        let mut db=Notebook::open(&path,false)?;
+        let mut pages=Vec::new();
+        for (name,n) in [("A",9),("B",2),("C",4)] {
+            let mut p=page(name);
+            p.body=format!("---\ncost: {n}\n---\n正文");
+            pages.push(p);
+        }
+        let root=db.import_vault("來源",pages)?;
+        let raw=b"filters: 'note.cost >= 0'\nviews:\n  - {type: table, name: First, limit: 1, order: [file.path, cost], sort: [{property: note.cost, direction: ASC}]}\n  - {type: list, name: All, order: [file.path, cost], sort: [{property: note.cost, direction: ASC}]}";
+        assert!(db.import_obsidian_base(root,"snapshot.base",raw.to_vec()).is_err());
+        for token in ["0","1001","-1","true","1.5","'1'","01"] {
+            let invalid=format!("views: [{{type: table, name: Invalid, limit: {token}}}]");
+            assert!(obsidian_base::parse(invalid.as_bytes()).is_err(),"{token}");
+        }
+        let (_,views)=db.import_vault_scope_base(root,"top.base",raw.to_vec())?;
+        let ids=|db:&Notebook,col:i64|->Result<Vec<i64>>{Ok(db.collection_rows(col)?.into_iter().map(|(r,_)|r.id).collect())};
+        let cap=views[0].0;
+        let all=views[1].0;
+        let originals=ids(&db,all)?;
+        assert_eq!(originals.len(),3);
+        let (b,c,a)=(originals[0],originals[1],originals[2]);
+        assert_eq!(ids(&db,cap)?,[b]);
+        let (old,_)=db.typed_base_current(cap,"cost",b)?;
+        let writer=Notebook::open(&path,false)?;
+        let current=writer.note(a)?.unwrap();
+        writer.save(a,current.version,&current.row.title,"---\ncost: 1\n---\n正文")?;
+        assert!(db.edit_typed_base(cap,"cost",b,old,"12").is_err());
+        let writes=db.connection.total_changes();
+        assert_eq!(ids(&db,cap)?,[a]);assert_eq!(ids(&db,all)?,[a,b,c]);
+        assert_eq!(db.connection.total_changes(),writes);
+        let backup=dir.join("backup.sqlite");db.backup(&backup)?;
+        drop(writer);drop(db);
+        for file in [path,backup] {
+            let db=Notebook::open(&file,false)?;
+            assert_eq!(ids(&db,cap)?,[a]);assert_eq!(ids(&db,all)?,[a,b,c]);
+            assert!(db.note(b)?.unwrap().body.contains("cost: 2"));
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
     #[test]
     fn exact_file_path_filter_selects_distinct_case_sensitive_vault_members() -> Result<()> {

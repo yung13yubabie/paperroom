@@ -18,7 +18,9 @@ param(
     [switch]$NodeAssetsOnly,
     [switch]$PinnedCardScopeOnly,
     [switch]$NotionSourceReplacementOnly,
-    [switch]$NativeChildBoardOnly
+    [switch]$NativeChildBoardOnly,
+    [switch]$VaultRelocationConflictOnly,
+    [switch]$TypedRelationBranchOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1448,7 +1450,11 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
-    if ($PinnedCardScopeOnly) {
+    if ($TypedRelationBranchOnly) {
+        . (Join-Path $PSScriptRoot 'windows-typed-relation-branch.ps1')
+        return
+    }
+    if ($PinnedCardScopeOnly -or $VaultRelocationConflictOnly) {
         . (Join-Path $PSScriptRoot 'windows-pinned-card-live-scope.ps1')
         return
     }

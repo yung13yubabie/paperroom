@@ -92,7 +92,7 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as
     assert b[0][1]=="---\nstatus: 乙保留\n---\n乙正文",b
     assert db.execute("select key,value from note_properties where note_id=? order by key",(n,)).fetchall()==[("進度","原生值")]
     assert db.execute("select c.name from collection_notes cn join collections c on c.id=cn.collection_id where cn.note_id=? order by c.name",(n,)).fetchall()==[("A／進度表",),("B／進度表",)]
-    assert db.execute("pragma user_version").fetchone()==(42,)
+    assert db.execute("pragma user_version").fetchone()==(43,)
     assert db.execute("pragma integrity_check").fetchone()==("ok",)
     print(f"{n}:{token}")
 '@ | python - $Db $Expected

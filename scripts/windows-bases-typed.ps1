@@ -111,7 +111,7 @@ with closing(sqlite3.connect(Path(db).as_uri()+"?mode=ro",uri=True)) as c:
         by_collection.setdefault(name,set()).add(title)
     every={"零值","高值","空值","缺欄","小值"}
     assert by_collection=={"Cut／型別表":{"高值"},"TypeA／型別表":every,"TypeB／型別表":every,"Grouped／型別表":every},by_collection
-    assert c.execute("pragma user_version").fetchone()==(42,)
+    assert c.execute("pragma user_version").fetchone()==(43,)
     assert c.execute("pragma integrity_check").fetchone()==("ok",)
     identity=f"{note}:{token}"
     assert not prior or identity==prior

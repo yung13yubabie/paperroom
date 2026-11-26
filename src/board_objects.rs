@@ -118,6 +118,9 @@ fn create_child_board(db: &Connection, parent_board: i64, title: &str) -> Result
     Ok(child)
 }
 
+#[path="board_selection_child.rs"]
+mod selection_child;
+
 fn valid_text(text:&str)->Result<()> {
     if text.trim().is_empty() || text.contains('\0') || text.chars().count()>TEXT_LIMIT {
         return Err("文字方塊須有內容，最多 4,096 字。".into());

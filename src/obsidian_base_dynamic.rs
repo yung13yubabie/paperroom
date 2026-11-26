@@ -18,20 +18,33 @@ type Sort=(String,String,bool);
 pub(super) fn register(db:&Connection,col:i64,root:i64,view:&obsidian_base::View,base:&obsidian_base::Base)->Result<()>{
     let predicates:Vec<_>=view.typed_filters.iter().map(|t|format!("note.{} {} {}",t.key,t.op,t.operand)).collect();
     let sorts:Vec<_>=view.sorts.iter().map(|(key,desc)| (key.as_str(),base.types[key],desc)).collect();
-    db.execute("INSERT INTO obsidian_base_dynamic(collection_id,import_root,predicates,sorts) VALUES(?1,?2,?3,?4)",params![col,root,serde_json::to_string(&predicates)?,serde_json::to_string(&sorts)?])?;
+    let sort_plan = match view.limit {
+        Some(limit) => serde_json::json!({"sorts":sorts,"limit":limit}).to_string(),
+        None => serde_json::to_string(&sorts)?,
+    };
+    db.execute("INSERT INTO obsidian_base_dynamic(collection_id,import_root,predicates,sorts) VALUES(?1,?2,?3,?4)",params![col,root,serde_json::to_string(&predicates)?,sort_plan])?;
     Ok(())
 }
 
-struct Plan{tests:Vec<Test>,sorts:Vec<Sort>}
+struct Plan{tests:Vec<Test>,sorts:Vec<Sort>,limit:Option<usize>}
 fn plan(db:&Connection,col:i64)->Result<Option<Plan>>{
     let raw:Option<(String,String)>=db.query_row("SELECT predicates,sorts FROM obsidian_base_dynamic WHERE collection_id=?1",[col],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((p,s))=raw else{return Ok(None)};
     if p.len()>32768 || s.len()>4096{return Err("動態 Bases 設定超過上限。".into())}
     let exprs:Vec<String>=serde_json::from_str(&p)?;
-    let sorts:Vec<Sort>=serde_json::from_str(&s)?;
+    let config:serde_json::Value=serde_json::from_str(&s)?;
+    let (sorts,limit):(Vec<Sort>,Option<usize>)=match config {
+        serde_json::Value::Object(mut object) => {
+            let limit=object.remove("limit").and_then(|v|v.as_u64()).filter(|n|(1..=1000).contains(n)).ok_or("動態檢視的筆數上限無效。")?;
+            let sorts=object.remove("sorts").ok_or("缺少排序設定。")?;
+            if !object.is_empty(){return Err("未知的動態排序設定。".into())}
+            (serde_json::from_value(sorts)?,Some(limit as usize))
+        }
+        legacy => (serde_json::from_value(legacy)?,None),
+    };
     if exprs.len()>8 || sorts.len()>4 || sorts.iter().any(|(_,kind,_)|!matches!(kind.as_str(),"number"|"boolean")) {return Err("動態 Bases 規則無效。".into())}
     let tests=exprs.iter().map(|expr|Test::parse(expr).ok_or("無效的型別條件。")).collect::<std::result::Result<_,_>>()?;
-    Ok(Some(Plan{tests,sorts}))
+    Ok(Some(Plan{tests,sorts,limit}))
 }
 
 const SOURCE:&str=" FROM obsidian_base_candidates c
@@ -78,12 +91,18 @@ pub(super) fn rows(db:&Connection,col:i64)->Result<Option<Vec<(Row,String)>>>{
     }
     drop(reader);drop(stmt);
     visible.sort_by(|a,b|a.0.cmp(&b.0).then_with(||a.1.cmp(&b.1)).then_with(||a.2.id.cmp(&b.2.id)));
+    if let Some(limit)=plan.limit{visible.truncate(limit);}
     if let Some(tx)=tx{tx.commit()?}
     Ok(Some(visible.into_iter().map(|(_,_,r,status)|(r,status)).collect()))
 }
 
 pub(super) fn require_visible(db:&Connection,col:i64,note:i64)->Result<()> {
     let Some(plan)=plan(db,col)? else{return Ok(())};
+    if plan.limit.is_some() {
+        // Membership depends on every sorted candidate, including edits by another connection.
+        let visible=rows(db,col)?.ok_or("找不到動態檢視。")?;
+        return if visible.iter().any(|(row,_)|row.id==note){Ok(())}else{Err("這篇來源已不在動態檢視顯示的範圍。".into())};
+    }
     let bytes:Option<Vec<u8>>=db.query_row(&format!("SELECT substr(CAST(n.body AS BLOB),1,?3){SOURCE} AND n.id=?2"),params![col,note,(obsidian_base::FRONT_LIMIT+4)as i64],|r|r.get(0)).optional()?;
     let mut budget=32*1024*1024usize;
     if let Some(bytes)=bytes && plan.evaluate(&bytes,&mut budget)?.is_some(){return Ok(())}

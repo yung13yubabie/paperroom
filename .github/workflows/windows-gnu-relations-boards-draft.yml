@@ -1,0 +1,98 @@
+name: Replay the official Obsidian move and Paperroom coordination
+on:
+  push:
+    branches: ['dev/linked-collection-board-20261126']
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: f9ede33831ce00147d1e77cede9c8cf4ab1047ba
+  PAPERROOM_NAME: Paperroom-relations-boards-windows-x64-gnu-draft
+  EXPECTED_EXE: bd76f9579fdbae69e2aee7380e89be28be938f33ff2f609a5931a107520ef4c0
+  EXPECTED_ZIP: 533c9f41ba388a4d90e4e6a77de3a96dbfe13590848f7dc8680f0b30cdb6e8c6
+
+jobs:
+  native:
+    name: 'Replay exact GNU download (${{ matrix.flow }})'
+    strategy:
+      fail-fast: false
+      matrix:
+        flow: [vault-conflict]
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      FLOW: ${{ matrix.flow }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check this revision changed only replay scripts
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-relations-boards-draft.yml' ':!scripts/windows-typed-relation-branch.ps1' ':!scripts/windows-obsidian-move-fixture.ps1' ':!scripts/windows-vault-move-conflict.ps1'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.PAPERROOM_NAME }}
+          path: ${{ runner.temp }}/gnu-relations-boards
+          run-id: 45772180633
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-relations-boards-GNU-draft-exe
+          path: ${{ runner.temp }}/gnu-relations-boards-exe
+          run-id: 45772180633
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: matrix.flow == 'vault-conflict'
+        with:
+          name: obsidian-1.15.1-independent-base-pins
+          path: ${{ runner.temp }}/original-obsidian-pins
+          run-id: 45764058913
+          github-token: ${{ github.token }}
+      - name: Verify both downloads and run the native executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'gnu-relations-boards'
+          $zip = Join-Path $folder "$env:PAPERROOM_NAME.zip"
+          python -B scripts/package-windows-gnu-audit.py verify --require-dependency-evidence --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'GNU ZIP failed complete readback.' }
+          $extracted = Join-Path $folder 'verified'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+          $exe = Join-Path $extracted 'Paperroom.exe'
+          $standaloneFolder = Join-Path $env:RUNNER_TEMP 'gnu-relations-boards-exe'
+          $standalone = Join-Path $standaloneFolder 'Paperroom.exe'
+          $checksums = Get-Content -LiteralPath (Join-Path $standaloneFolder 'SHA256SUMS.txt')
+          if ($checksums.Count -ne 2 -or $checksums[0] -cne "$env:EXPECTED_EXE  Paperroom.exe" -or
+              $checksums[1] -cne "$env:EXPECTED_ZIP  $env:PAPERROOM_NAME.zip" -or
+              (Get-FileHash -LiteralPath $standalone -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'Downloaded EXEs or checksum list differed from the expected unsigned candidate.'
+          }
+          Write-Host "Both downloads contain the same EXE SHA-256 $env:EXPECTED_EXE. ZIP SHA-256 $env:EXPECTED_ZIP."
+
+          $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $folder "$env:FLOW-restore.json"
+            $env:PAPERROOM_OBSIDIAN_PINS = Join-Path $env:RUNNER_TEMP 'original-obsidian-pins'
+            $scenario = switch ($env:FLOW) {
+              'relation-board' { @{TypedRelationBranchOnly=$true} }
+              'vault-conflict' { @{VaultRelocationConflictOnly=$true} }
+              default { throw 'Unexpected native scenario.' }
+            }
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE @scenario
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
+            throw 'Missing native integration receipt.'
+          }
+      - name: Retain native integration receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-relations-boards-GNU-draft-native-${{ matrix.flow }}
+          path: ${{ runner.temp }}/gnu-relations-boards/*-restore.json
+          if-no-files-found: error

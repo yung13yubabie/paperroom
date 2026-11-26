@@ -329,6 +329,45 @@ try {
             $bad.Dispose()
         }
     }
+    # A normal local folder alias keeps the portable selection and stores the
+    # resolved database in the selected target, with no default fallback.
+    $aliasRoot = Join-Path $base 'resolved-portable'
+    $aliasBin = Join-Path $aliasRoot 'bin'
+    $aliasLocal = Join-Path $aliasRoot 'local'
+    $aliasTemp = Join-Path $aliasRoot 'temp'
+    $aliasTarget = Join-Path $aliasRoot '實際儲存'
+    $aliasMarker = Join-Path $aliasBin 'paperroom-data'
+    foreach ($dir in $aliasBin,$aliasLocal,$aliasTemp,$aliasTarget) {
+        [void][IO.Directory]::CreateDirectory($dir)
+    }
+    Copy-Item -LiteralPath $Exe -Destination $aliasBin
+    [void](New-Item -Type Junction -Path $aliasMarker -Target $aliasTarget)
+    $aliasProcess = $null
+    $aliasDb = Join-Path $aliasTarget 'notes.sqlite3'
+    $aliasTitle = '本機可攜資料夾已解析'
+    try {
+        $aliasProcess = Start-Notebook $aliasBin $aliasLocal $aliasTemp $false
+        if (!(Test-Path -LiteralPath $aliasDb -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $aliasLocal 'Paperroom'))) {
+            throw 'Resolved local folder did not contain the selected portable database.'
+        }
+        Set-UpgradeTitle $aliasProcess $aliasTitle
+        Close-Notebook $aliasProcess
+        Assert-UpgradeDatabase $aliasDb 35 $aliasTitle
+        $aliasProcess = Start-Notebook $aliasBin $aliasLocal $aliasTemp $false
+        if ((Read-Control $aliasProcess.MainWindowHandle 103) -cne $aliasTitle) {
+            throw 'The resolved portable folder did not retain the note on reopen.'
+        }
+        Close-Notebook $aliasProcess
+        Write-Host 'PASS: local portable folder alias resolved to its local target, saved and reopened with no default workspace.'
+    } finally {
+        if ($aliasProcess -and !$aliasProcess.HasExited) {
+            $aliasProcess.Kill()
+            $aliasProcess.WaitForExit()
+        }
+        [IO.Directory]::Delete($aliasMarker)
+    }
+
     if ($UpgradeBaseline) { Test-PublishedWorkspaceUpgrade $base $UpgradeBaseline $Exe }
     foreach ($mode in 'default','portable','portable-marker') {
         $root = Join-Path $base $mode

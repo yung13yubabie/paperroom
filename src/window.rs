@@ -150,6 +150,7 @@ struct App {
     widgets: Widgets,
     notebook: Notebook,
     data_dir: PathBuf,
+    portable_workspace: bool,
     current: Option<Note>,
     tree_items: HashMap<i64, HTREEITEM>,
     editing: bool,
@@ -161,6 +162,15 @@ struct App {
     fonts: Vec<HFONT>,
     brushes: [HBRUSH; 2],
     extras: Extras,
+}
+
+#[derive(Clone, Copy)]
+struct CardDrag {
+    board: i64,
+    note: i64,
+    origin: (i32, i32),
+    pointer: (i32, i32),
+    scroll: (i32, i32),
 }
 
 #[derive(Default)]
@@ -183,7 +193,7 @@ struct Extras {
     block_returns: Vec<navigation_ui::BlockReturn>,
     workspace: Option<WorkspaceView>,
     board_selection: Option<(i64, String)>,
-    dragging: Option<(i64, i32, i32)>,
+    dragging: Option<CardDrag>,
     scroll: i32,
     board_scroll_x: i32,
     native_board_focus: Option<crate::store::native_board_locations::NativeBoardLocation>,
@@ -273,8 +283,12 @@ fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<Path
         Ok(metadata) if metadata.is_dir() => return Ok(adjacent),
         Ok(_) => return Err("程式旁的 paperroom-data 必須是資料夾。紙間沒有切換到其他資料位置。".into()),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        Err(_) if portable => return Ok(adjacent),
-        Err(_) => {}
+        Err(_) => match std::fs::symlink_metadata(&adjacent) {
+            Ok(_) => return Err("程式旁的 paperroom-data 無法開啟。紙間沒有切換到其他資料位置。".into()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) if portable => return Ok(adjacent),
+            Err(_) => {}
+        },
     }
     let local = local.filter(|path| path.is_absolute())
         .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
@@ -286,18 +300,87 @@ fn check_workspace_volume(path: &Path, drive_type: impl FnOnce(&Path) -> u32) ->
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return Err("工作區需要完整的 Windows 路徑。".into());
     };
-    let remote = match prefix.kind() {
-        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+    match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => {}
         Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
             let root = PathBuf::from(format!("{}:\\", char::from(letter)));
-            drive_type(&root) == 4 // Win32 DRIVE_REMOTE
+            if is_local_workspace_drive(drive_type(&root)) {
+                return Ok(());
+            }
         }
         _ => return Err("工作區需要本機磁碟路徑。".into()),
-    };
-    if remote {
-        return Err("工作區使用 SQLite WAL，需要本機磁碟。請將工作區移至本機後再開啟。".into());
     }
-    Ok(())
+    Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into())
+}
+
+fn is_local_workspace_drive(drive_type: u32) -> bool {
+    // Win32 DRIVE_REMOVABLE, DRIVE_FIXED, and DRIVE_RAMDISK.
+    matches!(drive_type, 2 | 3 | 6)
+}
+
+fn native_drive_type(root: &Path) -> u32 {
+    unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr()) }
+}
+
+fn resolved_workspace_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    check_workspace_volume(&resolved, native_drive_type)?;
+    if !std::fs::metadata(&resolved)?.is_dir() {
+        return Err("工作區位置必須是資料夾。".into());
+    }
+    // A mounted volume can have a different type from the drive-letter root.
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    let mut volume = vec![0_u16; 32_768];
+    if unsafe { GetVolumePathNameW(wide_path(&resolved).as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !is_local_workspace_drive(unsafe { GetDriveTypeW(volume.as_ptr()) }) {
+        return Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into());
+    }
+    Ok(resolved)
+}
+
+fn prepare_workspace_directory(path: &Path) -> Result<PathBuf> {
+    use std::io::ErrorKind;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    check_workspace_volume(path, native_drive_type)?;
+    // Resolve the nearest existing directory before creating anything. Walk
+    // missing components on the checked path, verifying each actual target.
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    let mut directory = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break resolved_workspace_directory(ancestor)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                missing.push(ancestor.file_name().ok_or("找不到工作區路徑。")?);
+                ancestor = ancestor.parent().ok_or("找不到工作區的上層資料夾。")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    for name in missing.into_iter().rev() {
+        let child = directory.join(crate::output::windows_output_name(name)?);
+        match std::fs::create_dir(&child) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = resolved_workspace_directory(&child)?;
+    }
+
+    // SQLite must open ordinary files beside each other in the resolved
+    // directory. Never follow an existing redirect for an individual file.
+    for name in ["notes.sqlite3", "notes.sqlite3-wal", "notes.sqlite3-shm", "notes.sqlite3-journal"] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Ok(entry) if entry.is_file() && entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(format!("工作區的 {name} 必須是本機資料夾內的一般檔案。").into()),
+        }
+    }
+    Ok(directory)
 }
 
 fn init_tree_control() -> Result<()> {
@@ -365,9 +448,8 @@ unsafe fn start() -> Result<()> {
             std::env::args_os().skip(1).any(|arg| arg == "--portable"),
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         )?;
-        check_workspace_volume(&dir, |root| {
-            windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr())
-        })?;
+        check_workspace_volume(&dir, native_drive_type)?;
+        let portable_workspace = dir.ends_with("paperroom-data");
         let module = GetModuleHandleW(null());
         if LoadLibraryExW(
             wide("Msftedit.dll").as_ptr(),
@@ -412,13 +494,14 @@ unsafe fn start() -> Result<()> {
         }
         let widgets = Widgets::create(hwnd, module)?;
         // Native editor initialization must succeed before writing workspace state.
-        std::fs::create_dir_all(&dir)?;
+        let dir = prepare_workspace_directory(&dir)?;
         let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let app = Box::new(RefCell::new(App {
             hwnd,
             widgets,
             notebook,
             data_dir: dir,
+            portable_workspace,
             current: None,
             tree_items: HashMap::new(),
             editing: false,
@@ -767,7 +850,7 @@ impl App {
             InvalidateRect(tree, null(), 1);
             let hint = if !query.trim().is_empty() {
                 format!("{} 筆搜尋結果", rows.len())
-            } else if self.data_dir.ends_with("paperroom-data") {
+            } else if self.portable_workspace {
                 "●　可攜工作區".to_owned()
             } else {
                 "●　本機工作區".to_owned()
@@ -2239,6 +2322,21 @@ impl App {
         }
     }
 
+    fn card_drag_position(&self, drag: CardDrag, x: i32, y: i32, area: RECT) -> Option<(i32, i32)> {
+        if self.board_id() != drag.board { return None; }
+        let card = self.extras.cards.iter().find(|card| card.id == drag.note)?;
+        if (x, y) == drag.pointer { return Some(drag.origin); }
+        let dpi = self.dpi as i32;
+        let scroll_x = self.extras.board_scroll_x;
+        let max_x = (scroll_x + (area.right - area.left) * 96 / dpi - card.size().width).clamp(0, 10000);
+        let dx = (x - drag.pointer.0) * 96 / dpi + scroll_x - drag.scroll.0;
+        let dy = (y - drag.pointer.1) * 96 / dpi + self.extras.scroll - drag.scroll.1;
+        Some((
+            if dx == 0 { drag.origin.0 } else { (drag.origin.0 + dx).clamp(0, max_x) },
+            (drag.origin.1 + dy).clamp(0, 50000),
+        ))
+    }
+
     unsafe fn board_input(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) {
         unsafe {
             if !self.extras.board {
@@ -2268,45 +2366,44 @@ impl App {
                     if let Some(id) = self.card_at(x, y)
                         && let Some(card) = self.extras.cards.iter().find(|c| c.id == id)
                     {
-                        let area = self.board_area();
-                        self.extras.dragging = Some((
-                            id,
-                            x - self.board_screen_x(area, card.x),
-                            y - area.top - self.scaled(card.y - self.extras.scroll),
-                        ));
+                        self.extras.dragging = Some(CardDrag {
+                            board: self.board_id(),
+                            note: id,
+                            origin: (card.x, card.y),
+                            pointer: (x, y),
+                            scroll: (self.extras.board_scroll_x, self.extras.scroll),
+                        });
                         SetCapture(self.hwnd);
                     } else if let Some(shape) = self.board_shape_at(x, y) {
                         self.begin_board_shape_drag(shape, x, y);
                     }
                 }
                 WM_MOUSEMOVE => {
-                    if let Some((id, dx, dy)) = self.extras.dragging {
+                    if let Some(drag) = self.extras.dragging {
                         let area = self.board_area();
-                        let dpi = self.dpi as i32;
-                        let width = self.extras.cards.iter().find(|card| card.id == id)
-                            .map_or(232, |card| card.size().width);
-                        let scroll_x = self.extras.board_scroll_x;
-                        let max_x = (scroll_x + (area.right - area.left) * 96 / dpi - width).clamp(0, 10000);
-                        let new_x = ((x - area.left - dx) * 96 / dpi + scroll_x).clamp(0, max_x);
-                        let new_y =
-                            ((y - area.top - dy) * 96 / dpi + self.extras.scroll).clamp(0, 50000);
-                        if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == id) {
-                            card.x = new_x;
-                            card.y = new_y;
+                        if let Some(position) = self.card_drag_position(drag, x, y, area)
+                            && let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note)
+                        {
+                            (card.x, card.y) = position;
                             InvalidateRect(self.hwnd, &area, 1);
                         }
                     }
                 }
                 WM_LBUTTONUP => {
-                    if let Some((id, _, _)) = self.extras.dragging.take() {
+                    if let Some(drag) = self.extras.dragging.take() {
                         ReleaseCapture();
-                        if let Some(card) = self.extras.cards.iter().find(|c| c.id == id) {
-                            if let Err(error) = self.notebook.move_card_on(self.board_id(), id, card.x, card.y) {
+                        let area = self.board_area();
+                        if let Some(position) = self.card_drag_position(drag, x, y, area) {
+                            if let Err(error) = self.notebook.finish_card_drag(drag.board, drag.note, drag.origin, position) {
                                 let _ = self.refresh_board();
+                                InvalidateRect(self.hwnd, &area, 1);
                                 self.show_error(error);
                             } else {
+                                if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note) {
+                                    (card.x, card.y) = position;
+                                }
                                 self.refresh_board_image_cache();
-                                InvalidateRect(self.hwnd, null(), 1);
+                                InvalidateRect(self.hwnd, &area, 1);
                             }
                         }
                     }
@@ -2903,6 +3000,7 @@ mod tests {
             4
         }).is_err());
         assert!(check_workspace_volume(Path::new(r"\\?\C:\notes"), |_| 3).is_ok());
+        assert!(check_workspace_volume(Path::new(r"C:\notes"), |_| 0).is_err());
     }
 
     #[test]
@@ -2928,6 +3026,32 @@ mod tests {
         assert_eq!(workspace_directory(&exe, false, Some(local))?, adjacent);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn workspace_uses_resolved_local_directory_and_rejects_nonfile_members() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("paperroom-resolved-paths-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            let workspace = root.join("本機資料").join("nested");
+            let resolved = prepare_workspace_directory(&workspace)?;
+            assert_eq!(resolved, std::fs::canonicalize(&workspace)?);
+            let db = workspace.join("notes.sqlite3");
+            drop(Notebook::open(&resolved.join("notes.sqlite3"), true)?);
+            assert!(db.is_file());
+            assert_eq!(prepare_workspace_directory(&workspace)?, resolved);
+            let original = std::fs::read(&db)?;
+            std::fs::create_dir(workspace.join("notes.sqlite3-wal"))?;
+            assert!(prepare_workspace_directory(&workspace).is_err());
+            assert_eq!(std::fs::read(&db)?, original);
+            let deep = (0..15).fold(root.clone(), |path, _| path.join("深層工作區資料目錄驗證長路徑"));
+            let long = prepare_workspace_directory(&deep)?;
+            assert_eq!(long, std::fs::canonicalize(deep)?);
+            drop(Notebook::open(&long.join("notes.sqlite3"), true)?);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]

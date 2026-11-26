@@ -3113,6 +3113,120 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
     Close-Notebook $process
     $process.Dispose()
     $process = $null
+    # Use two live windows on the isolated restored copy. Compare SQLite
+    # read-only, but move the card exclusively through native pointer input.
+    function Read-SouthCoordinates {
+        $coords = @'
+import json, sqlite3, sys
+from contextlib import closing
+from pathlib import Path
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)) as db:
+    rows = db.execute("SELECT n.body,c.x,c.y FROM board_cards c JOIN notes n ON n.id=c.note_id "
+                      "JOIN boards b ON b.id=c.board_id WHERE b.title='NativeSouth' ORDER BY n.id").fetchall()
+assert len(rows) == 2
+target, = [row for row in rows if row[0] == sys.argv[2]]
+other, = [row for row in rows if row[0] != sys.argv[2]]
+print(json.dumps(dict(x=target[1], y=target[2], other=other[1:])))
+'@ | python - $restoreCopy $nativeBodies[1]
+        if ($LASTEXITCODE -ne 0 -or !$coords) { throw 'Could not read the two isolated board placements.' }
+        return $coords | ConvertFrom-Json
+    }
+    function Activate-TestBoard {
+        if (![PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)) {
+            [void][PaperroomHighlightGui]::SetForegroundWindow($window)
+            if (![PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)) {
+                $activator = New-Object -ComObject WScript.Shell
+                [void]$activator.AppActivate($process.Id)
+            }
+        }
+        $null = Wait-For 'selected isolated board window in foreground' {
+            [PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id)
+        }
+    }
+    function Drag-NativeCard($Position, [int]$Dx, [int]$Dy) {
+        $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+        $dpi = [PaperroomHighlightGui]::GetDpiForWindow($window)
+        $x = $area.Left + [int][Math]::Round(($Position.x + 30) * $dpi / 96)
+        $y = $area.Top + [int][Math]::Round(($Position.y + 30) * $dpi / 96)
+        Drag-Canvas $x $y ($x+$Dx) ($y+$Dy)
+    }
+    $second = $null
+    try {
+        $process = Start-Notebook $clone
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        $first = $process
+        $firstWindow = $window
+        $startCoords = Read-SouthCoordinates
+        if ($startCoords.x -ne 16 -or $startCoords.y -ne 16) { throw 'Unexpected clean first-slot geometry.' }
+
+        $second = Start-Notebook $clone
+        $process = $second
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        Activate-TestBoard
+        Drag-NativeCard $startCoords 60 70
+        $secondCoords = Read-SouthCoordinates
+        if ($secondCoords.x -le $startCoords.x -or $secondCoords.y -le $startCoords.y) {
+            throw 'The second window did not save its physical drag.'
+        }
+
+        $process = $first
+        $window = $firstWindow
+        Activate-TestBoard
+        Drag-NativeCard $startCoords 0 0
+        $afterClick = Read-SouthCoordinates
+        if ($afterClick.x -ne $secondCoords.x -or $afterClick.y -ne $secondCoords.y) {
+            throw 'The stationary click overwrote newer coordinates.'
+        }
+        Start-Sleep -Milliseconds 700 # Keep these two gestures separate from a system double-click.
+        Drag-NativeCard $startCoords 35 40
+        $refusal = Wait-For 'native alert for a stale board gesture' {
+            [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
+        }
+        if (![PaperroomHighlightGui]::DialogContains($refusal,$process.Id,'卡片位置或狀態已變更')) {
+            throw 'The first window did not identify a conflicting card move.'
+        }
+        [PaperroomHighlightGui]::TapKey($window,$process.Id,0x0D)
+        $null = Wait-For 'stale board alert closed after the board refresh' {
+            ![PaperroomHighlightGui]::IsWindowVisible($refusal)
+        }
+        $afterRefusal = Read-SouthCoordinates
+        if ($afterRefusal.x -ne $secondCoords.x -or $afterRefusal.y -ne $secondCoords.y) {
+            throw 'A stale physical drag overwrote newer coordinates.'
+        }
+        Drag-NativeCard $afterRefusal 35 40
+        $fresh = Read-SouthCoordinates
+        if ($fresh.x -le $afterRefusal.x -or $fresh.y -le $afterRefusal.y -or
+            (($fresh.other -join ',') -cne ($startCoords.other -join ','))) {
+            throw 'The refreshed drag did not persist or affected the neighbor card.'
+        }
+        Close-Notebook $second
+        $second.Dispose()
+        $second = $null
+        Close-Notebook $process
+        $process.Dispose()
+        $process = Start-Notebook $clone
+        $window = $process.MainWindowHandle
+        Search-NativeTwin $nativeBodies[1]
+        Pick-NativePlacement 'NativeSouth' 1
+        $reopened = Read-SouthCoordinates
+        if ($reopened.x -ne $fresh.x -or $reopened.y -ne $fresh.y) {
+            throw 'The latest native drag did not survive reopen.'
+        }
+        Close-Notebook $process
+        $process.Dispose()
+        $process = $null
+        Write-Host 'PASS: two native board windows kept the newer card position on a stationary click, rejected a stale drag, and persisted a refreshed move across restart.'
+    } finally {
+        if ($second) {
+            if (!$second.HasExited) { $second.Kill(); [void]$second.WaitForExit(5000) }
+            if ($process -eq $second) { $process = $first }
+            $second.Dispose()
+        }
+    }
     @'
 from contextlib import closing
 from pathlib import Path

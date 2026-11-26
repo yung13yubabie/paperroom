@@ -1,0 +1,17 @@
+name: Check official Obsidian desktop with a synthetic Vault
+on:
+  push:
+    branches: ['dev/qa/phase22-obsidian-desktop']
+permissions:
+  contents: read
+jobs:
+  official:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Open a first-run test Vault, two Bases and a Canvas
+        shell: pwsh
+        run: pwsh -STA -NoProfile -File ./scripts/windows-phase22-obsidian-desktop.ps1

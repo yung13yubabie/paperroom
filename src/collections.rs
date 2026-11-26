@@ -67,7 +67,7 @@ fn require_member(db: &Connection, collection: i64, member: RelationMember<'_>) 
     Ok(())
 }
 
-fn write_relation(tx: &Transaction<'_>, source: i64, name: &str, target: i64, present: bool) -> Result<bool> {
+pub(super) fn write_relation(tx: &Transaction<'_>, source: i64, name: &str, target: i64, present: bool) -> Result<bool> {
     let args = params![source, name, target];
     if present {
         let exists: bool = tx.query_row(

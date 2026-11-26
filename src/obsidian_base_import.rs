@@ -5,7 +5,7 @@ use super::{Notebook, Result, attachments, collection_display::MAX_DISPLAY_COLUM
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 
-enum Column { Filename, Folder, Path, Extension, Front(String) }
+enum Column { Filename, Folder, Path, Extension, Formula(obsidian_base::FileFormula), Front(String) }
 
 fn columns(base: &Base, view: &View) -> Result<Vec<(String,Column)>> {
     let ordered: Vec<&str> = if view.order.is_empty() { vec!["file.name"] }
@@ -21,6 +21,7 @@ fn columns(base: &Base, view: &View) -> Result<Vec<(String,Column)>> {
             "file.folder" => (alias.unwrap_or(key), Column::Folder),
             "file.path" => (alias.unwrap_or(key), Column::Path),
             "file.ext" => (alias.unwrap_or(key), Column::Extension),
+            key if key.starts_with("formula.") => (alias.unwrap_or(&key[8..]),Column::Formula(base.formulas.get(key).ok_or("找不到這項公式。")?.clone())),
             key if key.starts_with("note.") => (alias.unwrap_or(&key[5..]), Column::Front(key[5..].to_owned())),
             _ => return Err(format!("無法從 Vault 原始資料確認欄位「{key}」。").into()),
         };
@@ -68,7 +69,7 @@ impl Notebook {
         let mut created=Vec::new();
         let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
         let mut remaining_front_bytes=32*1024*1024usize;
-        if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.")) {
+        if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.") && !base.formulas.contains_key(key)) {
             return Err("只支援檔案與筆記頁首欄位的顯示名稱。".into());
         }
         for view in &base.views {
@@ -106,6 +107,7 @@ impl Notebook {
                 tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'已匯入')",params![collection,note])?;
                 for (label,col) in &cols {
                     let value=match col {
+                        Column::Formula(expr) => expr.display(path,folder,file),
                         Column::Filename => file,
                         Column::Folder => folder,
                         Column::Path => path,
@@ -138,6 +140,36 @@ mod tests {
     use crate::archive::ImportedPage;
     fn page(dir:&str)->ImportedPage {
         ImportedPage{parts:vec![dir.into(),"鏡頭.md".into()],title:"編輯後標題".into(),body:"內容".into()}
+    }
+    #[test]
+    fn file_formulas_are_snapshot_columns_for_exact_vault_members() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let root=db.import_vault("來源",vec![page("甲"),page("乙")])?;
+        db.import_vault("另一個",vec![page("甲")])?;
+        let raw=r#"formulas:
+  folder: 'file.folder.startsWith("甲")'
+  shot: 'file.path.contains("鏡頭")'
+  caps: 'file.ext.endsWith("MD")'
+properties: {formula.folder: {displayName: 選取}}
+views: [{type: table, name: Formula, order: [formula.folder, formula.shot, formula.caps]}]
+"#;
+        let (receipt,views)=db.import_obsidian_base(root,"checks.base",raw.as_bytes().to_vec())?;
+        let col=views[0].0;
+        assert_eq!(views[0].2,2);
+        for (path,expected) in [("甲/鏡頭.md","true"),("乙/鏡頭.md","false")] {
+            let id:i64=db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",params![root,path],|r|r.get(0))?;
+            db.set_property(id,"選取",Some("手動值"))?;
+            for (key, value) in [("選取",expected),("shot","true"),("caps","false")] {
+                assert_eq!(db.collection_display_values(col,key)?.get(&id).map(String::as_str),Some(value));
+            }
+        }
+        assert_eq!(db.connection.query_row("SELECT content FROM attachments WHERE note_id=?1",[receipt],|r|r.get::<_,Vec<u8>>(0))?,raw.as_bytes());
+        let before=db.collections()?;
+        for bad in [raw.replace("file.path.contains", "file.path.unknown"),raw.replace("file.path.contains", "file.name.contains"),raw.replace("order: [formula.folder","order: [formula.missing"),raw.replace("file.ext.endsWith(\"MD\")","formula.caps"),raw.replace("file.ext.endsWith(\"MD\")","file.ext.endsWith(\"md\") + 1")] {
+            assert!(db.import_obsidian_base(root,"bad.base",bad.into_bytes()).is_err());
+            assert_eq!(db.collections()?,before);
+        }
+        Ok(())
     }
     #[test]
     fn materializes_scoped_ids_and_keeps_original_blob() -> Result<()> {
@@ -185,6 +217,41 @@ views:
         assert_eq!(db.collection_display_values(sibling,"alias")?.get(&note).map(String::as_str),Some("私人屬性"));
         Ok(())
     }
+    #[test]
+    fn imported_alias_snapshots_do_not_overwrite_native_properties_or_namesakes() -> Result<()> {
+        use rusqlite::params;
+        let mut db = Notebook::open(std::path::Path::new(":memory:"), false)?;
+        let mut a = page("甲");
+        a.title = "鏡頭".into();
+        a.body = "---\nstatus: 待辦\n---\n甲正文".into();
+        let mut other = page("乙");
+        other.title = "鏡頭".into();
+        other.body = "---\nstatus: 乙保留\n---\n乙正文".into();
+        let root = db.import_vault("同名測試庫", vec![a, other])?;
+        let find = |relative: &str| db.connection.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
+            params![root, relative], |r| r.get::<_,i64>(0),
+        );
+        let (a, other) = (find("甲/鏡頭.md")?, find("乙/鏡頭.md")?);
+        db.set_property(a, "進度", Some("原生值"))?;
+        let mut collections = Vec::new();
+        for (name, selector, alias) in [("A.base","note.status","進度"),("B.base","status","狀態")] {
+            let raw = format!("properties:\n  {selector}: {{displayName: {alias}}}\nviews:\n  - type: table\n    name: 表格\n    filters: 'file.folder == \"甲\"'\n    order: [{selector}]\n");
+            let (_, saved) = db.import_obsidian_base(root, name, raw.into_bytes())?;
+            collections.push((saved[0].0, alias));
+        }
+        let note = db.note(a)?.unwrap();
+        db.save(a, note.version, &note.row.title, "---\nstatus: 完成\n---\n甲正文")?;
+        for (id, alias) in collections {
+            let projection = db.collection_display_values(id, alias)?;
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection.get(&a).map(String::as_str), Some("待辦"));
+        }
+        assert_eq!(db.properties(a)?,vec![("進度".into(),"原生值".into())]);
+        assert_eq!(db.note(other)?.unwrap().body, "---\nstatus: 乙保留\n---\n乙正文");
+        Ok(())
+    }
+
     #[test]
     fn scalar_frontmatter_uses_saved_markdown_and_preserves_missing_false_zero() -> Result<()> {
         let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;

@@ -20,14 +20,26 @@ tags: [studio, notes]
 原始 Markdown 場次
 '@, $encoded)
 [IO.File]::WriteAllText($detailBase, @'
+formulas:
+  cut: 'file.path.startsWith("甲/")'
+properties:
+  formula.cut: {displayName: 甲場判定}
 views:
   - type: list
     name: SourceDetails
     filters: 'file.folder == "甲"'
-    order: [file.path, status, note.checked, number]
+    order: [file.path, status, note.checked, formula.cut]
 '@, $encoded)
-'{"schema":"paperroom-notion-mcp-transfer/2","confirmed_page_ids":["11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222"],"pages":[{"id":"11111111-1111-1111-1111-111111111111","title":"同名頁","markdown":"可驗甲正文","truncated":false,"unknown_block_count":0,"unknown_block_ids":[]},{"id":"22222222-2222-2222-2222-222222222222","title":"同名頁","markdown":"可驗乙正文","truncated":false,"unknown_block_count":0,"unknown_block_ids":[]}],"confirmed_page_references":[{"source_page_id":"11111111-1111-1111-1111-111111111111","block_parent_page_id":"11111111-1111-1111-1111-111111111111","block_id":"33333333-3333-3333-3333-333333333333","block_type":"paragraph","rich_text_type":"mention","mention_type":"page","target_page_id":"22222222-2222-2222-2222-222222222222","code":false}]}' |
-    python -B (Join-Path $PSScriptRoot 'notion_mcp_transfer.py') $detailNotion
+@'
+import json
+a,b,c=[str(i)*32 for i in range(1,4)]
+d,e="d"*32,"e"*32
+pages=[{"id":key,"title":title,"markdown":body,"truncated":False,"unknown_block_count":0,"unknown_block_ids":[]}
+  for key,title,body in ((a,"分鏡關聯","來源正文"),(b,"同名頁","可驗甲正文"),(c,"同名頁","可驗乙正文"))]
+print(json.dumps({"schema":"paperroom-notion-mcp-transfer/3","confirmed_page_ids":[a,b,c],"pages":pages,
+  "confirmed_page_data_sources":{a:d,b:e,c:e},"confirmed_database_relations":[{"source_page_id":a,"property_name":"取景",
+  "property_type":"relation","target_data_source_id":e,"target_page_id":b}]}))
+'@ | python - | python -B (Join-Path $PSScriptRoot 'notion_mcp_transfer.py') $detailNotion
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the test Notion transfer.' }
 @'
 import json,sys,zipfile
@@ -56,8 +68,24 @@ function Close-DetailReport([IntPtr]$Dialog, [string]$Expected) {
 
 $process = Start-Notebook $detailHome
 $window = $process.MainWindowHandle
-$detailReport = Native-File 2 '匯入 Notion Markdown ZIP…' $detailNotion '已匯入 3 篇 Markdown' -NextDialog '匯入報告'
-Close-DetailReport $detailReport '紙間 MCP 文字交接標記'
+$notionPrompt = Native-File 2 '匯入 Notion Markdown ZIP…' $detailNotion '已匯入 3 篇 Markdown' -NextDialog '匯入具名關聯' -NextDialogButton 7
+if (![PaperroomHighlightGui]::DialogContains($notionPrompt,$process.Id,'建立 1 條具名關聯')) { throw 'Expected one typed relation.' }
+Finish-Revision $notionPrompt 7
+@'
+import sqlite3,sys
+from contextlib import closing
+from pathlib import Path
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True)) as db:
+    assert db.execute("select count(*) from notion_page_paths").fetchone()==(0,)
+    assert db.execute("select count(*) from note_relations").fetchone()==(0,)
+'@ | python - $detailDb
+if ($LASTEXITCODE -ne 0) { throw 'Cancelling relation import changed the workspace.' }
+$notionPrompt = Native-File 2 '匯入 Notion Markdown ZIP…' $detailNotion '已匯入 3 篇 Markdown' -NextDialog '匯入具名關聯' -NextDialogButton 6
+Finish-Revision $notionPrompt 6
+$detailReport = Wait-For 'typed relation import report' {
+    [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','匯入報告',1)
+}
+Close-DetailReport $detailReport '依紙間交接檔建立 1 條具名關聯。'
 $notice = Native-File 20 '匯入 Markdown ZIP（相對附件）…' $detailCanvas '保存 1 份可編輯 Canvas' -NextDialog 'Markdown ZIP 匯入範圍' -NextDialogButton 6
 Finish-Revision $notice 6
 $detailReport = Wait-For 'Canvas preservation report' {
@@ -84,16 +112,36 @@ Copy-Item -LiteralPath $detailBackup -Destination $restoredDb
 $process = Start-Notebook $detailRestore
 $window = $process.MainWindowHandle
 
-Select-Note '本機頁面引用'
-Native-Menu 120 2 '前往　同名頁' -CaptionPrefix
-$null = Wait-For 'explicit link found the other exact same-title note after restore' {
+Select-Note '分鏡關聯'
+Native-Menu 120 60001 '具名關聯的來源與目標…'
+Native-Menu 120 2 '此筆記指向的具名關聯…' -MenuOpen
+$relations = @(Collection-MenuLabels)
+if ($relations.Count -ne 1) { throw 'The restored relation must have one exact target.' }
+Native-Menu 120 1 '取景　同名頁' -MenuOpen -CaptionPrefix
+$null = Wait-For 'typed edge opened the right same-title note' {
     [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '同名頁' -and
-    [PaperroomHighlightGui]::Read((Control $window 121)).Contains('可驗乙正文')
+    [PaperroomHighlightGui]::Read((Control $window 121)).Contains('可驗甲正文')
 }
 Native-Menu 109 12 '開啟已匯入的 Canvas…'
 Native-Menu 109 1 'Boards/複合.canvas' -MenuOpen
 $null = Wait-For 'saved complex Canvas opened with native controls' {
     [PaperroomHighlightGui]::Read((Control $window 120)) -ceq 'Canvas 操作'
+}
+Native-Menu 120 5 '開啟同包來源筆記…'
+$nodes = @(Collection-MenuLabels)
+if ($nodes.Count -ne 2) { throw 'Expected two mapped Canvas file nodes.' }
+Native-Menu 120 1 '甲/鏡頭.md 〔a〕' -MenuOpen -CaptionPrefix
+$null = Wait-For 'Canvas link opened the exact source note' {
+    [PaperroomHighlightGui]::Read((Control $window 103)) -ceq '畫布筆記' -and
+    [PaperroomHighlightGui]::Read((Control $window 121)).Contains('Canvas 來源')
+}
+Native-Menu 120 60002 '查看此筆記的 Canvas 位置…'
+Native-Menu 120 1 'Boards/複合.canvas  (#' -MenuOpen -CaptionPrefix
+$locations = @(Collection-MenuLabels)
+if ($locations.Count -ne 2) { throw 'Expected both exact Canvas placements.' }
+Native-Menu 120 2 '2　甲/鏡頭.md 〔b〕' -MenuOpen -CaptionPrefix
+$null = Wait-For 'reverse navigation located the second original node' {
+    [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已定位 Canvas 節點「b」。'
 }
 Open-SortCollection 'SceneDetails／SourceDetails'
 Native-Menu 120 11 '集合檢視…'
@@ -106,7 +154,7 @@ $detailReport = Wait-For 'restored Bases displayed fields' {
     [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','資料列的顯示欄位',1)
 }
 $text = [PaperroomHighlightGui]::Read((Control $detailReport 101))
-foreach ($field in @('file.path　甲/鏡頭.md','status　準備','checked　false','number　0')) {
+foreach ($field in @('file.path　甲/鏡頭.md','status　準備','checked　false','甲場判定　true')) {
     if (!$text.Contains($field)) { throw "Saved Bases view did not display $field" }
 }
 Finish-Revision $detailReport 1
@@ -121,6 +169,8 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db, zipf
     saved=db.execute("select id,source from saved_canvases where title='Boards/複合.canvas'").fetchone()
     assert saved[1].encode()==z.read("Boards/複合.canvas")
     assert not db.execute("select 1 from canvas_vault_bindings where canvas_id=?",(saved[0],)).fetchall()
+    assert db.execute("select count(*) from companion_canvases where canvas_id=?",(saved[0],)).fetchone()==(1,)
+    assert db.execute("select count(*) from note_relations").fetchone()==(1,)
     assert db.execute("pragma integrity_check").fetchone()==("ok",)
 '@ | python - $restoredDb $detailCanvas
 if ($LASTEXITCODE -ne 0) { throw 'Restored rich Canvas or isolated SQLite integrity differs.' }
@@ -131,7 +181,7 @@ if ((Get-FileHash -LiteralPath $detailBackup).Hash -cne $detailBackupHash) { thr
 @{
     exe_sha256=$ExeSha256
     os=(Get-CimInstance Win32_OperatingSystem).Caption
-    scenarios=@('notion-same-title-explicit-reference','editable-standard-canvas','bases-scalars','isolated-backup-reopen')
+    scenarios=@('notion-typed-relation-confirm-and-open','exact-standard-canvas-forward-and-reverse','bases-formula-snapshot','isolated-backup-reopen')
     sources_unchanged=$true
 } | ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8
 Write-Host "PASS: exact EXE detail workflows after isolated backup."

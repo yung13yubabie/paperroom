@@ -60,6 +60,8 @@ pub(crate) mod migration_media;
 #[cfg(any(windows, test))]
 #[path = "vault_import_review.rs"]
 pub(crate) mod vault_import_review;
+#[path = "notion_typed_relations.rs"]
+pub(crate) mod notion_typed_relations;
 #[path = "notion_handoff.rs"]
 pub(crate) mod notion_handoff;
 #[path = "notion_page_links.rs"]
@@ -141,7 +143,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 37;
+const SCHEMA_VERSION: i32 = 38;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -424,6 +426,7 @@ impl Notebook {
                 import_root INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE
             );")?;
         }
+        if version < 38 { tx.execute_batch(heptabase_boards::SOURCE_SCHEMA)?; }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -765,7 +768,7 @@ impl Notebook {
             links.rebind(&tx, root)?;
         }
         let report = if let Some(handoff) = handoff {
-            let mut report = heptabase_boards::import_companion_boards(&tx, handoff.canvases, &exact_sources)?;
+            let mut report = heptabase_boards::import_companion_boards(&tx, root, handoff.canvases, &exact_sources)?;
             report.details.extend(handoff.warnings);
             report
         } else {
@@ -858,6 +861,8 @@ mod tests {
         connection.execute_batch(
             "DROP TABLE IF EXISTS obsidian_base_file_values;
              DROP TABLE IF EXISTS obsidian_base_file_columns;
+             DROP TABLE IF EXISTS companion_node_sources;
+             DROP TABLE IF EXISTS companion_canvases;
              DROP TABLE IF EXISTS heptabase_import_roots;
              DROP TRIGGER IF EXISTS reset_collection_group_folds;
              DROP TABLE IF EXISTS collection_group_folds;

@@ -389,13 +389,22 @@ try {
     if((Digest $boardPath) -cne $savedHash -or @($after.nodes).Count -ne 4 -or @($after.edges).Count -ne 3) {
         throw 'The Canvas or its inventory changed on reopen.'
     }
+    $result['reopened']=$true
     foreach($originalNode in $source.nodes) {
         $observedNode=Node $after $originalNode.id
-        foreach($part in 'x','y','width','height','text') {
+        foreach($part in 'x','y','width','text') {
             if($observedNode.$part -cne $originalNode.$part) { throw "Canvas node $($originalNode.id) changed $part unexpectedly." }
         }
+        $expectedHeight=$originalNode.height
+        if($originalNode.id -ceq '1234567890abcde2') {
+            # In the prior actual save, Obsidian used the real 192-by-128 PNG ratio.
+            $png=[Drawing.Bitmap]::new((Join-Path $vault $media[0]))
+            try { $expectedHeight=[int]($observedNode.width * $png.Height / $png.Width) } finally { $png.Dispose() }
+            $result['image_geometry']=[ordered]@{id=$originalNode.id;width=$observedNode.width
+                input_height=$originalNode.height;saved_height=$observedNode.height;height_at_source_image_ratio=$expectedHeight}
+        }
+        if($observedNode.height -ne $expectedHeight) { throw "Canvas node $($originalNode.id) changed to an unexpected height." }
     }
-    $result['reopened']=$true
     $picture=Node $after '1234567890abcde2'
     $group=Node $after '1234567890abcde1'
     if($picture.type -cne 'file' -or $picture.file -cne $media[0] -or $group.type -cne 'group' -or

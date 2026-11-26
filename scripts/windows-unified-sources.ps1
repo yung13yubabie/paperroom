@@ -72,9 +72,17 @@ $null = Wait-For 'same card title is editable in the native note Open result' {
     [PaperroomHighlightGui]::IsWindowVisible((Control $window 104)) -and
     [PaperroomHighlightGui]::Read((Control $window 104)).StartsWith('甲正文')
 }
-$body = (Control $window 104)
-$beforeEdit = [PaperroomHighlightGui]::Read($body).Replace("`r`n", "`n").TrimEnd("`n")
-Replace-EditorText $body ($beforeEdit + "`n`nUnified note edit")
+$noteEditor = Control $window 104
+$null = Wait-For 'Edit button placed focus in the source editor' {
+    [PaperroomHighlightGui]::EditorHasFocus($window,$process.Id,$noteEditor)
+}
+$oldText = [PaperroomHighlightGui]::Read($noteEditor)
+$caret = [IntPtr]$oldText.Length
+[void][PaperroomHighlightGui]::Send($noteEditor,0x00B1,$caret,$caret)
+[PaperroomHighlightGui]::TypeEditorText($window,$process.Id,$noteEditor,"`nUnified note edit")
+$null = Wait-For 'native editor received the appended text' {
+    [PaperroomHighlightGui]::Read($noteEditor).EndsWith('Unified note edit')
+}
 $null = Wait-For 'native note body saved' {
     [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存至此電腦'
 }

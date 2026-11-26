@@ -103,6 +103,26 @@ using System.Runtime.InteropServices;
 public static class ExactPicker {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, int id);
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left,Top,Right,Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct Point { public int X,Y; }
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint wheel, UIntPtr extra);
+    public static void ClickDefault(IntPtr dialog,IntPtr button) {
+        if (GetForegroundWindow()!=dialog || GetParent(button)!=dialog ||
+            !IsWindowVisible(button) || !IsWindowEnabled(button) || !GetWindowRect(button,out Rect r))
+            throw new InvalidOperationException("The identified folder confirmation is not usable.");
+        Point p=new Point{ X=(r.Left+r.Right)/2,Y=(r.Top+r.Bottom)/2 };
+        if (r.Right<=r.Left || r.Bottom<=r.Top || WindowFromPoint(p)!=button || !SetCursorPos(p.X,p.Y) ||
+            GetForegroundWindow()!=dialog || WindowFromPoint(p)!=button)
+            throw new InvalidOperationException("The folder confirmation point is no longer exposed.");
+        mouse_event(2,0,0,0,UIntPtr.Zero);
+        mouse_event(4,0,0,0,UIntPtr.Zero);
+    }
 }
 '@
 $handle=[IntPtr]$picker.Current.NativeWindowHandle
@@ -124,7 +144,7 @@ if ([ExactPicker]::GetForegroundWindow() -eq $handle) {
     $pathShown=@($visible | Where-Object { $_.Current.Name -match '\bPaperroomFixture\b' }).Count -gt 0
     $confirm=[ExactPicker]::GetDlgItem($handle,1)
     if (!$pathShown -or $confirm -eq [IntPtr]::Zero) { throw 'The navigated folder was not confirmed inside the original picker.' }
-    Button ([Windows.Automation.AutomationElement]::FromHandle($confirm))
+    [ExactPicker]::ClickDefault($handle,$confirm)
 }
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)

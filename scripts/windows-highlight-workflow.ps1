@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
     [switch]$ProvePortableLinkGap,
     [switch]$LegacyLinkOnly,
-    [switch]$UnifiedSourcesOnly
+    [switch]$UnifiedSourcesOnly,
+    [switch]$UnifiedDetailsOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1426,6 +1427,10 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($UnifiedDetailsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-unified-source-details.ps1')
+        return
+    }
     if ($UnifiedSourcesOnly) {
         . (Join-Path $PSScriptRoot 'windows-unified-sources.ps1')
         return

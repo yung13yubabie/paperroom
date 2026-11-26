@@ -7,23 +7,96 @@ pub(crate) struct NativeBoardLocation {
     pub title: String,
     pub note: i64,
     token: String,
+    ancestors: Vec<(i64,String)>,
+}
+
+impl NativeBoardLocation {
+    pub(crate) fn breadcrumb(&self) -> String {
+        self.ancestors.iter().map(|(_,title)|title.as_str()).collect::<Vec<_>>().join(" › ")
+    }
+}
+
+pub(crate) fn location_labels(locations:&[NativeBoardLocation]) -> Vec<String> {
+    let paths = locations.iter().map(NativeBoardLocation::breadcrumb).collect::<Vec<_>>();
+    let mut counts = std::collections::HashMap::new();
+    for path in &paths { *counts.entry(path.as_str()).or_insert(0) += 1; }
+    let ambiguous = paths.iter().any(|path| counts[path.as_str()] > 1);
+    paths.into_iter().zip(locations).map(|(path,location)| {
+        if ambiguous { format!("{path}　[#{}]",location.board) } else { path }
+    }).collect()
 }
 
 impl Notebook {
-    pub(crate) fn native_board_locations(&self, note: i64) -> Result<Vec<NativeBoardLocation>> {
+    fn board_location_path(&self, board:i64) -> Result<Vec<(i64,String)>> {
+        Ok(self.board_path(board)?.into_iter().map(|b|(b.id,b.title)).collect())
+    }
+
+    fn location_rows(&self, note:i64, only:Option<i64>) -> Result<Vec<NativeBoardLocation>> {
         let mut statement = self.connection.prepare_cached(
             "SELECT b.id,b.title,i.token FROM boards b
              JOIN board_cards c ON c.board_id=b.id
              JOIN notes n ON n.id=c.note_id JOIN note_link_identities i ON i.note_id=n.id
-             WHERE n.id=?1 AND n.trash_root IS NULL ORDER BY b.id",
+             WHERE n.id=?1 AND n.trash_root IS NULL AND (?2 IS NULL OR b.id=?2) ORDER BY b.id",
         )?;
-        Ok(statement.query_map([note], |row| Ok(NativeBoardLocation {
-            board: row.get(0)?, title: row.get(1)?, note, token: row.get(2)?,
-        }))?.collect::<rusqlite::Result<_>>()?)
+        let mut locations = Vec::new();
+        for row in statement.query_map(params![note,only],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))? {
+            let (board,title,token) = row?;
+            locations.push(NativeBoardLocation {board,title,note,token,ancestors:self.board_location_path(board)?});
+        }
+        Ok(locations)
     }
 
-    /// Recheck both the placement and the note identity before a jump.
+    pub(crate) fn native_board_locations(&self, note: i64) -> Result<Vec<NativeBoardLocation>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let rows = self.location_rows(note,None)?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    pub(crate) fn native_card_origin(&self, board:i64, note:i64) -> Result<NativeBoardLocation> {
+        let tx = self.connection.unchecked_transaction()?;
+        let row = self.location_rows(note,Some(board))?.pop().ok_or("來源卡片已離開白板。")?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    pub(crate) fn other_card_locations(&self, origin:&NativeBoardLocation) -> Result<Vec<NativeBoardLocation>> {
+        let tx = self.connection.unchecked_transaction()?;
+        self.validate_board_path(origin)?;
+        let rows = self.location_rows(origin.note,None)?;
+        if !rows.iter().any(|r|r.board==origin.board && r.token==origin.token) { return Err("來源卡片已變更。".into()); }
+        tx.commit()?;
+        Ok(rows.into_iter().filter(|r|r.board!=origin.board).collect())
+    }
+
+    fn validate_board_path(&self, location:&NativeBoardLocation) -> Result<()> {
+        if self.board_location_path(location.board)? != location.ancestors {
+            return Err("白板路徑已變更，請重新查看白板位置。".into());
+        }
+        Ok(())
+    }
+
+    /// Both ends of a card-to-card jump must still belong to the displayed note and paths.
+    pub(crate) fn check_card_jump(&self, origin:&NativeBoardLocation, target:&NativeBoardLocation) -> Result<()> {
+        let tx = self.connection.unchecked_transaction()?;
+        if origin.note!=target.note || origin.token!=target.token || origin.board==target.board {
+            return Err("卡片位置不相符。".into());
+        }
+        self.checked_location_note(origin)?;
+        self.checked_location_note(target)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn note_at_native_board_location(&self, location: &NativeBoardLocation) -> Result<Note> {
+        let tx = self.connection.unchecked_transaction()?;
+        let note = self.checked_location_note(location)?;
+        tx.commit()?;
+        Ok(note)
+    }
+
+    fn checked_location_note(&self, location: &NativeBoardLocation) -> Result<Note> {
+        self.validate_board_path(location)?;
         self.connection.query_row(
             "SELECT n.id,n.parent,n.title,n.pinned,n.trash_root,n.body,n.version
              FROM board_cards c JOIN boards b ON b.id=c.board_id
@@ -50,6 +123,54 @@ mod tests {
     use super::*;
     use crate::store::{collections::RelationMember, named_relation_navigation::Direction};
     use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    #[test]
+    fn card_jump_rechecks_both_branches_and_distinguishes_same_title_notes() -> Result<()> {
+        let root=super::super::tests::data_dir();
+        let path=root.join("live.db");
+        let backup=root.join("backup.db");
+        let mut db=Notebook::open(&path,false)?;
+        let a=db.add(None,"鏡頭","原卡")?;
+        let b=db.add(None,"鏡頭","同名另一卡")?;
+        let top=db.create_board("研究")?;
+        let source=db.new_child_board(top,"收件")?;
+        let nested=db.new_child_board(top,"場記")?;
+        let leaf=db.new_child_board(nested,"訪談")?;
+        let lookalike=db.create_board("研究 › 場記 › 訪談")?;
+        db.add_card_on(source,a)?;
+        db.add_card_on(leaf,a)?;
+        db.add_card_on(leaf,b)?;
+        db.add_card_on(lookalike,a)?;
+        db.move_card_on(leaf,a,3250,780)?;
+        let origin=db.native_card_origin(source,a)?;
+        let destinations=db.other_card_locations(&origin)?;
+        assert_eq!(destinations.iter().map(|p|p.board).collect::<Vec<_>>(),[leaf,lookalike]);
+        assert_eq!(location_labels(&destinations),[format!("研究 › 場記 › 訪談　[#{leaf}]"),format!("研究 › 場記 › 訪談　[#{lookalike}]")]);
+        assert!(db.other_card_locations(&db.native_card_origin(leaf,b)?)?.is_empty());
+        assert!(db.check_card_jump(&origin,&db.native_card_origin(leaf,b)?).is_err());
+        db.check_card_jump(&origin,&destinations[0])?;
+        db.backup(&backup)?;
+        let mut writer=Notebook::open(&path,false)?;
+        writer.reparent_board(nested,Some(top),None)?;
+        assert!(db.check_card_jump(&origin,&destinations[0]).is_err());
+        let refreshed=db.other_card_locations(&origin)?;
+        assert_eq!(refreshed[0].breadcrumb(),"場記 › 訪談");
+        writer.reparent_board(source,Some(top),None)?;
+        assert!(db.check_card_jump(&origin,&refreshed[0]).is_err());
+        assert!(db.other_card_locations(&origin).is_err());
+        let new_origin=db.native_card_origin(source,a)?;
+        writer.remove_card_on(source,a)?;
+        assert!(db.check_card_jump(&new_origin,&refreshed[0]).is_err());
+        drop(writer);drop(db);
+        let restored=Notebook::open(&backup,false)?;
+        restored.check_card_jump(&origin,&destinations[0])?;
+        let located=restored.note_at_native_board_location(&destinations[0])?;
+        assert_eq!((located.row.id,located.body.as_str()),(a,"原卡"));
+        assert!(restored.cards_on(leaf)?.iter().any(|card|card.id==a && (card.x,card.y)==(3250,780)));
+        drop(restored);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn viewport_offsets_reach_oversized_items_and_center_distant_cards() {

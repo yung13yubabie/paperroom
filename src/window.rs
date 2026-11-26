@@ -2551,7 +2551,10 @@ impl App {
             if card_position.is_some() {
                 items.push((7, "從此卡建立子白板…"));
             }
+            let origin = self.notebook.native_card_origin(board,id)?;
+            items.push((8,"查看這張卡片的其他白板位置…"));
             let action = popup(self.hwnd, null_mut(), Some(point), &items);
+            if action == 8 { return self.show_other_card_locations(origin); }
             if action == 7 {
                 return self.create_child_board_from_card_ui(
                     id, card_position.ok_or("找不到來源卡片。")?,

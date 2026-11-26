@@ -146,6 +146,18 @@ pub(crate) struct CompiledFormula(Expr);
 impl CompiledFormula {
     pub fn new(expr: &str) -> Result<Self> { Ok(Self(parse(expr)?)) }
 
+    /// Trace only a whole, direct aggregate with literal arguments.
+    pub(crate) fn direct_field_rollup(&self) -> Option<(&str, &str, Option<&str>)> {
+        let Expr::Call(function, arguments) = &self.0 else { return None };
+        use Expr::Literal;
+        use Value::Str;
+        match (function.as_str(), arguments.as_slice()) {
+            ("field_count", [Literal(Str(field)), Literal(Str(role))]) => Some((field,role,None)),
+            ("field_sum", [Literal(Str(field)), Literal(Str(role)), Literal(Str(key))]) => Some((field,role,Some(key))),
+            _ => None,
+        }
+    }
+
     pub fn evaluate(&self, lookup: impl Fn(&str, &[String]) -> Result<Value>) -> Result<Value> {
         run(&self.0, &lookup, 0)
     }

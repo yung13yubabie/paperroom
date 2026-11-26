@@ -832,7 +832,7 @@ impl App {
         }
     }
 
-    unsafe fn show_formula(&self, collection: i64) -> Result<()> {
+    unsafe fn show_formula(&mut self, collection: i64) -> Result<()> {
         unsafe {
             let formulas = self.notebook.collection_formulas(collection)?;
             let Some(index) = choose(self.hwnd, self.widgets.links, &formulas, |(name, _)| name.clone()) else {
@@ -845,7 +845,45 @@ impl App {
                     .unwrap_or_else(|error| format!("錯誤：{error}"));
                 writeln!(result, "{}\t{value}\r", note.title)?;
             }
-            crate::dialog::show_text(self.hwnd, "集合公式結果", &result)
+            let direct = crate::formula::CompiledFormula::new(expr)
+                .is_ok_and(|code| code.direct_field_rollup().is_some());
+            if !direct {
+                return crate::dialog::show_text(self.hwnd, "集合公式結果", &result);
+            }
+            if !crate::dialog::report_action(self.hwnd,"集合公式結果",&result,"查看彙總來源…")? {
+                return Ok(());
+            }
+            let rows=self.visible_collection_rows(collection)?.into_iter()
+                .map(|(row,_)| self.notebook.rollup_member(collection,row.id))
+                .collect::<Result<Vec<_>>>()?;
+            let anchor=self.widgets.links;
+            if rows.is_empty() {
+                return crate::dialog::show_text(self.hwnd,"彙總來源明細","目前檢視沒有可選資料列。");
+            }
+            let Some(index)=super::navigation_ui::choose_navigation_page(self.hwnd,anchor,rows.len(),
+                |i|format!("{}　[#{}]",rows[i].title,rows[i].id)) else {return Ok(())};
+            let owner=&rows[index];
+            let trace=self.notebook.saved_rollup_trace(collection,name,expr,owner)?;
+            let mut details=format!("{name}\r\n{expr}\r\n{}　[#{}]\r\n結果：{}\r\n\r\n",owner.title,owner.id,trace.total);
+            if trace.peers.is_empty() {
+                details.push_str("沒有可用的關聯筆記。");
+                return crate::dialog::show_text(self.hwnd,"彙總來源明細",&details);
+            }
+            for peer in &trace.peers {writeln!(details,"{}\r",peer.label())?;}
+            if !crate::dialog::report_action(self.hwnd,"彙總來源明細",&details,"開啟來源筆記…")? {return Ok(())}
+            let Some(index)=super::navigation_ui::choose_navigation_page(self.hwnd,anchor,trace.peers.len(),
+                |i|trace.peers[i].label()) else {return Ok(())};
+            if !self.visible_collection_rows(collection)?.iter().any(|(r,_)|r.id==owner.id) {
+                return Err("資料列已不在目前檢視，請重新選取。".into());
+            }
+            let peer=self.notebook.open_rollup_peer(collection,name,expr,owner,&trace,index)?;
+            self.view=View::All;
+            self.editing=false;
+            label(self.widgets.search,"");
+            self.set_current_note(Some(peer));
+            self.rebuild();
+            label(self.widgets.status,"已開啟彙總來源筆記。");
+            Ok(())
         }
     }
 

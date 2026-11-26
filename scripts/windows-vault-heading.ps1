@@ -63,7 +63,10 @@ function Rename-Heading([int]$Decision) {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','確認重新命名小節',1)
     }
     $report=[PaperroomHighlightGui]::Read((Control $preview 101))
-    if (!$report.Contains("「$old」 → 「$new」") -or !$report.Contains('2 篇筆記、3 個連結')) {
+    if (!$report.Contains("「$old」 → 「$new」") -or !$report.Contains('2 篇筆記、3 個連結') -or
+        !$report.Contains('Canvas SectionMap') -or !$report.Contains('節點：exact') -or
+        $report.Contains('節點：near') -or $report.Contains('節點：decoy') -or
+        $report.Contains('節點：unresolved') -or $report.Contains('節點：duplicate')) {
         throw "Unexpected heading rename preview: $report"
     }
     Finish-Revision $preview $Decision
@@ -79,6 +82,7 @@ Initialize-HeadingCanvas
 $canvasIdentity=Read-CanvasHeadingWitness $db $old
 Test-HeadingCardBoundaries
 Test-HeadingCard $old
+Test-HeadingMarkdown $old
 Rename-Heading 2
 if ((Read-HeadingState $db) -cne $before) {throw 'Declining the preview changed a source note'}
 if ((Read-CanvasHeadingWitness $db $old) -cne $canvasIdentity) {throw "Cancelled rename changed Canvas binding"}
@@ -97,6 +101,7 @@ $wanted=@{
 $wanted['A/鏡頭.md']+=$otherSections
 Test-HeadingCard $new
 Test-HeadingCard $new -Selected
+Test-HeadingMarkdown $new
 Test-HeadingCardBoundaries
 foreach ($key in $inputs.Keys) {
     if ($state[$key].body -cne $wanted[$key] -or $state[$key].id -ne $initial[$key].id -or $state[$key].token -cne $initial[$key].token) {
@@ -118,6 +123,7 @@ foreach ($folder in $homeA,$homeB) {
         [PaperroomHighlightGui]::Read((Control $window 121)).Contains($new)
     }
     Test-HeadingCard $new -Selected
+    Test-HeadingMarkdown $new
     Close-Notebook $process
     $process.Dispose()
     $process=$null
@@ -129,5 +135,5 @@ foreach ($key in $inputs.Keys) {
 }
 if ((Get-FileHash -LiteralPath $canvasPath).Hash -cne $sourceCanvasHash) {throw 'The external Canvas source bytes changed'}
 if ((Get-FileHash $backup).Hash -cne $backupHash) {throw 'Backup bytes changed'}
-@{exe_sha256=$ExeSha256;os=(Get-CimInstance Win32_OperatingSystem).Caption;backup_sha256=$backupHash;canvas_input_sha256=$sourceCanvasHash;scenarios=@('native selected and listed Canvas heading cards before and after rename','same-title, similar and ambiguous destinations','declined preview','same-title note isolation','Markdown and aliased wiki anchors','inline code preserved','external sources unchanged','reopened original and isolated restore')} |
+@{exe_sha256=$ExeSha256;os=(Get-CimInstance Win32_OperatingSystem).Caption;backup_sha256=$backupHash;canvas_input_sha256=$sourceCanvasHash;scenarios=@('native selected and listed Canvas heading cards before and after rename','same-title, similar and ambiguous destinations','declined preview','same-title note isolation','native note-to-heading jump from an aliased Wiki link and stored Markdown update','inline code preserved','external sources unchanged','reopened original and isolated restore')} |
     ConvertTo-Json | Set-Content -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -Encoding utf8

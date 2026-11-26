@@ -47,6 +47,18 @@ function Test-HeadingCard([string]$Heading,[switch]$Selected) {
     } else { Choose-HeadingCard '精確' 'exact' }
     Confirm-HeadingExcerpt $Heading '目標正文' @('相似段落','另一篇','歧義甲')
 }
+function Test-HeadingMarkdown([string]$Heading) {
+    Open-LinkedFixture '入口' 'B'
+    Click-WorkspaceButton 120
+    $options=@(Collection-MenuLabels)
+    $prefix="前往　原別名 #$Heading"
+    $matching=@(for ($i=0; $i -lt $options.Count; $i++) {
+        if ($options[$i] -ceq $prefix -or $options[$i].StartsWith("$prefix　｜ ",[StringComparison]::Ordinal)) {$i}
+    })
+    if ($matching.Count -ne 1) {throw "Missing exact note link to $Heading : $options"}
+    Native-Menu 120 ($matching[0]+1) $options[$matching[0]] -MenuOpen
+    Confirm-HeadingExcerpt $Heading '目標正文' @('相似段落','另一篇','歧義甲')
+}
 function Test-HeadingCardBoundaries {
     Choose-HeadingCard '省略路徑' 'unresolved'
     $alert=Wait-For 'same-title note without path refused' {[PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')}

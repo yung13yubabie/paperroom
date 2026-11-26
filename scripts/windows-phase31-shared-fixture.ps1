@@ -2,8 +2,31 @@
 Collection27 'Source'
 BranchRelation27 canonical $false 1 exact
 $targetMembers=@('exact','decoy')
+function Open-EdgeBoard31([string]$Title='') {
+    if ([PaperroomHighlightGui]::Read((Control $window 119)) -ceq '返回筆記' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') {
+        Click-WorkspaceButton 119
+        $null=Wait-For 'closed collection before opening native board' {
+            [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
+        }
+    }
+    if ([PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板') {
+        Click-WorkspaceButton 119
+    }
+    $null=Wait-For 'native board mode after real toolbar click' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '返回筆記' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '白板操作'
+    }
+    if ($Title) {
+        Native-Menu 120 2 '切換白板…'
+        Choose-CollectionRow $Title
+        $null=Wait-For "exact native board $Title opened" {
+            [PaperroomHighlightGui]::Read((Control $window 115)).Contains($Title)
+        }
+    }
+}
 function Choose-Edge31([string]$Board,[string]$Peer,[bool]$Far) {
-    Open-NativeBoard28 $Board
+    Open-EdgeBoard31 $Board
     [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,0,$true)
     Native-Menu 120 9 '定位連線另一端…' -MenuOpen
     $options=@(Collection-MenuLabels)
@@ -19,7 +42,10 @@ function Choose-Edge31([string]$Board,[string]$Peer,[bool]$Far) {
     Wait-Marker29 $Peer
 }
 function Create-EdgeBoard31([string]$Name,[string]$Peer,[bool]$Far) {
-    New-Board29 $Name
+    Open-EdgeBoard31
+    Native-Menu 120 3 '新增白板…'
+    Collection-Prompt '新增白板' $Name
+    $null=Wait-For "exact new board $Name" {[PaperroomHighlightGui]::Read((Control $window 115)).Contains($Name)}
     Add-ExactBoardNote29 'canonical'
     Add-ExactBoardNote29 $Peer
     if ($Far) {Add-ExactBoardNote29 'decoy'}
@@ -86,12 +112,6 @@ if ($SharedFixtureCase -eq 'collection-bulk-edit') {
     Start-Bulk31
     $targetMembers+=@('reserve','other')
 } else {
-    # The relation setup ends in the collection workspace, which must be closed
-    # before the ordinary note-view button can open a native board.
-    Click-WorkspaceButton 119
-    $null=Wait-For 'note controls after closing the collection workspace' {
-        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
-    }
     Create-EdgeBoard31 EdgeFar exact $true
     Create-EdgeBoard31 EdgeOther decoy $false
 }

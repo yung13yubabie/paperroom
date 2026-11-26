@@ -50,3 +50,26 @@ impl App {
         }
     }
 }
+
+impl App {
+    pub(super) unsafe fn bind_notion_source_page(&mut self, row: i64) -> Result<()> {
+        let token = self.notebook.notion_row_token(row)?.ok_or("此筆記已經不在集合中。")?;
+        let batches = self.notebook.notion_source_batches()?;
+        if batches.is_empty() { return Err("找不到含 Markdown 來源頁的 Notion 匯入批次。".into()); }
+        let anchor = self.widgets.links;
+        let Some(index) = (unsafe { navigation_ui::choose_navigation_page(self.hwnd, anchor, batches.len(),
+            |i| format!("{}  (#{})", batches[i].title,batches[i].id)) }) else { return Ok(()); };
+        let batch = &batches[index];
+        let pages = self.notebook.notion_source_pages(batch,row)?;
+        if pages.is_empty() { return Err("此批次沒有其他可連結的來源頁。".into()); }
+        let Some(index) = (unsafe { navigation_ui::choose_navigation_page(self.hwnd, anchor, pages.len(),
+            |i| pages[i].label()) }) else { return Ok(()); };
+        let page = &pages[index];
+        let prompt = format!("將集合資料列 [#{row}] 連到您選取的來源頁？\r\n{}  (#{})\r\n{}\r\n這會建立本機具名關聯。",batch.title,batch.id,page.label());
+        if unsafe { message(self.hwnd,"連結 Notion 來源頁",&prompt,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) } == IDYES {
+            self.notebook.bind_notion_source(row,&token,batch,page)?;
+            unsafe { label(self.widgets.status,"已連結 Notion Markdown 來源頁。"); }
+        }
+        Ok(())
+    }
+}

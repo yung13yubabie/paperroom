@@ -1077,6 +1077,7 @@ impl Notebook {
         if !exists { return Err("找不到目標集合。".into()); }
         let base_group:Option<(String,String)>=tx.query_row("SELECT label,kind FROM obsidian_base_typed_groups WHERE view_id=?1",
             [source.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if destination!=origin && tx.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([origin])?{return Err("動態檢視使用此集合的來源候選，無法套用到其他集合。".into());}
         if base_group.is_some() && destination!=origin {return Err("Bases 型別分組使用這個集合的來源欄位，只能在同一集合複製。".into());}
         if destination != origin {
             for rule in source.sort_rules() {
@@ -1305,7 +1306,7 @@ impl Notebook {
             Some((item, values))
         }).collect::<Vec<_>>();
         if let Some(snapshot) = snapshot { snapshot.commit()?; }
-        if rules.sorts.is_empty() && view.presentation.group_key.is_none() {
+        if rules.sorts.is_empty() && (view.presentation.group_key.is_none() || self.connection.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([collection])?) {
             return Ok(ordered.into_iter().map(|(item, _)| item).collect());
         }
         ordered.sort_by(|((left, _), a), ((right, _), b)| {
@@ -1354,8 +1355,8 @@ impl Notebook {
             }
         }
         let group = group_key.map(|key| self.collection_values(collection,key)).transpose()?;
-        if group.is_none() && view.is_some_and(|view| view.layout == CollectionLayout::Table && view.rules.as_ref()
-            .is_some_and(|rules| !rules.sorts.is_empty()))
+        let dynamic=self.connection.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([collection])?;
+        if group.is_none() && view.is_some_and(|view| view.layout == CollectionLayout::Table && (view.rules.as_ref().is_some_and(|rules| !rules.sorts.is_empty()) || dynamic))
         {
             // Tables and lists preserve global sort order while still displaying the real status.
             let mut ordered = Vec::<(GroupValue, Vec<Row>)>::new();

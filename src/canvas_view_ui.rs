@@ -1,7 +1,7 @@
 use super::*;
 use crate::canvas_projection::{self as projection, Geometry, Projection, Rect};
 use crate::store::canvas_edit::CanvasEdit;
-use crate::store::canvas_bundle::{CanvasAssetState, CanvasBundleImage};
+use crate::store::canvas_bundle::{CanvasAssetState, CanvasBundleImage, node_asset_reference};
 use serde_json::Value;
 
 pub(super) struct Pan {
@@ -223,6 +223,33 @@ impl App {
                             view.camera = Some(camera);
                             view.projection.set(Some(Projection::camera(area, inset, dpi, camera)));
                         }
+                    }
+                }
+                WM_RBUTTONUP if view.drag.is_none() && view.pan.is_none() => {
+                    let Some((node_id, _, _)) = visible.and_then(|projection|
+                        projection::hit_node(&view.doc, projection, point, grip)) else { return Ok(()); };
+                    let Some(node) = view.doc.json()["nodes"].as_array().into_iter().flatten()
+                        .find(|node| node["id"].as_str() == Some(node_id)) else { return Ok(()); };
+                    let Some(reference) = node_asset_reference(node) else { return Ok(()); };
+                    let Some(CanvasAssetState::Stored(member)) = view.bundle.as_ref()
+                        .and_then(|bundle| bundle.references.get(reference)) else {
+                        label(self.widgets.status, "此節點沒有可另存的封裝附件。");
+                        return Ok(());
+                    };
+                    let (command, saved) = if node["type"] == "group" {
+                        ("儲存此群組的背景圖片…", "已另存群組背景的原始圖片。")
+                    } else {
+                        ("儲存此節點的附件…", "已另存節點的原始附件。")
+                    };
+                    if ClientToScreen(self.hwnd, &mut cursor) == 0
+                        || popup(self.hwnd, self.widgets.links, Some(cursor), &[(1, command)]) != 1
+                    {
+                        return Ok(());
+                    }
+                    let name = member.rsplit('/').next().ok_or("封裝附件缺少檔名。")?;
+                    if let Some(path) = file_dialog(self.hwnd, "所有檔案\0*.*\0\0", "", Some(name))? {
+                        self.notebook.save_canvas_node_asset(view.id, &view.doc, node_id, member, &path)?;
+                        label(self.widgets.status, saved);
                     }
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK if view.drag.is_none() && view.pan.is_none() => {

@@ -10,7 +10,7 @@ pub(crate) const MAX_BYTES: usize = 256 * 1024;
 pub(crate) enum Layout { Table, List }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FolderRule { Exact(String), Subtree(String) }
+pub(crate) enum FolderRule { Path(String), Exact(String), Subtree(String) }
 
 #[derive(Debug)]
 pub(crate) struct View {
@@ -21,6 +21,7 @@ pub(crate) struct View {
     pub folders: Vec<FolderRule>,
     pub typed_filters: Vec<Test>,
     pub group: Option<String>,
+    pub sorts: Vec<(String,bool)>,
 }
 
 impl View {
@@ -28,6 +29,7 @@ impl View {
     pub fn matches_path(&self, relative: &str) -> bool {
         let parent = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
         self.folders.iter().all(|rule| match rule {
+            FolderRule::Path(path) => relative==path,
             FolderRule::Exact(dir) => parent == dir,
             FolderRule::Subtree(dir) => parent == dir || parent.strip_prefix(dir.as_str())
                 .is_some_and(|tail| tail.starts_with('/')),
@@ -45,6 +47,10 @@ pub(crate) struct Base {
 }
 
 impl Base {
+    pub(crate) fn has_dynamic_rules(&self) -> bool {
+        self.views.iter().any(|view| !view.typed_filters.is_empty() || !view.sorts.is_empty())
+    }
+
     pub(crate) fn has_live_status(&self)->bool {
         self.views.iter().flat_map(|view|view.order.iter()).any(|key|key=="note.status"
             || self.formulas.get(key).and_then(FileFormula::status_literal).is_some()) || !self.types.is_empty()
@@ -262,6 +268,11 @@ fn property(s: String) -> R<String> {
 
 fn predicate(s: &str) -> R<FolderRule> {
     let s = s.trim();
+    if let Some(arg)=s.strip_prefix("file.path").and_then(|tail|tail.trim_start().strip_prefix("==")){
+        let path:String=serde_json::from_str(arg.trim()).map_err(|_|"檔案路徑需要雙引號字串。")?;
+        if path.len()>512 || !super::notion_handoff::windows_zip_path(&path){return Err("檔案條件須為有效的 Vault 相對路徑。".into());}
+        return Ok(FolderRule::Path(path));
+    }
     let (exact, arg) = if let Some(arg) = s.strip_prefix("file.folder").and_then(|v| v.trim_start().strip_prefix("==")) {
         (true,arg.trim())
     } else if let Some(arg) = s.strip_prefix("file.inFolder(").and_then(|v| v.strip_suffix(')')) {
@@ -350,6 +361,20 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
                 order.push(key);
             }
         }
+        let mut sorts=Vec::new();
+        if let Some(config)=row.remove("sort"){
+            let entries=config.seq()?;
+            if entries.is_empty() || entries.len()>4 {return Err("動態檢視需要 1 至 4 個排序鍵。".into())}
+            for entry in entries{
+                let mut sort=entry.map()?;
+                let key=property(sort.remove("property").ok_or("排序缺少 property。")?.text()?)?;
+                let key=key.strip_prefix("note.").ok_or("排序只支援布林或數值來源欄位。")?.to_string();
+                let desc=match sort.remove("direction").ok_or("排序缺少方向。")?.text()?.as_str(){"ASC"=>false,"DESC"=>true,_=>return Err("排序方向須為 ASC 或 DESC。".into())};
+                supported(sort)?;
+                if sorts.iter().any(|(k,_)|k==&key){return Err("排序鍵重複。".into())}
+                sorts.push((key,desc));
+            }
+        }
         let group=if let Some(config)=row.remove("groupBy"){
             let mut config=config.map()?;
             let key=property(config.remove("property").ok_or("群組缺少來源屬性。")?.text()?)?;
@@ -361,7 +386,7 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
             Some(key)
         }else{None};
         supported(row)?;
-        views.push(View {name, layout, order, folders,typed_filters,group});
+        views.push(View {name, layout, order, folders,typed_filters,group,sorts});
     }
     for key in display_names.keys().chain(views.iter().flat_map(|view|view.order.iter())) {
         if key.starts_with("formula.") && !formulas.contains_key(key) { return Err(format!("找不到公式：{key}")); }
@@ -371,6 +396,7 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
         if types.insert(test.key.clone(),test.kind).is_some_and(|prev|prev!=test.kind){return Err(format!("欄位「{}」有互相衝突的型別。",test.key))}
     }
     for view in &views {
+        if view.sorts.iter().any(|(key,_)|!types.contains_key(key)){return Err("排序欄位須有明確布林或數值比較。".into());}
         if let Some(group)=&view.group && !group.strip_prefix("note.").is_some_and(|key|types.contains_key(key)){
             return Err("群組來源必須是已明確比較的布林或數值筆記欄位。".into())
         }

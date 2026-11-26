@@ -120,13 +120,19 @@ impl Notebook{
         Ok(self.connection.prepare("SELECT key,kind FROM obsidian_base_typed_columns WHERE collection_id=?1 AND op IS NULL ORDER BY key")?
             .query_map([col],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
     }
-    pub(crate) fn typed_base_rows(&self,col:i64,key:&str)->Result<HashMap<i64,String>>{Ok(display(&self.connection,col,key,true)?.unwrap_or_default())}
+    pub(crate) fn typed_base_rows(&self,col:i64,key:&str)->Result<HashMap<i64,String>>{
+        let mut values=display(&self.connection,col,key,true)?.unwrap_or_default();
+        if let Some(ids)=super::obsidian_base_dynamic::visible_ids(&self.connection,col)?{values.retain(|id,_|ids.contains(id));}
+        Ok(values)
+    }
     pub(crate) fn typed_base_current(&self,col:i64,key:&str,id:i64)->Result<(i64,String)>{
+        super::obsidian_base_dynamic::require_visible(&self.connection,col,id)?;
         let (version,body,source,kind):(i64,String,String,String)=self.connection.query_row(&format!("SELECT n.version,n.body,b.source_key,b.kind{ROWS} AND n.id=?3 AND b.op IS NULL"),params![col,key,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         Ok((version,cell(&body,&source,&kind)?.value))
     }
     pub(crate) fn edit_typed_base(&self,col:i64,key:&str,id:i64,expected:i64,new:&str)->Result<()>{
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_visible(&tx,col,id)?;
         let (title,body,source,kind):(String,String,String,String)=tx.query_row(&format!("SELECT n.title,n.body,b.source_key,b.kind{ROWS} AND n.id=?3 AND n.version=?4 AND b.op IS NULL"),params![col,key,id,expected],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or("來源或版本已變更。")?;
         if !allowed(new,&kind){return Err("請輸入 true、false、限定範圍的十進位數或 null，符合選取欄位型別。".into())}
         let old=cell(&body,&source,&kind)?;

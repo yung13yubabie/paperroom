@@ -82,7 +82,9 @@ pub(super) fn display(db:&Connection,col:i64,key:&str,editable_only:bool)->Resul
 
 impl Notebook {
     pub(crate) fn editable_status_rows(&self,col:i64,key:&str)->Result<HashMap<i64,String>> {
-        Ok(display(&self.connection,col,key,true)?.unwrap_or_default())
+        let mut values=display(&self.connection,col,key,true)?.unwrap_or_default();
+        if let Some(ids)=super::obsidian_base_dynamic::visible_ids(&self.connection,col)?{values.retain(|id,_|ids.contains(id));}
+        Ok(values)
     }
 
     pub(crate) fn live_status_keys(&self,col:i64)->Result<Vec<String>> {
@@ -90,12 +92,14 @@ impl Notebook {
         Ok(stmt.query_map([col],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
     pub(crate) fn live_status_snapshot(&self,col:i64,key:&str,note:i64)->Result<(i64,String)> {
+        super::obsidian_base_dynamic::require_visible(&self.connection,col,note)?;
         let (version,body):(i64,String)=self.connection.query_row(&format!("SELECT n.version,n.body{ROWS} AND n.id=?3 AND b.equals_text IS NULL"),params![col,key,note],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or("這篇筆記沒有可寫入的來源狀態。")?;
         Ok((version,read_status(&body)?))
     }
     pub(crate) fn edit_live_status(&self,col:i64,key:&str,note:i64,expected:i64,value:&str)->Result<()> {
         if value.len()>1024 || value.chars().any(char::is_control) {return Err("status 需要 1024 位元組內的單行文字。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_visible(&tx,col,note)?;
         let (title,body):(String,String)=tx.query_row(&format!("SELECT n.title,n.body{ROWS} AND n.id=?3 AND n.version=?4 AND b.equals_text IS NULL"),params![col,key,note,expected],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or("來源或版本已變更，請重新開啟。")?;
         let (range,old)=status_token(&body)?;
         if old==value {return Ok(());}

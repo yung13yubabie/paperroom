@@ -150,6 +150,7 @@ impl Notebook {
     ) -> Result<i64> {
         let status = checked_label(status)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection)?;
         let (exists, count): (bool, i64) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1),
                     (SELECT count(*) FROM collection_notes WHERE collection_id=?1)",
@@ -181,26 +182,33 @@ impl Notebook {
     pub fn move_collection_note(&self, collection_id: i64, note_id: i64, expected_status: &str, new_status: &str) -> Result<()> {
         let expected_status = checked_label(expected_status)?;
         let new_status = checked_label(new_status)?;
-        let changed = self.connection.execute(
+        let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection_id)?;
+        let changed = tx.execute(
             "UPDATE collection_notes SET status=?4 WHERE collection_id=?1 AND note_id=?2 AND status=?3
              AND EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL)",
             params![collection_id,note_id,expected_status,new_status],
         )?;
         if changed != 1 { return Err("筆記已移出集合、移到垃圾桶，或狀態已變更；請重新載入。".into()); }
+        tx.commit()?;
         Ok(())
     }
     pub fn remove_from_collection(&self, collection_id: i64, note_id: i64, expected_status: &str) -> Result<()> {
         let status = checked_label(expected_status)?;
-        let changed = self.connection.execute(
+        let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
+        super::obsidian_base_dynamic::require_manual_membership(&tx,collection_id)?;
+        let changed = tx.execute(
             "DELETE FROM collection_notes WHERE collection_id=?1 AND note_id=?2 AND status=?3
              AND EXISTS(SELECT 1 FROM notes WHERE id=?2 AND trash_root IS NULL)",
             params![collection_id,note_id,status],
         )?;
         if changed != 1 { return Err("筆記已移出集合、移到垃圾桶，或狀態已變更；請重新載入。".into()); }
+        tx.commit()?;
         Ok(())
     }
     /// Explicit member status; rows can be grouped into lanes by callers.
     pub fn collection_rows(&self, collection_id: i64) -> Result<Vec<(Row,String)>> {
+        if let Some(rows)=super::obsidian_base_dynamic::rows(&self.connection,collection_id)?{return Ok(rows)}
         let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)", [collection_id], |r| r.get(0))?;
         if !exists { return Err("找不到集合。".into()); }
         let mut s = self.connection.prepare(

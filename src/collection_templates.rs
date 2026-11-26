@@ -327,6 +327,7 @@ impl Notebook {
     ) -> Result<i64> {
         let title = checked_title(title)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        super::super::obsidian_base_dynamic::require_manual_membership(&tx,collection)?;
         // Re-read inside the write transaction and copy only the saved recipe.
         let saved = self.collection_template(collection, template.id)?;
         if saved.revision != template.revision { return Err("範本已更改，請重新開啟預覽。".into()); }

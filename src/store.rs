@@ -148,7 +148,11 @@ mod obsidian_base_live;
 
 #[path="obsidian_base_typed.rs"]
 mod obsidian_base_typed;
-const SCHEMA_VERSION: i32 = 40;
+#[path="obsidian_base_dynamic.rs"]
+mod obsidian_base_dynamic;
+#[path="canvas_base_cards.rs"]
+pub(crate) mod canvas_base_cards;
+const SCHEMA_VERSION: i32 = 41;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -434,6 +438,10 @@ impl Notebook {
         if version < 38 { tx.execute_batch(heptabase_boards::SOURCE_SCHEMA)?; }
         if version < 39 { tx.execute_batch(obsidian_base_live::SCHEMA)?; }
         if version < 40 {tx.execute_batch(obsidian_base_typed::SCHEMA)?;}
+        if version < 41 {
+            tx.execute_batch(obsidian_base_dynamic::SCHEMA)?;
+            tx.execute_batch(canvas_base_cards::SCHEMA)?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -866,7 +874,10 @@ mod tests {
 
     pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "DROP TABLE IF EXISTS obsidian_base_file_values;
+            "DROP TABLE IF EXISTS canvas_base_paths;
+             DROP TABLE IF EXISTS base_card_views;
+             DROP TABLE IF EXISTS base_card_receipts;
+             DROP TABLE IF EXISTS obsidian_base_file_values;
              DROP TABLE IF EXISTS obsidian_base_file_columns;
              DROP TABLE IF EXISTS companion_node_sources;
              DROP TABLE IF EXISTS companion_canvases;
@@ -1254,6 +1265,7 @@ mod tests {
         db.connection.execute_batch(
             "DROP TABLE pdf_excerpt_cards; DROP TABLE pdf_text_mark_segments; DROP TABLE vault_push_verified; DROP TABLE pdf_text_marks; DROP TABLE vault_sync_base; DROP TABLE attachment_origins; DROP TABLE board_group_sources; DROP TABLE property_definitions; DROP TABLE collection_views;
              DROP TABLE pdf_annotation_regions; DROP TABLE canvas_vault_bindings;
+             DROP TABLE obsidian_base_candidates; DROP TABLE obsidian_base_dynamic;
              DROP TABLE collection_formulas; DROP TABLE saved_canvases;
              DROP TABLE board_group_cards; DROP TABLE board_groups;
              DROP TABLE pdf_annotations; DROP TABLE attachments;

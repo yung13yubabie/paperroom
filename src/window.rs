@@ -1349,11 +1349,14 @@ impl App {
                             if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
                                 return Ok(());
                             }
-                            let mode=if parsed.has_live_status() {
-                                popup(app.hwnd,app.widgets.files,None,&[(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})])
-                            } else {1};
-                            if !matches!(mode,1|2) { return Ok(()); }
-                            let (receipt, views) = app.notebook.import_obsidian_base_mode(root, filename, raw, mode==2)?;
+                            let dynamic = parsed.has_dynamic_rules();
+                            let mode=if parsed.has_live_status(){
+                                let mut options=vec![(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})];
+                                if dynamic{options.push((3,"動態篩選與排序（連結來源）"));}
+                                popup(app.hwnd,app.widgets.files,None,&options)
+                            }else{1};
+                            if !matches!(mode,1..=3){return Ok(());}
+                            let (receipt,views)=app.notebook.import_obsidian_base_options(root,filename,raw,mode!=1,mode==3)?;
                             app.open_import(receipt, &format!("已匯入 {} 個 Bases 檢視。", views.len()));
                         }
                         return Ok(());
@@ -2109,6 +2112,10 @@ impl App {
                 labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
                 labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
                 labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
+                let notion_source = named + 3;
+                if app.notebook.notion_row_token(source)?.is_some() {
+                    labels.insert(4, (notion_source, "連結已匯入的 Notion 來源頁…".to_owned()));
+                }
                 let items = labels
                     .iter()
                     .map(|(id, label)| (*id, label.as_str()))
@@ -2121,6 +2128,7 @@ impl App {
                     index if index == graph => app.open_note_graph(source)?,
                     index if index == named => app.show_named_relation_navigation(source)?,
                     index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == notion_source => app.bind_notion_source_page(source)?,
                     index if index == native_board => app.show_native_board_locations(source)?,
                     index => {
                         if let Some((id, _, heading, syntax)) = related.get(index - 2) {

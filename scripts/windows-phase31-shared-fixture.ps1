@@ -86,6 +86,12 @@ if ($SharedFixtureCase -eq 'collection-bulk-edit') {
     Start-Bulk31
     $targetMembers+=@('reserve','other')
 } else {
+    # The relation setup ends in the collection workspace, which must be closed
+    # before the ordinary note-view button can open a native board.
+    Click-WorkspaceButton 119
+    $null=Wait-For 'note controls after closing the collection workspace' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
+    }
     Create-EdgeBoard31 EdgeFar exact $true
     Create-EdgeBoard31 EdgeOther decoy $false
 }

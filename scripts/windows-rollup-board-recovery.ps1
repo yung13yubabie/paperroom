@@ -119,6 +119,11 @@ function Identity-Proof28([string]$Database,[switch]$First) {
     if ($First) { [IO.File]::WriteAllText($prior27,($receipt -join ([Environment]::NewLine)),$utf27) }
 }
 
+if ($SharedNoteWorkflowOnly) {
+    . (Join-Path $PSScriptRoot 'windows-shared-note-workflow.ps1')
+    return
+}
+
 # An old same-name edge points to a different note. The typed field ignores it.
 Select-Note '共同筆記'
 Native-Menu 113 7 '筆記關聯…'

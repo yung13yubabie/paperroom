@@ -3015,9 +3015,26 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
         Finish-Revision $d 111
         Assert-TwinBody $Body
     }
+    $null = Wait-For 'ready to switch from a note to the native board' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
     Click-WorkspaceButton 119
+    $null = Wait-For 'native board controls ready at their board positions' {
+        if ([PaperroomHighlightGui]::Read((Control $window 119)) -cne '返回筆記' -or
+            [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') { return $false }
+        try {
+            $area = [PaperroomHighlightGui]::CanvasArea($window,$process.Id)
+            $button = [PaperroomHighlightGui]::ButtonPoint($window,$process.Id,(Control $window 120))
+            return $button.Y -lt $area.Top
+        } catch { return $false }
+    }
     Native-Menu 120 3 '新增白板…'
     Collection-Prompt '新增白板' 'NativeNorth'
+    $null = Wait-For 'new board NativeNorth is active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains('NativeNorth') -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '白板操作'
+    }
     Native-Menu 120 1 '放入筆記…'
     Native-Menu 120 ([uint32]$pickRows[0]) '鏡頭' -MenuOpen
     Native-Menu 120 4 '新增分區…'
@@ -3035,11 +3052,19 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
     Native-Menu 120 1 '收合「遠端卡片」' -MenuOpen
     Native-Menu 120 3 '新增白板…'
     Collection-Prompt '新增白板' 'NativeSouth'
+    $null = Wait-For 'new board NativeSouth is active' {
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains('NativeSouth') -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '白板操作'
+    }
     foreach ($index in @(1,0)) {
         Native-Menu 120 1 '放入筆記…'
         Native-Menu 120 ([uint32]$pickRows[$index]) '鏡頭' -MenuOpen
     }
     Click-WorkspaceButton 119
+    $null = Wait-For 'note controls ready after leaving the native board' {
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板' -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
     Search-NativeTwin $nativeBodies[0]
     Pick-NativePlacement 'NativeSouth' 2
     [PaperroomHighlightGui]::BoardCardClick($window,$process.Id,1,$false)

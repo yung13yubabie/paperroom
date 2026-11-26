@@ -238,3 +238,75 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The pinned Rust toolchain could not be installed.' }
           cargo +1.100.0 test --locked --target x86_64-pc-windows-msvc
           exit $LASTEXITCODE
+
+  native-board-replay:
+    name: Replay the exact native board candidate
+    if: github.repository == 'yung13yubabie/paperroom' && github.ref == 'refs/heads/dev/features/native-board-note-navigation-20261126' && contains(github.event.head_commit.message, '[native-board-replay]')
+    runs-on: windows-2022
+    timeout-minutes: 18
+    env:
+      PINNED_SOURCE: a0158213bad6df55d09287609f7c528268b7690e
+      PINNED_EXE_SHA: b84171d914dc5c1ed47719a52d9c350d0bdd6244c19521ec9efdb8f7ba3c1c5d
+      PINNED_ZIP_SHA: 90d21e1669bccd6c66180916fcfc120a3c0cbfacc3ec3934c26ec0656caab1e5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check that the QA-only revision has not changed the candidate source
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Wrong QA checkout.' }
+          git merge-base --is-ancestor $env:PINNED_SOURCE $head
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned candidate source is not an ancestor.' }
+          $paths = @(git -c core.quotePath=false diff --name-only --no-renames $env:PINNED_SOURCE $head)
+          $allowed = @('.github/workflows/draft-windows-acceptance.yml', 'scripts/windows-highlight-workflow.ps1')
+          if ($LASTEXITCODE -ne 0 -or $paths.Count -ne $allowed.Count -or @($paths | Where-Object { $_ -cnotin $allowed }).Count) {
+            throw 'The replay diverges from the pinned candidate outside the exact QA changes.'
+          }
+      - name: Download the pinned EXE and exercise its real Windows GUI
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/artifacts/15075527547"
+          $metadata = gh api $route
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the pinned artifact metadata.' }
+          $meta = $metadata | ConvertFrom-Json
+          if ($meta.expired -or $meta.workflow_run.id -ne 45728691456 -or
+              $meta.workflow_run.head_sha -cne $env:PINNED_SOURCE -or $meta.digest -cne "sha256:$env:PINNED_ZIP_SHA" -or
+              $meta.size_in_bytes -le 0 -or $meta.size_in_bytes -gt 16777216) {
+            throw 'The pinned artifact metadata differs from the reviewed candidate.'
+          }
+          $root = Join-Path $env:RUNNER_TEMP ('paperroom-candidate-replay-' + [guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $root)
+          try {
+            $archive = Join-Path $root 'download.zip'
+            gh api "$route/zip" > $archive
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $env:PINNED_ZIP_SHA) {
+              throw 'The download wrapper SHA-256 does not match.'
+            }
+            $exe = Join-Path $root 'Paperroom.exe'
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            try {
+              if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].FullName -cne 'Paperroom.exe' -or
+                  $zip.Entries[0].Length -le 0 -or $zip.Entries[0].Length -gt 16777216) {
+                throw 'The wrapper must contain the expected bounded EXE only.'
+              }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.Entries[0], $exe)
+            } finally {
+              $zip.Dispose()
+            }
+            Remove-Item Env:GH_TOKEN
+            Write-Host "Verified exact prior build EXE $env:PINNED_EXE_SHA from reviewed artifact."
+            $aboutError = $null
+            try { ./scripts/windows-about-notices.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA }
+            catch { $aboutError = $_; Write-Host "Native About failed: $($_.Exception.Message)" }
+            ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:PINNED_EXE_SHA
+            if ($aboutError) { throw $aboutError }
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+          }

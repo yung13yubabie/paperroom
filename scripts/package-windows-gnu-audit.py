@@ -168,7 +168,9 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
     exe_sha = digest(binary)
     if registry["target"] != TARGET or receipt["target"] != TARGET or registry["exe_sha256"] != exe_sha or receipt["exe_sha256"] != exe_sha:
         raise ValueError("Dependency evidence does not apply to this GNU EXE")
-    entries["GNU-AUDIT.md"] = (ROOT / "docs/WINDOWS-GNU-AUDIT.md").read_bytes()
+    draft_notes = ROOT / "docs/WINDOWS-GNU-DRAFT.md"
+    audit_notes = draft_notes if draft_notes.is_file() else ROOT / "docs/WINDOWS-GNU-AUDIT.md"
+    entries["GNU-AUDIT.md"] = audit_notes.read_bytes()
     details = {
         "source_commit": commit, "target": TARGET, "exe_sha256": exe_sha,
         "independent_builds_match": 2 if is_identical else 0,

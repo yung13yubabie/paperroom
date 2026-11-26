@@ -92,7 +92,7 @@ pub(super) fn file_kind(path: &Path) -> Result<&'static str> {
         "pdf" => Ok("pdf"),
         "png" => Ok("png"),
         "jpg" | "jpeg" => Ok("jpeg"),
-        "txt" | "csv" => Ok("text"),
+        "txt" | "csv" | "base" => Ok("text"),
         "md" | "markdown" => Ok("markdown"),
         _ => Err("支援的附件格式為 PDF、PNG、JPEG、文字或 Markdown。".into()),
     }

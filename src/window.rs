@@ -1267,6 +1267,7 @@ impl App {
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
+                (40, "匯入 Obsidian Bases 檢視…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
             if action == 33 {
@@ -1332,6 +1333,27 @@ impl App {
                     29 => return app.export_zotero_csl_ui(),
                     31 => return app.import_canvas_bundle_ui(),
                     35 => return app.workspace_search_ui(),
+                    40 => {
+                        let source = app.current.as_ref().ok_or("先開啟已匯入的 Vault 筆記。")?;
+                        let root = app.notebook.graph_vault(source.row.id)?
+                            .ok_or("先開啟要套用這份 Bases 的已匯入 Vault 筆記。")?;
+                        let scope = app.notebook.note(root)?.ok_or("來源 Vault 不存在。")?;
+                        if let Some(path) = file_dialog(app.hwnd, "Obsidian Bases\0*.base\0\0", "base", None)? {
+                            let filename = path.file_name().and_then(|value| value.to_str())
+                                .ok_or("無法讀取 Bases 檔名。")?;
+                            let raw = archive::read_bounded(
+                                std::fs::File::open(&path)?, crate::store::obsidian_base::MAX_BYTES as u64,
+                            )?;
+                            let parsed = crate::store::obsidian_base::parse(&raw)?;
+                            let prompt = format!("從已匯入的「{}」（#{}）建立 {} 個集合？紙間會使用目前的來源筆記，並保存 .base 原檔。", scope.row.title, root, parsed.views.len());
+                            if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
+                                return Ok(());
+                            }
+                            let (receipt, views) = app.notebook.import_obsidian_base(root, filename, raw)?;
+                            app.open_import(receipt, &format!("已匯入 {} 個 Bases 檢視。", views.len()));
+                        }
+                        return Ok(());
+                    }
                     30 => {
                         if let Some(path) = file_dialog(app.hwnd, "HTML ZIP\0*.zip\0\0", "zip", Some("paperroom-html.zip"))? {
                             let report = app.notebook.export_html_workspace(&path)?;
@@ -1372,6 +1394,9 @@ impl App {
                             let mut report = media.report(imported.pages.len(), imported.skipped);
                             report.push_str("\r\n\r\n");
                             report.push_str(&csv.report());
+                            if imported.has_mcp_transfer_manifest {
+                                report.push_str("\r\n\r\n此 ZIP 帶紙間 MCP 文字交接標記。本次只匯入所選頁面的文字，交接收據留在原 ZIP；此標記不是原廠匯出證明。");
+                            }
                             report.push_str("\r\n\r\n同批同一 ZIP 部件中可唯一比對的相對頁面連結，會出現在「筆記連結」選單。原始 Markdown 不變。片段只認唯一的字面標題。外部連結、附件路徑及未能確認的頁面連結保留原樣。");
                             let status = format!(
                                 "已匯入 {} 篇 Markdown、{} 筆附件關聯及 {} 份原始 CSV。",
@@ -1385,7 +1410,7 @@ impl App {
                             crate::dialog::show_text(app.hwnd, "匯入報告", &report)?;
                         }
                         "zip" => {
-                            let (imported, media) = archive::archive_with_media(&path)?;
+                            let (mut imported, media) = archive::archive_with_media(&path)?;
                             if let Some(notice) = imported.markdown_zip_import_notice()
                                 && message(
                                     app.hwnd, "Markdown ZIP 匯入範圍", notice,
@@ -1394,12 +1419,24 @@ impl App {
                             {
                                 return Ok(());
                             }
-                            let report = media.report(imported.pages.len(), imported.skipped);
-                            let status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", imported.pages.len(), media.count());
+                            let mut report = media.report(imported.pages.len(), imported.skipped);
+                            let mut status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", imported.pages.len(), media.count());
                             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Markdown ZIP");
-                            let id = app.notebook.import_markdown_with_media(
-                                &format!("匯入：{name}"), imported.pages, media,
-                            )?;
+                            let folder = format!("匯入：{name}");
+                            let id = if let Some(handoff) = imported.take_heptabase_handoff() {
+                                let (id, boards, warnings) = app.notebook.import_heptabase_handoff(
+                                    &folder, imported.pages, media, handoff,
+                                )?;
+                                status.push_str(&format!("已建立 {boards} 張紙間白板。"));
+                                report.push_str(&format!("\r\n\r\n已建立 {boards} 張紙間白板。只採用可確認路徑的標準 JSON Canvas 檔案卡與相容連線。All-Data.json 的原廠白板與中繼資料沒有還原，請保留原 ZIP。"));
+                                for warning in warnings {
+                                    report.push_str("\r\n");
+                                    report.push_str(&warning);
+                                }
+                                id
+                            } else {
+                                app.notebook.import_markdown_with_media(&folder, imported.pages, media)?
+                            };
                             app.open_import(id, &status);
                             crate::dialog::show_text(app.hwnd, "匯入報告", &report)?;
                         }

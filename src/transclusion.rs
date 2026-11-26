@@ -1,4 +1,4 @@
-use super::note_links::{NATIVE_NOTE_PREFIX, native_note_target};
+use super::note_links::{NATIVE_NOTE_PREFIX, is_heptabase_root, native_note_target};
 use super::vault_search::frontmatter;
 use super::{Notebook, Result};
 use crate::markdown::block_anchors::{BlockLookup, resolve_block};
@@ -223,6 +223,7 @@ impl Projection<'_> {
             return resolve_embed_target(self.db, host, None, destination);
         }
         let Some((root, source)) = &note.location else { return Ok(None); };
+        if is_heptabase_root(self.db, *root)? { return Ok(None); }
         if let std::collections::hash_map::Entry::Vacant(entry) = self.vaults.entry(*root) {
             let mut query = self.db.prepare(
                 "SELECT note_id,relative_path FROM vault_paths WHERE import_root=?1",

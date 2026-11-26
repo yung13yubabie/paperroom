@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string]$ExeSha256,
     [switch]$ProvePortableLinkGap,
-    [switch]$LegacyLinkOnly
+    [switch]$LegacyLinkOnly,
+    [switch]$UnifiedSourcesOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -682,7 +683,7 @@ with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, 
 }
 function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$Status,
                      [switch]$AlreadyOpened, [string]$ExpectedError = '', [switch]$CanvasSave,
-                     [string]$NextDialog = '', [string]$SaveName = '') {
+                     [string]$NextDialog = '', [string]$SaveName = '', [int]$NextDialogButton = 1) {
     if (!$AlreadyOpened) { Native-Menu 109 $Item $Caption }
     $dialog = Wait-For "common file dialog for $Caption" { [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $null, 1) }
     $defaultName = if ($SaveName) { $SaveName } elseif ($CanvasSave) { 'canvas.canvas' } else { switch ($Item) {
@@ -695,7 +696,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
     } }
     $original = [PaperroomHighlightGui]::Cursor()
     $point = $original
-    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 31, 37, 38, 39
+    $saving = $SaveName -or $CanvasSave -or $Item -notin 1, 2, 9, 11, 20, 31, 37, 38, 39, 40
     # Quoting an explicit save filename prevents a file filter from adding an extension.
     $typed = if ($saving) { '"' + $Path + '"' } else { $Path }
     try {
@@ -738,7 +739,7 @@ function Native-File([uint32]$Item, [string]$Caption, [string]$Path, [string]$St
         }
         if ($NextDialog) {
             return (Wait-For "native dialog after $Caption" {
-                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $NextDialog, 1)
+                [PaperroomHighlightGui]::OwnedWindow($window, $process.Id, '#32770', $NextDialog, $NextDialogButton)
             })
         }
         $null = Wait-For "$Caption completed" {
@@ -1425,6 +1426,10 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($UnifiedSourcesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-unified-sources.ps1')
+        return
+    }
     if ($LegacyLinkOnly) {
         . (Join-Path $PSScriptRoot 'windows-imported-legacy-link.ps1')
         return

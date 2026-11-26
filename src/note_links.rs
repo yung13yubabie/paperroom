@@ -97,9 +97,19 @@ pub struct VaultNoteLink {
     pub notion_path: Option<String>,
 }
 
+pub(super) fn is_heptabase_root(db: &Connection, root: i64) -> Result<bool> {
+    Ok(db.prepare_cached("SELECT 1 FROM heptabase_import_roots WHERE import_root=?1")?.exists([root])?)
+}
+
 fn mapped_link_target(
-    index: &NoteLinkPaths<'_>, source: &str, parts: &[String], syntax: AnchorSyntax, destination: &str, path: &str,
+    index: &NoteLinkPaths<'_>, exact_only: bool, source: &str, parts: &[String], syntax: AnchorSyntax, destination: &str, path: &str,
 ) -> Option<i64> {
+    if exact_only {
+        return match syntax {
+            AnchorSyntax::Markdown => index.exact_markdown_target(parts, path),
+            _ => None,
+        };
+    }
     match syntax {
         AnchorSyntax::Wiki => index.wiki.resolve(source, destination),
         AnchorSyntax::Markdown => index.markdown_target(parts, path),
@@ -144,6 +154,7 @@ impl Notebook {
             files = stmt.query_map([root], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
         }
+        let exact_only = root.map(|id| is_heptabase_root(&tx, id)).transpose()?.unwrap_or(false);
         let index = NoteLinkPaths::new(&files);
         let notion_source = super::notion_page_links::Source::load(&tx, note.row.id)?;
         let parts = source_path.as_deref().unwrap_or("").split('/').map(str::to_owned).collect::<Vec<_>>();
@@ -173,7 +184,7 @@ impl Notebook {
                     None
                 }
             } else if let Some(source_path) = &source_path {
-                mapped_link_target(&index, source_path, &parts, reference.syntax, &destination, path)
+                mapped_link_target(&index, exact_only, source_path, &parts, reference.syntax, &destination, path)
             } else {
                 None
             };

@@ -29,9 +29,18 @@ pub struct Import {
     pub source_paths: BTreeMap<Vec<String>, String>,
     pub skipped: usize,
     has_all_data_json: bool,
+    pub(crate) has_mcp_transfer_manifest: bool,
     visited: usize,
     total_bytes: u64,
     unpacked_archives: u64,
+    companion_canvases: Vec<(String,String)>,
+    companion_warnings: Vec<String>,
+}
+
+pub(crate) struct HeptabaseHandoff {
+    pub paths: BTreeMap<Vec<String>,String>,
+    pub canvases: Vec<(String,String)>,
+    pub warnings: Vec<String>,
 }
 
 pub fn export_title(stem: &str) -> String {
@@ -84,7 +93,11 @@ pub fn archive(path: &Path) -> Result<Import> {
 
 pub(crate) fn archive_with_media(path: &Path) -> Result<(Import, MediaPlan)> {
     let mut media = MediaPlan::default();
-    let imported = read_archive(path, Some(&mut media), None)?;
+    let snapshot = bounded_zip_snapshot(path)?;
+    let mut imported = read_archive_snapshot(&snapshot, Some(&mut media), None)?;
+    if imported.is_flat_heptabase_backup() {
+        imported.read_canvas_companions(&snapshot)?;
+    }
     Ok((imported, media))
 }
 
@@ -96,10 +109,77 @@ pub(crate) fn notion_archive_with_media(path: &Path) -> Result<(Import, MediaPla
 }
 
 impl Import {
+    fn is_flat_heptabase_backup(&self) -> bool {
+        self.has_all_data_json && self.unpacked_archives == 0
+    }
+
+    pub(crate) fn take_heptabase_handoff(&mut self) -> Option<HeptabaseHandoff> {
+        self.is_flat_heptabase_backup().then(|| HeptabaseHandoff {
+            paths: std::mem::take(&mut self.source_paths),
+            canvases: std::mem::take(&mut self.companion_canvases),
+            warnings: std::mem::take(&mut self.companion_warnings),
+        })
+    }
+
     pub(crate) fn markdown_zip_import_notice(&self) -> Option<&'static str> {
-        self.has_all_data_json.then_some(
-            "ZIP 含有 All-Data.json，可能是 Heptabase 完整備份。紙間只會匯入 Markdown 與可辨識的附件，不會匯入白板配置、卡片關聯或備份中繼資料。仍要繼續？"
-        )
+        if self.is_flat_heptabase_backup() {
+            Some("ZIP 含有 All-Data.json，可能是 Heptabase 備份。紙間會匯入 Markdown、可比對的相對附件和同包筆記連結。只有另外提供且可對應的標準 JSON Canvas 能轉成紙間白板。不會讀取 All-Data.json 或還原其中的白板配置、關聯或中繼資料。仍要繼續？")
+        } else {
+            self.has_all_data_json.then_some(
+                "ZIP 含有 All-Data.json 及內嵌 ZIP。紙間只會匯入 Markdown 與可辨識的附件，不會跨 ZIP 配對筆記或白板。仍要繼續？"
+            )
+        }
+    }
+
+    fn read_canvas_companions(&mut self, snapshot: &[u8]) -> Result<()> {
+        const MAX_CANVASES: usize = 16;
+        const MAX_TOTAL_CANVAS_BYTES: u64 = 16 * 1024 * 1024;
+
+        let mut archive = zip::unstable::read::ZipIterable::try_new(Cursor::new(snapshot), Default::default())?
+            .enforce_header_consistency(true);
+        let mut bodies = Cursor::new(snapshot);
+        let mut documents = BTreeMap::new();
+        let mut total = 0;
+        for entry in archive.files()? {
+            let entry = entry?;
+            let name = entry.name()?;
+            if entry.is_dir() || entry.is_symlink() || !safe_archive_path(&name)
+                || name.contains('\\') || name.chars().any(char::is_control)
+                || !Path::new(name.as_ref()).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("canvas")) {
+                continue;
+            }
+            let name = name.into_owned();
+            if let Some(previous) = documents.get_mut(&name) {
+                *previous = None;
+                continue;
+            }
+            if documents.len() >= MAX_CANVASES {
+                if !self.companion_warnings.iter().any(|warning| warning == "只檢查前 16 份 JSON Canvas。") {
+                    self.companion_warnings.push("只檢查前 16 份 JSON Canvas。".into());
+                }
+                continue;
+            }
+            let limit = MAX_TOTAL_CANVAS_BYTES.saturating_sub(total).min(crate::canvas::MAX_BYTES as u64);
+            let size = entry.size();
+            let content = if size <= limit {
+                let bytes = read_bounded(entry.with_reader(&mut bodies, Default::default())?, limit)?;
+                total += bytes.len() as u64;
+                String::from_utf8(bytes).ok()
+            } else {
+                None
+            };
+            documents.insert(name, content);
+        }
+        for (name, content) in documents {
+            if let Some(content) = content {
+                self.companion_canvases.push((name, content));
+                self.skipped -= 1;
+            } else {
+                let displayed: String = name.chars().take(180).collect();
+                self.companion_warnings.push(format!("{displayed}：路徑重複、超過容量或不是 UTF-8，未匯入白板。"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -215,6 +295,9 @@ fn collect(
         // its body as a native backup, and do not change what Markdown import accepts.
         if filename.eq_ignore_ascii_case("All-Data.json") {
             out.has_all_data_json = true;
+        }
+        if part.is_none() && raw_path == "paperroom-transfer/manifest.json" {
+            out.has_mcp_transfer_manifest = true;
         }
         if part.is_none() && !path.contains('/') && ext.eq_ignore_ascii_case("zip") {
             if let Some(sources) = csv.as_deref_mut() {
@@ -418,6 +501,93 @@ mod tests {
     }
 
     #[test]
+    fn heptabase_handoff_keeps_shared_note_ids_and_companion_boards_on_reopen() -> Result<()> {
+        use serde_json::json;
+        use crate::store::{Notebook, View};
+
+        let dir = std::env::temp_dir().join(format!("paperroom-heptabase-handoff-{}", std::process::id()));
+        fs::create_dir(&dir)?;
+        let zip_path = dir.join("handoff.zip");
+        let workspace = dir.join("workspace.sqlite3");
+        let backup = dir.join("restored.sqlite3");
+        let mut zip = zip::ZipWriter::new(File::create(&zip_path)?);
+        let drawing = |x: i32| json!({"nodes":[
+            {"id":"a","type":"file","file":"甲/鏡頭.md","x":x,"y":20,"width":232,"height":114},
+            {"id":"b","type":"file","file":"乙/鏡頭.md","x":300,"y":180,"width":232,"height":114}
+        ], "edges":[{"id":"ab","fromNode":"a","toNode":"b","toEnd":"none"}]});
+        let canvas_a = drawing(10).to_string();
+        let canvas_b = drawing(50).to_string();
+        let mut wrong = drawing(10);
+        wrong["nodes"][0]["file"] = "鏡頭.md".into();
+        let wrong = wrong.to_string();
+        let a_body = "甲正文。\n[乙卡](../乙/鏡頭.md)\n[附件](../媒體/來源.txt)\n[缺件](根目錄候選.md) [[根目錄候選]]";
+        for (name, contents) in [
+            ("甲/鏡頭.md", format!("# 鏡頭\n\n{a_body}")),
+            ("乙/鏡頭.md", "# 鏡頭\n\n乙正文。".into()),
+            ("根目錄候選.md", "這篇在根目錄，不能用作缺件的替代。".into()),
+            ("媒體/來源.txt", "原始附件".into()),
+            ("All-Data.json", "未讀取的原廠內容".into()),
+            ("白板/分鏡.canvas", canvas_a),
+            ("白板/參考.canvas", canvas_b),
+            ("白板/名稱無法確認.canvas", wrong),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(contents.as_bytes())?;
+        }
+        drop(zip.finish()?);
+        let original_zip = fs::read(&zip_path)?;
+        let (mut imported, media) = archive_with_media(&zip_path)?;
+        let handoff = imported.take_heptabase_handoff().ok_or("expected identified export")?;
+        let mut db = Notebook::open(&workspace, false)?;
+        let (root, boards, warnings) = db.import_heptabase_handoff("工作區", imported.pages, media, handoff)?;
+        assert_eq!(boards, 2);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("名稱無法確認.canvas"));
+        let inspect = rusqlite::Connection::open_with_flags(&workspace, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let find = |path: &str| inspect.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
+            (root, path), |row| row.get::<_,i64>(0),
+        );
+        let (a, b) = (find("甲/鏡頭.md")?, find("乙/鏡頭.md")?);
+        drop(inspect);
+        assert_ne!(a, b);
+        let a_note = db.note(a)?.unwrap();
+        assert_eq!(a_note.body, a_body);
+        assert_eq!(db.note(b)?.unwrap().body, "乙正文。");
+        assert_eq!(db.rows(View::All,"鏡頭")?.len(), 2);
+        assert_eq!(db.vault_note_links(&a_note)?[0].note_id, b);
+        assert_eq!(db.graph_neighbors(&db.note(b)?.unwrap())?.1[0].0, a);
+        db.save(a, a_note.version, "甲已改名", a_body)?;
+        db.backup(&backup)?;
+        drop(db);
+
+        for path in [&workspace, &backup] {
+            let reopened = Notebook::open(path, false)?;
+            let readback = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let check = readback.prepare("SELECT b.title,c.x,c.y FROM board_cards c
+                 JOIN boards b ON b.id=c.board_id WHERE c.note_id=?1 ORDER BY b.title")?
+                .query_map([a], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i32>(1)?,row.get::<_,i32>(2)?)))?
+                .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+            assert_eq!(check, [("分鏡".into(),10,20),("參考".into(),50,20)].into_iter().collect());
+            let relations: i64 = readback.query_row(
+                "SELECT count(*) FROM board_edges WHERE from_note=?1 AND to_note=?2",
+                (a.min(b), a.max(b)), |row| row.get(0),
+            )?;
+            assert_eq!(relations, 2);
+            let attachment: Vec<u8> = readback.query_row(
+                "SELECT content FROM attachments WHERE note_id=?1 AND name='來源.txt'",
+                [a], |row| row.get(0),
+            )?;
+            assert_eq!(attachment, "原始附件".as_bytes());
+            assert_eq!(reopened.note(a)?.unwrap().row.title, "甲已改名");
+            assert_eq!(reopened.note(b)?.unwrap().body, "乙正文。");
+        }
+        assert_eq!(fs::read(&zip_path)?, original_zip);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn synthetic_attachment_report_fixture() -> Result<()> {
         // Generated test data; this exercises Paperroom's real ZIP importer, not Heptabase.
         let dir = std::env::temp_dir().join(format!("paperroom-media-report-{}", std::process::id()));
@@ -449,7 +619,7 @@ mod tests {
             assert!(report.contains("卡片.md　附件　media/missing.pdf　找不到"));
             assert!(!report.contains("cloud.pdf") && !report.contains("All-Data.json"));
             let notice = notes.markdown_zip_import_notice().ok_or("expected backup marker notice")?;
-            assert!(notice.contains("All-Data.json") && notice.contains("不會匯入白板配置"));
+            assert!(notice.contains("All-Data.json") && notice.contains("還原其中的白板配置"));
             Ok(())
         })();
         fs::remove_dir_all(&dir)?;

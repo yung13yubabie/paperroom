@@ -178,7 +178,7 @@ impl App {
         {
             self.notebook.collection_display_columns(id)?.map(|keys| {
                 keys.into_iter().map(|key| {
-                    let values = self.notebook.collection_property_values(id, &key)?;
+                    let values = self.notebook.collection_display_values(id, &key)?;
                     Ok(DisplayProperty { key, values })
                 }).collect::<Result<Vec<_>>>()
             }).transpose()?

@@ -1,5 +1,5 @@
 //! A read-only block backlink audit for one imported Vault snapshot.
-use super::{NATIVE_NOTE_PREFIX, NoteLinkPaths, Notebook, Result, mapped_link_target, native_note_target};
+use super::{NATIVE_NOTE_PREFIX, NoteLinkPaths, Notebook, Result, is_heptabase_root, mapped_link_target, native_note_target};
 use crate::markdown::{self, block_anchors::{BlockLookup, resolve_blocks}};
 use rusqlite::{OptionalExtension, params};
 
@@ -36,6 +36,7 @@ impl Notebook {
             )?;
             stmt.query_map([root], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let exact_only = is_heptabase_root(&tx, root)?;
         let index = NoteLinkPaths::new(&files);
         let mut hits = Vec::new();
         let (mut count, mut consumed) = (0, 0);
@@ -63,7 +64,7 @@ impl Notebook {
                     let id = if destination.starts_with(NATIVE_NOTE_PREFIX) {
                         native_note_target(&tx, Some(source), destination)?
                     } else {
-                        mapped_link_target(&index, path, &parts, reference.syntax, &reference.destination, destination)
+                        mapped_link_target(&index, exact_only, path, &parts, reference.syntax, &reference.destination, destination)
                     };
                     if id != Some(target) { continue; }
                     count += 1;

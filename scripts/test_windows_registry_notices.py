@@ -125,6 +125,18 @@ class WindowsRegistryNoticesTests(unittest.TestCase):
             self.collect()
         self.assertEqual((self.output / notices.INDEX_PATH).read_bytes(), packed)
 
+    def test_preserves_allowlisted_reversed_license_names(self):
+        data = archive_bytes(PACKAGE, [
+            ("MIT-LICENSE", b"MIT text\r\n"),
+            ("Apache-LICENSE", b"Apache text\n"),
+            ("MIT-LICENSE.rs", b"source code"),
+            ("custom-LICENSE", b"not allowlisted"),
+        ])
+        self.assertEqual(notices.notice_files(data, PACKAGE), [
+            ("Apache-LICENSE", b"Apache text\n"),
+            ("MIT-LICENSE", b"MIT text\r\n"),
+        ])
+
     def test_locked_checksum_precedes_tar_read_and_rolls_back(self):
         self.inputs()
         (self.cache / f"{PACKAGE}.crate").write_bytes(b"not the specified archive")

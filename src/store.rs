@@ -119,6 +119,12 @@ pub(crate) mod tasks;
 pub(crate) mod board_images;
 #[path = "board_bundle.rs"]
 mod board_bundle;
+#[path = "heptabase_boards.rs"]
+mod heptabase_boards;
+#[path = "obsidian_base.rs"]
+pub(crate) mod obsidian_base;
+#[path = "obsidian_base_import.rs"]
+mod obsidian_base_import;
 #[path = "csv_table.rs"]
 mod csv_table;
 #[path = "properties.rs"]
@@ -135,7 +141,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 36;
+const SCHEMA_VERSION: i32 = 37;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -412,6 +418,12 @@ impl Notebook {
         if version < 36 {
             note_links::preserve_legacy_links(&tx)?;
         }
+        if version < 37 {
+            tx.execute_batch(collection_display::OBSIDIAN_VALUES_SCHEMA)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS heptabase_import_roots(
+                import_root INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE
+            );")?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -644,6 +656,13 @@ impl Notebook {
         self.import_pages(folder, import.pages, true, import.media, None, Some(import.links))
     }
 
+    pub(crate) fn import_heptabase_handoff(
+        &mut self, folder: &str, files: Vec<crate::archive::ImportedPage>,
+        media: migration_media::MediaPlan, handoff: crate::archive::HeptabaseHandoff,
+    ) -> Result<(i64, usize, Vec<String>)> {
+        self.import_pages_with_handoff(folder, files, true, media, None, None, Some(handoff))
+    }
+
     fn import_pages(
         &mut self,
         folder: &str,
@@ -653,14 +672,32 @@ impl Notebook {
         csv: Option<notion_handoff::CsvSources>,
         portable_links: Option<vault_zip_links::LinkPlan>,
     ) -> Result<i64> {
+        self.import_pages_with_handoff(folder, files, vault, media, csv, portable_links, None)
+            .map(|(root, _, _)| root)
+    }
+
+    fn import_pages_with_handoff(
+        &mut self,
+        folder: &str,
+        files: Vec<crate::archive::ImportedPage>,
+        vault: bool,
+        media: migration_media::MediaPlan,
+        csv: Option<notion_handoff::CsvSources>,
+        portable_links: Option<vault_zip_links::LinkPlan>,
+        handoff: Option<crate::archive::HeptabaseHandoff>,
+    ) -> Result<(i64, usize, Vec<String>)> {
         use std::collections::HashMap;
 
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let root = insert(&tx, None, folder, "")?;
+        if handoff.is_some() {
+            tx.execute("INSERT INTO heptabase_import_roots(import_root) VALUES(?1)", [root])?;
+        }
         let folder_title = if vault { clean_title } else { crate::archive::export_title };
         let mut ids = HashMap::new();
+        let mut exact_sources = HashMap::new();
         for page in &files {
             validate_body(&page.body)?;
             let mut parent = root;
@@ -691,15 +728,24 @@ impl Notebook {
             }
             let path = page.parts.join("/");
             if vault {
+                let source = if let Some(handoff) = &handoff {
+                    let source = handoff.paths.get(&page.parts).ok_or("找不到這篇匯入筆記的原始路徑。")?;
+                    if exact_sources.insert(source.clone(), parent).is_some() {
+                        return Err("ZIP 內 Markdown 原始路徑重複，未匯入。".into());
+                    }
+                    source
+                } else {
+                    &path
+                };
                 tx.execute(
                     "INSERT INTO vault_paths(note_id,import_root,relative_path) VALUES(?1,?2,?3)",
-                    params![parent, root, path],
+                    params![parent, root, source],
                 )?;
                 tx.execute(
                     "INSERT INTO vault_sync_base(note_id,body) VALUES(?1,?2)",
                     params![parent, page.body],
                 )?;
-                if portable_links.is_none() {
+                if portable_links.is_none() && handoff.is_none() {
                     tx.execute("INSERT INTO vault_push_verified(note_id) VALUES(?1)", [parent])?;
                 }
             }
@@ -718,8 +764,17 @@ impl Notebook {
         if let Some(links) = portable_links {
             links.rebind(&tx, root)?;
         }
+        let (boards, warnings) = if let Some(handoff) = handoff {
+            let (boards, board_warnings) =
+                heptabase_boards::import_companion_boards(&tx, handoff.canvases, &exact_sources)?;
+            let mut warnings = handoff.warnings;
+            warnings.extend(board_warnings);
+            (boards, warnings)
+        } else {
+            (0, Vec::new())
+        };
         tx.commit()?;
-        Ok(root)
+        Ok((root, boards, warnings))
     }
 }
 
@@ -803,7 +858,10 @@ mod tests {
 
     pub(super) fn remove_v31_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "DROP TRIGGER IF EXISTS reset_collection_group_folds;
+            "DROP TABLE IF EXISTS obsidian_base_file_values;
+             DROP TABLE IF EXISTS obsidian_base_file_columns;
+             DROP TABLE IF EXISTS heptabase_import_roots;
+             DROP TRIGGER IF EXISTS reset_collection_group_folds;
              DROP TABLE IF EXISTS collection_group_folds;
              DROP TRIGGER record_prior_note_revision;
              DROP TRIGGER write_note_history;

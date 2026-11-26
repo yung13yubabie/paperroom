@@ -25,6 +25,7 @@ VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_.+-][A-Za-z0-9_.+ -]{0,95}", re.ASCII)
 RESERVED = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])", re.I)
 NOTICE = re.compile(
+    r"MIT-LICENSE|APACHE-LICENSE|"
     r"(?:LICEN[CS]E|COPYRIGHT|NOTICE|COPYING)"
     r"(?:(?:[-_ ][A-Z0-9]|[.](?:APACHE|BSD|GPL|LGPL|AGPL|MIT|MPL|ISC|ZLIB|CC0|BSL))"
     r"(?:[A-Z0-9_+ -]|[.][0-9]+)*)?"

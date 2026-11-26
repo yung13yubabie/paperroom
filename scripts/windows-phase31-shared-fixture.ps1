@@ -5,7 +5,8 @@ $targetMembers=@('exact','decoy')
 function Open-EdgeBoard31([string]$Title='') {
     if ([PaperroomHighlightGui]::Read((Control $window 119)) -ceq '返回筆記' -and
         [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') {
-        Click-WorkspaceButton 119
+        # Close the collection in setup, then use a single physical click for the board.
+        Command $window 119
         $null=Wait-For 'closed collection before opening native board' {
             [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '卡片白板'
         }

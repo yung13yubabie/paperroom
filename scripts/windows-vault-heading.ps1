@@ -13,7 +13,6 @@ $inputs=[ordered]@{
 }
 $otherSections="`n## 舊小節相似`n相似段落`n## 重名`n歧義甲`n## 重名`n歧義乙"
 $inputs['A/鏡頭.md']+=$otherSections
-. (Join-Path $PSScriptRoot 'windows-vault-heading-canvas.ps1')
 $diskHashes=@{}
 foreach ($pair in $inputs.GetEnumerator()) {
     $file=Join-Path $vault $pair.Key
@@ -25,6 +24,7 @@ foreach ($folder in $homeA,$homeB) {
     [void][IO.Directory]::CreateDirectory((Join-Path $folder 'paperroom-data'))
     Copy-Item -LiteralPath $Exe -Destination (Join-Path $folder 'Paperroom.exe')
 }
+. (Join-Path $PSScriptRoot 'windows-vault-heading-canvas.ps1')
 function Read-HeadingState([string]$Db) {
     $raw=@'
 import json,sqlite3,sys

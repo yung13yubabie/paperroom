@@ -21,6 +21,7 @@ pub(crate) struct View {
     pub folders: Vec<FolderRule>,
     pub typed_filters: Vec<Test>,
     pub group: Option<String>,
+    pub group_descending: bool,
     pub sorts: Vec<(String,bool)>,
     pub limit: Option<usize>,
 }
@@ -51,6 +52,17 @@ pub(crate) struct Base {
 }
 
 impl Base {
+    // A typed comparison returns a boolean even when its canonical input is numeric.
+    pub(super) fn group_binding<'a>(&self,key:&'a str)->Option<(&'a str,&'static str)> {
+        if let Some(source)=key.strip_prefix("note.") {
+            Some((source,*self.types.get(source)?))
+        } else {
+            let label=key.strip_prefix("formula.")?;
+            self.formulas.get(key)?.typed()?;
+            Some((label,"boolean"))
+        }
+    }
+
     pub(crate) fn has_dynamic_rules(&self) -> bool {
         self.views.iter().any(|view| !view.typed_filters.is_empty() || !view.sorts.is_empty() || view.limit.is_some())
     }
@@ -387,23 +399,23 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
                 sorts.push((key,desc));
             }
         }
-        let group=if let Some(config)=row.remove("groupBy"){
+        let (group,group_descending)=if let Some(config)=row.remove("groupBy"){
             let mut config=config.map()?;
             let key=property(config.remove("property").ok_or("群組缺少來源屬性。")?.text()?)?;
-            if config.remove("direction").ok_or("群組缺少 ASC 方向。")?.text()? != "ASC"{
-                return Err("目前只支援 ASC 遞增型別群組。".into());
-            }
+            let descending=match config.remove("direction").ok_or("群組缺少方向。")?.text()?.as_str(){
+                "ASC"=>false,"DESC"=>true,_=>return Err("群組方向須為 ASC 或 DESC。".into()),
+            };
             supported(config)?;
             if !order.contains(&key){return Err("型別群組的來源欄必須出現在 order。".into())}
-            Some(key)
-        }else{None};
+            (Some(key),descending)
+        }else{(None,false)};
         let limit = match row.remove("limit") {
             None => None,
             Some(Node::Integer(n @ 1..=1000)) if group.is_none() => Some(n),
             _ => return Err("limit 僅支援未分組檢視及 1 至 1000 的十進位正整數。".into()),
         };
         supported(row)?;
-        views.push(View {name, layout, order, folders,typed_filters,group,sorts,limit});
+        views.push(View {name, layout, order, folders,typed_filters,group,group_descending,sorts,limit});
     }
     for key in display_names.keys().chain(views.iter().flat_map(|view|view.order.iter())) {
         if key.starts_with("formula.") && !formulas.contains_key(key) { return Err(format!("找不到公式：{key}")); }
@@ -412,13 +424,14 @@ pub(crate) fn parse(raw: &[u8]) -> R<Base> {
     for test in formulas.values().filter_map(FileFormula::typed).chain(views.iter().flat_map(|v|&v.typed_filters)) {
         if types.insert(test.key.clone(),test.kind).is_some_and(|prev|prev!=test.kind){return Err(format!("欄位「{}」有互相衝突的型別。",test.key))}
     }
-    for view in &views {
-        if view.sorts.iter().any(|(key,_)|!types.contains_key(key)){return Err("排序欄位須有明確布林或數值比較。".into());}
-        if let Some(group)=&view.group && !group.strip_prefix("note.").is_some_and(|key|types.contains_key(key)){
-            return Err("群組來源必須是已明確比較的布林或數值筆記欄位。".into())
+    let base=Base {types,raw:raw.to_vec(),views,display_names,formulas};
+    for view in &base.views {
+        if view.sorts.iter().any(|(key,_)|!base.types.contains_key(key)){return Err("排序欄位須有明確布林或數值比較。".into());}
+        if let Some(group)=&view.group && base.group_binding(group).is_none(){
+            return Err("群組來源必須是已明確比較的布林或數值筆記欄位，或其布林比較公式。".into())
         }
     }
-    Ok(Base { types,raw: raw.to_vec(), views, display_names, formulas })
+    Ok(base)
 }
 
 #[cfg(test)]

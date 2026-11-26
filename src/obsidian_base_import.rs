@@ -215,12 +215,14 @@ impl Notebook {
                 VALUES(?1,?2,'table','','',?3)",params![collection,&view.name,list])?;
             named_views.push((view.name.clone(),tx.last_insert_rowid()));
             if let Some(group)=&view.group {
-                let source=group.strip_prefix("note.").ok_or("無效的群組來源。")?;
-                let kind=base.types.get(source).ok_or("無法核對群組欄位型別。")?;
+                let (source,kind)=base.group_binding(group).ok_or("無法核對群組欄位型別。")?;
                 let label=base.display_names.get(group).map_or(source,String::as_str);
                 let view_id=tx.last_insert_rowid();
                 tx.execute("UPDATE collection_views SET group_key=?2 WHERE id=?1",params![view_id,label])?;
                 tx.execute("INSERT INTO obsidian_base_typed_groups(view_id,label,kind) VALUES(?1,?2,?3)",params![view_id,label,kind])?;
+                if view.group_descending {
+                    tx.execute("INSERT INTO obsidian_base_descending_groups(view_id) VALUES(?1)",[view_id])?;
+                }
             }
             let labels:Vec<_>=cols.iter().map(|(key,_)|key).collect();
             tx.execute("INSERT INTO collection_display_columns(collection_id,columns_json) VALUES(?1,?2)",
@@ -378,6 +380,54 @@ views:
         drop(restored);std::fs::remove_dir_all(dir)?;Ok(())
     }
     #[test]
+    fn descending_numeric_and_checkbox_groups_survive_live_edits_copy_and_backup() -> Result<()> {
+        let dir=std::env::temp_dir().join(format!("paperroom-base-desc-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir(&dir)?;
+        let path=dir.join("workspace.sqlite");
+        let mut db=Notebook::open(&path,false)?;
+        let mut pages=Vec::new();
+        for (dir,cost,ready) in [("A","-1","false"),("B","2.00","true"),("C","10","true"),("D","2","false"),("E","null","null"),("F","","")] {
+            let mut p=page(dir);
+            if !cost.is_empty(){p.body=format!("---\ncost: {cost}\nready: {ready}\n---\n保留正文");}
+            pages.push(p);
+        }
+        let root=db.import_vault("群組",pages)?;
+        let raw=r#"formulas: {over: 'note.cost > 2', yes: 'note.ready == true'}
+properties: {cost: {displayName: 成本}, formula.over: {displayName: 高成本}}
+views:
+  - {type: table, name: 費用, order: [file.path, cost, formula.over], groupBy: {property: note.cost, direction: DESC}}
+  - {type: table, name: 核准, order: [file.path, ready], groupBy: {property: note.ready, direction: DESC}}
+  - {type: table, name: 門檻, order: [cost, formula.over], groupBy: {property: formula.over, direction: DESC}}"#;
+        let (_,cols)=db.import_vault_scope_base(root,"group.base",raw.as_bytes().to_vec())?;
+        let lanes=|db:&Notebook,col:i64,name:&str|->Result<Vec<(String,usize)>>{
+            let view=db.collection_views(col)?.into_iter().find(|v|v.name==name).unwrap();
+            Ok(db.collection_lanes_and_display(col,&view)?.0.into_iter().map(|(g,rs)|(g.0.unwrap(),rs.len())).collect())
+        };
+        let expected=|items:&[(&str,usize)]|items.iter().map(|(s,n)|(s.to_string(),*n)).collect::<Vec<_>>();
+        let cost=cols[0].0;let ready=cols[1].0;let over=cols[2].0;
+        assert_eq!(lanes(&db,cost,"費用")?,expected(&[("10",1),("2",2),("-1",1),("（缺少）",1),("null",1)]));
+        let booleans=expected(&[("true",2),("false",2),("（缺少）",1),("null",1)]);
+        assert_eq!(lanes(&db,ready,"核准")?,booleans);
+        assert_eq!(lanes(&db,over,"門檻")?,expected(&[("true",1),("false",3),("（缺少）",1),("null",1)]));
+        assert!(db.typed_base_rows(over,"高成本")?.is_empty());
+        let c=db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path='C/鏡頭.md'",[root],|r|r.get(0))?;
+        let (version,_)=db.typed_base_current(cost,"成本",c)?;
+        db.edit_typed_base(cost,"成本",c,version,"2")?;
+        assert_eq!(db.collection_display_values(cost,"高成本")?[&c],"false");
+        let view=db.collection_views(cost)?.remove(0);
+        db.duplicate_collection_view(cost,&view,"副本")?;
+        let backup=dir.join("backup.sqlite");db.backup(&backup)?;drop(db);
+        for f in [path,backup]{let db=Notebook::open(&f,false)?;
+            let costs=expected(&[("2",3),("-1",1),("（缺少）",1),("null",1)]);
+            assert_eq!(lanes(&db,cost,"副本")?,costs);
+            assert_eq!(lanes(&db,cost,"費用")?,costs);
+            assert_eq!(lanes(&db,ready,"核准")?,booleans);
+            assert_eq!(lanes(&db,over,"門檻")?,expected(&[("false",4),("（缺少）",1),("null",1)]));
+        }
+        std::fs::remove_dir_all(dir)?;Ok(())
+    }
+
+    #[test]
     fn typed_group_uses_numeric_order_and_recomputes_after_save_and_backup() -> Result<()> {
         let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
         let mut pages=Vec::new();
@@ -419,13 +469,18 @@ views: [{type: table, name: 費用, order: [cost,formula.over], groupBy: {proper
         let dir=std::env::temp_dir().join(format!("paperroom-bases-groups-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
         std::fs::create_dir(&dir)?;
         let file=dir.join("backup.sqlite");db.backup(&file)?;
+        // This fixture contains only pre-existing ASC groups, including a saved fold and copied view.
+        // Recreate the exact v43 schema before reopening it through the v44 migration.
+        let prior=rusqlite::Connection::open(&file)?;
+        prior.execute_batch("DROP TABLE obsidian_base_descending_groups; PRAGMA user_version=43;")?;
+        drop(prior);
         let reopened=Notebook::open(&file,false)?;
         assert_eq!(layout(&reopened)?,expected);
         assert!(reopened.collection_group_folds(&view)?.unwrap().contains(&two));
         assert_eq!(reopened.presented_collection_lanes(col,Some(&duplicate))?.into_iter().map(|(g,r)|(g.0.unwrap(),r.len())).collect::<Vec<_>>(),expected);
         assert_eq!(reopened.typed_base_current(col,"成本",id)?.1,"2");
         drop(reopened);std::fs::remove_dir_all(dir)?;
-        assert!(db.import_obsidian_base_mode(root,"bad.base",raw.replace("direction: ASC","direction: DESC").into_bytes(),true).is_err());
+        assert!(db.import_obsidian_base_mode(root,"bad.base",raw.replace("direction: ASC","direction: UNKNOWN").into_bytes(),true).is_err());
         for invalid in ["note.true == false","note.null == 0","note.0 >= 1"]{
             assert!(db.import_obsidian_base_mode(root,"invalid.base",raw.replace("note.cost > 2",invalid).into_bytes(),true).is_err());
         }

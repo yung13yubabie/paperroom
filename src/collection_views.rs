@@ -1102,6 +1102,8 @@ impl Notebook {
         let id = tx.last_insert_rowid();
         if let Some((label,kind))=base_group{
             tx.execute("INSERT INTO obsidian_base_typed_groups(view_id,label,kind) VALUES(?1,?2,?3)",params![id,label,kind])?;
+            tx.execute("INSERT INTO obsidian_base_descending_groups(view_id)
+                        SELECT ?1 FROM obsidian_base_descending_groups WHERE view_id=?2",params![id,source.id])?;
         }
         tx.commit()?;
         Ok(id)
@@ -1342,13 +1344,18 @@ impl Notebook {
         let rows = self.filtered_collection_rows(collection, view)?;
         let group_key = view.and_then(|view| view.presentation.group_key.as_deref());
         if let (Some(key),Some(view))=(group_key,view){
-            let kind:Option<String>=self.connection.query_row("SELECT kind FROM obsidian_base_typed_groups WHERE view_id=?1 AND label=?2",
-                params![view.id,key],|r|r.get(0)).optional()?;
-            if let Some(kind)=kind{
+            let group:Option<(String,bool)>=self.connection.query_row(
+                "SELECT g.kind,d.view_id IS NOT NULL FROM obsidian_base_typed_groups g
+                 LEFT JOIN obsidian_base_descending_groups d ON d.view_id=g.view_id
+                 WHERE g.view_id=?1 AND g.label=?2",params![view.id,key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((kind,descending))=group{
                 let values=self.collection_display_values(collection,key)?;
                 let mut lanes=BTreeMap::<(u8,i128),(GroupValue,Vec<Row>)>::new();
                 for (row,_) in rows{
-                    let (order,caption)=super::obsidian_base_typed::group(values.get(&row.id),&kind);
+                    let ((class,value),caption)=super::obsidian_base_typed::group(values.get(&row.id),&kind);
+                    // Complement reverses the full signed ordering without overflowing at i128::MIN.
+                    // Missing, null and invalid groups keep their separate trailing classes.
+                    let order=(class,if descending { !value } else { value });
                     lanes.entry(order).or_insert_with(||(GroupValue(Some(caption)),Vec::new())).1.push(row);
                 }
                 return Ok(lanes.into_values().collect())

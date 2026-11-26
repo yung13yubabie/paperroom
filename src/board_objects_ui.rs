@@ -550,7 +550,8 @@ impl App {
             let anchor=self.widgets.links;
             match popup(self.hwnd,anchor,None,&[(1,"新增子白板…"),(2,"開啟子白板…"),
                 (3,"返回上層並定位子白板卡片"),(4,"變更目前白板的上層…"),(5,"新增文字方塊…"),(6,"編輯文字方塊…"),
-                (7,"移除文字方塊…"),(8,"白板路徑…"),(9,"復原最近移除的文字方塊…"),(10,"將選取的卡片收進新子白板…")]) {
+                (7,"移除文字方塊…"),(8,"白板路徑…"),(9,"復原最近移除的文字方塊…"),(10,"將選取的卡片收進新子白板…"),
+                (11,"將子白板卡片展回上層…")]) {
                 1=>{
                     if let Some(title)=crate::dialog::prompt(self.hwnd,"新增子白板","白板名稱","",MAX_TITLE_CHARS)? {
                         let child=self.notebook.new_child_board(board,&title)?;
@@ -621,6 +622,14 @@ impl App {
                         }
                         self.select_board(parent.id, parent.title.clone())?;
                     }
+                }
+                11 => {
+                    let plan = self.notebook.plan_child_unfold(board)?;
+                    let question = format!("將 {} 張卡片依目前座標展回上層？完整分區與連線會一起搬移。子白板及其文字和分支會保留，入口若與卡片重疊會移到空位。",plan.count());
+                    if message(self.hwnd,"確認展回上層",&question,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)!=IDYES { return Ok(()); }
+                    self.notebook.unfold_child(&plan)?;
+                    self.return_to_parent_board_tile(board)?;
+                    label(self.widgets.status,&format!("已展回 {} 張卡片，並定位原子白板入口。",plan.count()));
                 }
                 10 => {
                     let selected=self.board_selection_snapshot();

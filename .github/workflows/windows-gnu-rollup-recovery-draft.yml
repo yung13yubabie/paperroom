@@ -1,0 +1,80 @@
+name: Replay the exact rollup and hierarchy candidate on Windows Server
+on:
+  push:
+    branches: ['dev/rollup-groups-board-recovery-20261126']
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PAPERROOM_SOURCE: 6f0f8c99c566503f0b743ebd0add6b770cd1cd3e
+  PAPERROOM_NAME: Paperroom-rollup-recovery-windows-x64-gnu-draft
+  EXPECTED_EXE: fc45850a1a5a60a8148e74334a4143bf9fb5a6aa31a9b811e969be6dff3c48db
+  EXPECTED_ZIP: b48815250b30dcaec6a3604a8bfa59acc34ca10cf5fe36b766610069ebeb95ff
+  FLOW: rollup-recovery
+
+jobs:
+  native:
+    name: Replay rollup and hierarchy on the downloaded EXE
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm the replay changed only test code
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$PAPERROOM_SOURCE" HEAD
+          git diff --exit-code "$PAPERROOM_SOURCE" HEAD -- . ':!.github/workflows/windows-gnu-rollup-recovery-draft.yml' ':!scripts/windows-rollup-board-recovery.ps1'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.PAPERROOM_NAME }}
+          path: ${{ runner.temp }}/gnu-rollup-recovery
+          run-id: 45776087463
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Paperroom-rollup-recovery-GNU-draft-exe
+          path: ${{ runner.temp }}/gnu-rollup-recovery-exe
+          run-id: 45776087463
+          github-token: ${{ github.token }}
+      - name: Verify both downloads and run the native executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP 'gnu-rollup-recovery'
+          $zip = Join-Path $folder "$env:PAPERROOM_NAME.zip"
+          python -B scripts/package-windows-gnu-audit.py verify --require-dependency-evidence --package $zip --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'GNU ZIP failed complete readback.' }
+          $extracted = Join-Path $folder 'verified'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+          $exe = Join-Path $extracted 'Paperroom.exe'
+          $standaloneFolder = Join-Path $env:RUNNER_TEMP 'gnu-rollup-recovery-exe'
+          $standalone = Join-Path $standaloneFolder 'Paperroom.exe'
+          $checksums = Get-Content -LiteralPath (Join-Path $standaloneFolder 'SHA256SUMS.txt')
+          if ($checksums.Count -ne 2 -or $checksums[0] -cne "$env:EXPECTED_EXE  Paperroom.exe" -or
+              $checksums[1] -cne "$env:EXPECTED_ZIP  $env:PAPERROOM_NAME.zip" -or
+              (Get-FileHash -LiteralPath $standalone -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne '0.1.2') {
+            throw 'Downloaded EXEs or checksum list differed from the expected unsigned candidate.'
+          }
+          Write-Host "Both downloads contain the same EXE SHA-256 $env:EXPECTED_EXE. ZIP SHA-256 $env:EXPECTED_ZIP."
+
+          $env:PAPERROOM_UNIFIED_RECEIPT = Join-Path $folder "$env:FLOW-restore.json"
+          ./scripts/windows-highlight-workflow.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE -RelationRollupRecoveryOnly
+          if (!(Test-Path -LiteralPath $env:PAPERROOM_UNIFIED_RECEIPT -PathType Leaf)) {
+            throw 'Missing native integration receipt.'
+          }
+      - name: Retain native integration receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-rollup-recovery-GNU-draft-native-rollup-recovery
+          path: ${{ runner.temp }}/gnu-rollup-recovery/*-restore.json
+          if-no-files-found: error

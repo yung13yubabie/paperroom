@@ -11,6 +11,10 @@ pub(super) const SCHEMA:&str="CREATE TABLE IF NOT EXISTS obsidian_base_typed_col
  CREATE TABLE IF NOT EXISTS obsidian_base_typed_groups(view_id INTEGER PRIMARY KEY REFERENCES collection_views(id) ON DELETE CASCADE,
  label TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('boolean','number')));";
 
+// Rows exist only for descending imported views. Existing groups keep their original order.
+pub(super) const DESCENDING_GROUP_SCHEMA:&str="CREATE TABLE IF NOT EXISTS obsidian_base_descending_groups(
+ view_id INTEGER PRIMARY KEY REFERENCES obsidian_base_typed_groups(view_id) ON DELETE CASCADE);";
+
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(super) struct Test { pub key:String, pub op:String, pub operand:String, pub kind:&'static str }
 

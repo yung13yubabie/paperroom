@@ -83,7 +83,7 @@ fn run(e: &Expr, lookup: &impl Fn(&str,&[String])->Result<Value>, depth: usize) 
             let Value::Bool(test)=run(&args[0],lookup,depth+1)? else { return Err("if 條件必須為布林值。".into()); };
             run(&args[if test {1} else {2}],lookup,depth+1)
         },
-        Expr::Call(name,args) if matches!(name.as_str(),"prop"|"typed"|"relation_count"|"relation_sum"|"date") => {
+        Expr::Call(name,args) if matches!(name.as_str(),"prop"|"typed"|"relation_count"|"relation_sum"|"field_count"|"field_sum"|"date") => {
             let mut names = Vec::with_capacity(args.len());
             for arg in args {
                 let Value::Str(text) = run(arg,lookup,depth+1)? else {
@@ -135,7 +135,7 @@ fn check_calls(e: &Expr) -> Result<()> {
         Expr::Unary(_,x) => check_calls(x),
         Expr::Binary(_,a,b) => { check_calls(a)?; check_calls(b) },
         Expr::Call(name,args) => {
-            let valid = matches!((name.as_str(),args.len()), ("if",3)|("prop"|"number"|"date"|"typed"|"relation_count",1)|("relation_sum",2));
+            let valid = matches!((name.as_str(),args.len()), ("if",3)|("prop"|"number"|"date"|"typed"|"relation_count",1)|("relation_sum"|"field_count",2)|("field_sum",3));
             if !valid { return Err("未知函式或參數數量錯誤。".into()); }
             for arg in args { check_calls(arg)?; } Ok(())
         }

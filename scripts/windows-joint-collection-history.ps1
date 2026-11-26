@@ -49,7 +49,7 @@ db, archive, phase, due, expected_hash = sys.argv[1:]
 project = 'Project 11111111111111111111111111111111'
 catalog = 'Dates 33333333333333333333333333333333_all.csv'
 with closing(sqlite3.connect(Path(db).as_uri()+'?mode=ro',uri=True)) as conn, ZipFile(archive) as z:
-    assert conn.execute('PRAGMA user_version').fetchone() == (43,)
+    assert conn.execute('PRAGMA user_version').fetchone() == (44,)
     assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
     assert not conn.execute('PRAGMA foreign_key_check').fetchall()
     source_assets = dict(conn.execute('SELECT name,content FROM attachments WHERE name IN (?,?)',(catalog,'source.txt')))

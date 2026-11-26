@@ -20,7 +20,9 @@ param(
     [switch]$NotionSourceReplacementOnly,
     [switch]$NativeChildBoardOnly,
     [switch]$VaultRelocationConflictOnly,
-    [switch]$TypedRelationBranchOnly
+    [switch]$TypedRelationBranchOnly,
+    [switch]$RelationRollupRecoveryOnly,
+    [switch]$BasesDescendingOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -1450,8 +1452,12 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
-    if ($TypedRelationBranchOnly) {
+    if ($TypedRelationBranchOnly -or $RelationRollupRecoveryOnly) {
         . (Join-Path $PSScriptRoot 'windows-typed-relation-branch.ps1')
+        return
+    }
+    if ($BasesDescendingOnly) {
+        . (Join-Path $PSScriptRoot 'windows-bases-desc.ps1')
         return
     }
     if ($PinnedCardScopeOnly -or $VaultRelocationConflictOnly) {

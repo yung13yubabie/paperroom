@@ -30,7 +30,12 @@ with closing(sqlite3.connect(Path(path).as_uri()+'?mode=ro',uri=True)) as db:
 }
 
 function Assert-NoNativeLegacyJump {
-    Click-WorkspaceButton 120
+    $null = Wait-For 'note reader owns focus and has its Links control' {
+        [PaperroomHighlightGui]::WorkspaceInForeground($window,$process.Id) -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '連結'
+    }
+    # Exercise the real native control without relying on pointer placement.
+    Command $window 120
     $menu = Wait-For 'owned native Links popup' {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
     }
@@ -41,7 +46,7 @@ function Assert-NoNativeLegacyJump {
     }
     [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
     $null = Wait-For 'legacy link menu dismissed' {
-        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0) -eq [IntPtr]::Zero
+        ![PaperroomHighlightGui]::IsWindowVisible($menu)
     }
 }
 

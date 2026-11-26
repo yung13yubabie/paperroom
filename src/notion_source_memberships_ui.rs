@@ -40,13 +40,9 @@ impl App {
                     self.rebuild();
                     label(self.widgets.status,"已開啟 Notion 來源頁的資料列。");
                 }else{
-                    let mut board=self.notebook.read_source_membership(page,hit,||
+                    let board=self.notebook.read_source_membership(page,hit,||
                         self.build_collection_layout(hit.collection,hit.collection_title.clone(),None))?;
-                    let (lane,index)=board.lanes.iter().enumerate().find_map(|(lane,(_,rows))|
-                        rows.iter().position(|row|row.id==hit.row).map(|index|(lane,index))).ok_or("資料列已不在集合中。")?;
-                    board.column=lane; board.row=index;
-                    self.activate_workspace(WorkspaceView::Kanban(board));
-                    label(self.widgets.status,&format!("已定位集合「{}」的資料列 #{}。",hit.collection_title,hit.row));
+                    self.reveal_collection_row(board,hit.row)?;
                 }
                 return Ok(())
             }

@@ -1,6 +1,41 @@
 use super::*;
 
 impl App {
+    unsafe fn pick_history_revision(&self,note:i64)->Result<Option<crate::store::note_history::Revision>> {
+        unsafe {
+            let revisions = self.notebook.note_revisions(note)?;
+            if revisions.is_empty() {
+                label(self.widgets.status, "這篇筆記尚無可還原的舊版本。");
+                return Ok(None);
+            }
+            let labels: Vec<_> = revisions.iter().map(|revision| {
+                format!("版本 {}　{}　{}　#{}", revision.version, revision.title, revision.timestamp, revision.id)
+            }).collect();
+            let items: Vec<_> = labels.iter().enumerate()
+                .map(|(index, label)| (index + 1, label.as_str())).collect();
+            let action = popup(self.hwnd, self.widgets.more, None, &items);
+            return Ok(action.checked_sub(1).and_then(|index| revisions.into_iter().nth(index)));
+        }
+    }
+
+    pub(super) unsafe fn export_history_attachment_ui(&self,note:i64)->Result<()> {
+        unsafe {
+            let Some(revision)=self.pick_history_revision(note)? else {return Ok(());};
+            let files=self.notebook.history_attachment_choices(note,&revision)?;
+            if files.is_empty() {
+                label(self.widgets.status,"這個版本沒有保存附件。");
+                return Ok(());
+            }
+            let Some(index)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.more,files.len(),|i|files[i].label()) else {return Ok(());};
+            let file=&files[index];
+            if let Some(path)=file_dialog(self.hwnd,"所有檔案\0*.*\0\0","",Some(&file.name))? {
+                self.notebook.export_history_attachment(file,&path)?;
+                label(self.widgets.status,"已另存歷史版本附件。");
+            }
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn note_history_ui(&mut self, note: i64) -> Result<()> {
         unsafe {
             let current = self.current.as_ref().filter(|current| current.row.id == note
@@ -20,19 +55,7 @@ impl App {
                     Some((title, body))
                 } else { None }
             } else { None };
-            let revisions = self.notebook.note_revisions(note)?;
-            if revisions.is_empty() {
-                label(self.widgets.status, "這篇筆記尚無可還原的舊版本。");
-                return Ok(());
-            }
-            let labels: Vec<_> = revisions.iter().map(|revision| {
-                format!("版本 {}　{}　{}　#{}", revision.version, revision.title, revision.timestamp, revision.id)
-            }).collect();
-            let items: Vec<_> = labels.iter().enumerate()
-                .map(|(index, label)| (index + 1, label.as_str())).collect();
-            let action = popup(self.hwnd, self.widgets.more, None, &items);
-            let Some(revision) = action.checked_sub(1).and_then(|index| revisions.get(index))
-            else { return Ok(()); };
+            let Some(revision) = self.pick_history_revision(note)? else { return Ok(()); };
             let preview = self.notebook.preview_note_revision(note, revision.id)?;
             let title = preview.title.as_str();
             let body = preview.body.as_str();

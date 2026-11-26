@@ -3,6 +3,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 #[path = "note_history_diff.rs"]
 pub(crate) mod diff;
+#[path = "history_attachment_export.rs"]
+mod attachment_export;
 
 use super::note_history_state::{AttachmentRestore, apply_properties, attachments_changed, checkpoint, current_properties, snapshot_properties, summaries};
 

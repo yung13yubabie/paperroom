@@ -1649,6 +1649,7 @@ impl App {
             if is_excerpt { items.push((23, "復原已移除的 PDF 標註…")); }
             items.push((24, "複製筆記與內容…"));
             items.push((27, "查看此筆記的 Canvas 位置…"));
+            items.push((28, "另存歷史版本附件…"));
             if self.editing && self.editor_ready && !self.extras.board {
                 items.extend([
                     (25, "切換選取文字的螢光標記"),
@@ -1662,6 +1663,11 @@ impl App {
                 if let Err(error) = self.edit_note_highlights(id, action == 26) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if action == 28 {
+                // Export reads only saved history. Do not flush a live editor draft.
+                if let Err(error) = self.export_history_attachment_ui(id) { self.show_error(error); }
                 return;
             }
             if action == 22 {
@@ -2602,7 +2608,9 @@ impl App {
             let origin = self.notebook.native_card_origin(board,id)?;
             items.push((8,"查看這張卡片的其他白板位置…"));
             items.push((9,"定位連線另一端…"));
+            items.push((10,"在集合中定位這張卡片…"));
             let action = popup(self.hwnd, null_mut(), Some(point), &items);
+            if action == 10 { return self.show_card_collections(&origin); }
             if action == 8 { return self.show_other_card_locations(origin); }
             if action == 7 {
                 return self.create_child_board_from_card_ui(

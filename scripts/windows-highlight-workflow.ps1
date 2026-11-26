@@ -24,10 +24,11 @@ param(
     [switch]$TypedRelationBranchOnly,
     [switch]$RelationRollupRecoveryOnly,
     [switch]$SharedNoteWorkflowOnly,
-    [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation','native-board-transfer')][string]$SharedFixtureCase='shared-workflow',
+    [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation','native-board-transfer','board-card-collection-row')][string]$SharedFixtureCase='shared-workflow',
     [switch]$VaultHeadingOnly,
     [switch]$ReceiptHistoryOnly,
     [switch]$PdfHistoryTextOnly,
+    [switch]$HistoryAttachmentExportOnly,
     [switch]$VaultDeepBacklinksOnly,
     [switch]$BasesDescendingOnly
 )
@@ -1476,6 +1477,10 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($HistoryAttachmentExportOnly) {
+        . (Join-Path $PSScriptRoot 'windows-history-attachment-export.ps1')
+        return
+    }
     if ($PdfHistoryTextOnly) {
         . (Join-Path $PSScriptRoot 'windows-pdf-history-text.ps1')
         return

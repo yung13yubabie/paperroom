@@ -214,7 +214,7 @@ pub(super) fn read_local_attachment_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(content)
 }
 
-fn publish_attachment(path: &Path, content: &[u8]) -> Result<()> {
+pub(super) fn publish_attachment(path: &Path, content: &[u8]) -> Result<()> {
     #[cfg(windows)]
     {
         let (absolute, parents) = pin_local_parents(path)?;

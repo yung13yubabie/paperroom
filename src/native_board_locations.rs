@@ -1,4 +1,6 @@
 //! Reverse lookup of native board placements by canonical note identity.
+#[path = "board_card_memberships.rs"]
+mod board_card_memberships;
 use super::{Note, Notebook, Result, read_row};
 use rusqlite::{OptionalExtension, params};
 

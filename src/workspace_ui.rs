@@ -102,6 +102,36 @@ unsafe fn choose<T>(
 }
 
 impl App {
+    pub(super) unsafe fn show_card_collections(&mut self, origin: &crate::store::native_board_locations::NativeBoardLocation) -> Result<()> {
+        let memberships = self.notebook.card_memberships(origin)?;
+        unsafe {
+            if memberships.is_empty() {
+                label(self.widgets.status,"這張卡片尚未加入一般集合。");
+                return Ok(());
+            }
+            let Some(index) = navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,memberships.len(),|i|memberships[i].label()) else {
+                return Ok(());
+            };
+            let picked = &memberships[index];
+            let layout = self.notebook.read_card_membership(origin,picked,||
+                self.build_collection_layout(picked.collection,picked.title.clone(),None))?;
+            self.reveal_collection_row(layout,origin.note)
+        }
+    }
+
+    unsafe fn reveal_collection_row(&mut self, mut layout: Kanban, note: i64) -> Result<()> {
+        let (lane,index) = layout.lanes.iter().enumerate().find_map(|(lane,(_,rows))|
+            rows.iter().position(|row|row.id==note).map(|index|(lane,index))).ok_or("資料列已不在集合中。")?;
+        layout.column=lane;
+        layout.row=index;
+        let status=format!("已定位集合「{}」的資料列 #{}。",layout.title,note);
+        unsafe {
+            self.activate_workspace(WorkspaceView::Kanban(layout));
+            label(self.widgets.status,&status);
+        }
+        Ok(())
+    }
+
     unsafe fn activate_workspace(&mut self, view: WorkspaceView) {
         unsafe {
             self.cancel_workspace_drag();

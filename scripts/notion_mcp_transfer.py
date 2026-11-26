@@ -10,6 +10,8 @@ import zipfile
 from pathlib import Path
 
 SCHEMA = "paperroom-notion-mcp-transfer/1"
+REFERENCE_SCHEMA = "paperroom-notion-mcp-transfer/2"
+REFERENCE_LIMIT = 2048
 INPUT_LIMIT = 8 * 1024 * 1024
 PAGE_LIMIT = 4 * 1024 * 1024
 LIMITATIONS = [
@@ -48,12 +50,70 @@ def add_member(archive, name, data):
     archive.writestr(entry, data)
 
 
+def add_reference_notes(archive, references, approved, manifest):
+    """Project only confirmed direct paragraph page mentions; never inspect Markdown for IDs."""
+    if not isinstance(references, list) or len(references) > REFERENCE_LIMIT:
+        raise ValueError("expected up to 2048 explicit reference records")
+    records = []
+    by_source = {}
+    block_owners = {}
+    for ref in references:
+        require_keys(ref, ["source_page_id", "block_id", "block_parent_page_id", "block_type",
+                           "rich_text_type", "mention_type", "target_page_id", "code"])
+        source = page_id(ref["source_page_id"])
+        block = page_id(ref["block_id"])
+        parent = page_id(ref["block_parent_page_id"])
+        if source not in approved or source != parent:
+            raise ValueError("reference must come from a confirmed page's direct child block")
+        if block_owners.setdefault(block, parent) != parent:
+            raise ValueError("conflicting parent IDs for the same source block")
+        if type(ref["code"]) is not bool or any(not isinstance(ref[k], str)
+                for k in ("block_type", "rich_text_type", "mention_type")):
+            raise ValueError("invalid reference type evidence")
+        receipt = {"source_page_id": source, "block_id": block}
+        records.append(receipt)
+        if (ref["block_type"] != "paragraph" or ref["rich_text_type"] != "mention"
+                or ref["mention_type"] != "page" or ref["code"]):
+            receipt["result"] = "unsupported_type_or_code"
+            continue
+        target = page_id(ref["target_page_id"])
+        if target not in approved:
+            receipt["result"] = "target_outside_confirmed_batch"
+            continue
+        receipt["target_page_id"] = target
+        targets = by_source.setdefault(source, set())
+        receipt["result"] = "already_listed" if target in targets else "listed"
+        targets.add(target)
+
+    members = []
+    titles = {p["source_page_id"]: p["title"] for p in manifest["pages"]}
+    for source, targets in sorted(by_source.items()):
+        name = f"Page {source}/Local page references.md"
+        lines = ["# 本機頁面引用", "", "這是紙間依已確認的 Notion 頁面提及產生的導覽。", ""]
+        for target in sorted(targets):
+            # Escape Markdown punctuation so a supplied title cannot add markup.
+            label = re.sub(r"([!-/:-@\[-`{-~])", r"\\\1", titles[target])
+            lines.append(f"- [{label} ({target})](../Page%20{target}.md)")
+        data = ("\n".join(lines) + "\n").encode("utf-8")
+        if len(data) > PAGE_LIMIT:
+            raise ValueError("reference companion exceeds the Markdown page limit")
+        add_member(archive, name, data)
+        members.append({"source_page_id": source, "member": name,
+                        "member_sha256": hashlib.sha256(data).hexdigest()})
+    manifest["reference_records"] = records
+    manifest["reference_companions"] = members
+
+
 def build(raw):
     if len(raw) > INPUT_LIMIT:
         raise ValueError("input exceeds 8 MiB")
     source = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
-    require_keys(source, ["schema", "confirmed_page_ids", "pages"])
-    if source["schema"] != SCHEMA:
+    schema = source.get("schema") if isinstance(source, dict) else None
+    keys = ["schema", "confirmed_page_ids", "pages"]
+    if schema == REFERENCE_SCHEMA:
+        keys.append("confirmed_page_references")
+    require_keys(source, keys)
+    if schema not in (SCHEMA, REFERENCE_SCHEMA):
         raise ValueError("unknown transfer schema")
     approved = source["confirmed_page_ids"]
     pages = source["pages"]
@@ -62,7 +122,7 @@ def build(raw):
     ids = {page_id(item) for item in approved}
     if len(ids) != len(approved) or not isinstance(pages, list) or len(pages) != len(ids):
         raise ValueError("expected one record per unique confirmed page")
-    manifest = {"schema": SCHEMA, "original_sha256": hashlib.sha256(raw).hexdigest(),
+    manifest = {"schema": schema, "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "limitations": LIMITATIONS, "pages": []}
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
@@ -90,6 +150,11 @@ def build(raw):
             manifest["pages"].append({"source_page_id": identity, "member": name,
                                       "body_sha256": hashlib.sha256(body_bytes).hexdigest(),
                                       "member_sha256": hashlib.sha256(data).hexdigest()})
+            if schema == REFERENCE_SCHEMA:
+                manifest["pages"][-1]["title"] = title
+        if schema == REFERENCE_SCHEMA:
+            add_reference_notes(archive, source["confirmed_page_references"],
+                                {p["source_page_id"] for p in manifest["pages"]}, manifest)
         add_member(archive, "paperroom-transfer/original.json", raw)
         add_member(archive, "paperroom-transfer/manifest.json",
                    json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))

@@ -11,8 +11,7 @@ fn only_fields(value: &Value, allowed: &[&str]) -> bool {
     value.as_object().is_some_and(|fields| fields.keys().all(|key| allowed.contains(&key.as_str())))
 }
 
-fn layout(raw: String, notes: &HashMap<String, i64>) -> Result<Layout> {
-    let document = crate::canvas::parse(raw)?;
+fn layout(document: &crate::canvas::Document, notes: &HashMap<String, i64>) -> Result<Layout> {
     let root = document.json();
     if !only_fields(root, &["nodes", "edges"]) {
         return Err("畫布含有無法轉入原生白板的額外欄位。".into());
@@ -65,35 +64,59 @@ fn layout(raw: String, notes: &HashMap<String, i64>) -> Result<Layout> {
     Ok(Layout {cards, edges})
 }
 
+#[derive(Default)]
+pub(crate) struct CompanionReport {
+    pub(crate) boards: usize,
+    pub(crate) canvases: usize,
+    pub(crate) skipped: usize,
+    pub(crate) details: Vec<String>,
+}
+
 pub(super) fn import_companion_boards(
     db: &Connection, documents: Vec<(String, String)>, notes: &HashMap<String, i64>,
-) -> Result<(usize, Vec<String>)> {
-    let mut created = 0;
-    let mut skipped = Vec::new();
+) -> Result<CompanionReport> {
+    let mut report = CompanionReport::default();
     for (member, raw) in documents {
         let filename = member.rsplit('/').next().unwrap_or("");
         let title = filename.rsplit_once('.').filter(|(_, ext)| ext.eq_ignore_ascii_case("canvas"))
             .map(|(stem, _)| stem).unwrap_or("");
         if !windows_zip_path(&member) || title.is_empty() || title.trim() != title || title.chars().count() > MAX_TITLE_CHARS {
-            skipped.push(format!("{member}：白板檔名或路徑無法保留。"));
+            report.skipped += 1;
+            report.details.push(format!("{member}：已略過，白板檔名或路徑無法保留。"));
             continue;
         }
-        let layout = match layout(raw, notes) {
-            Ok(layout) => layout,
-            Err(error) => { skipped.push(format!("{member}：{error}")); continue; }
+        let document = match crate::canvas::parse(raw) {
+            Ok(document) => document,
+            Err(error) => {
+                report.skipped += 1;
+                report.details.push(format!("{member}：已略過，JSON Canvas 無法讀取。{error}"));
+                continue;
+            }
         };
-        if db.query_row("SELECT EXISTS(SELECT 1 FROM boards WHERE title=?1)", [title], |r| r.get::<_, bool>(0))? {
-            skipped.push(format!("{member}：已有同名白板，原白板保留。"));
+        let native = layout(&document, notes);
+        let reason = match &native {
+            Err(error) => Some(error.to_string()),
+            Ok(_) if db.query_row("SELECT EXISTS(SELECT 1 FROM boards WHERE title=?1)", [title], |r| r.get::<_, bool>(0))? =>
+                Some("已有同名原生白板。".to_owned()),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            // No Vault binding here: its resolver can normalize paths beyond the
+            // exact source mapping promised for a Heptabase companion.
+            let id = super::workspace::save_canvas_on(db, &member, &document)?;
+            report.canvases += 1;
+            report.details.push(format!("{member}：已保存為未綁定的可編輯 Canvas（#{id}）。{reason}"));
             continue;
         }
+        let layout = native?;
         let board = create_board_on(db, title)?;
         let mut card = db.prepare_cached("INSERT INTO board_cards(board_id,note_id,x,y) VALUES(?1,?2,?3,?4)")?;
         for c in layout.cards { card.execute(params![board,c.note,c.x,c.y])?; }
         let mut edge = db.prepare_cached("INSERT INTO board_edges(board_id,from_note,to_note) VALUES(?1,?2,?3)")?;
         for (a,b) in layout.edges { edge.execute(params![board,a,b])?; }
-        created += 1;
+        report.boards += 1;
     }
-    Ok((created, skipped))
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -109,9 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn companion_boards_share_exact_notes_and_skip_unrepresentable_drawings() -> Result<()> {
+    fn companion_boards_share_exact_notes_and_keep_editable_drawings() -> Result<()> {
         let mut db = Connection::open_in_memory()?;
-        db.execute_batch("CREATE TABLE boards(id INTEGER PRIMARY KEY,title TEXT COLLATE NOCASE UNIQUE);
+        db.execute_batch("CREATE TABLE saved_canvases(id INTEGER PRIMARY KEY,title TEXT NOT NULL,source TEXT NOT NULL);
+            CREATE TABLE boards(id INTEGER PRIMARY KEY,title TEXT COLLATE NOCASE UNIQUE);
             CREATE TABLE board_cards(board_id INTEGER,note_id INTEGER,x INTEGER,y INTEGER,PRIMARY KEY(board_id,note_id));
             CREATE TABLE board_edges(board_id INTEGER,from_note INTEGER,to_note INTEGER,PRIMARY KEY(board_id,from_note,to_note));")?;
         let tx = db.transaction()?;
@@ -135,11 +159,12 @@ mod tests {
         group["nodes"][1]["type"] = "group".into();
         let inputs = [("分鏡",first),("參考",second),("箭頭",arrow),("重放",repeated),("缺件",ambiguous),
             ("擴充",unknown),("疊放",overlap),("標籤",labelled),("群組",group)];
-        let (count, skips) = import_companion_boards(&tx, inputs.into_iter()
+        let report = import_companion_boards(&tx, inputs.into_iter()
             .map(|(name, doc)| (format!("手稿/{name}.canvas"),doc.to_string())).collect(), &notes)?;
-        assert_eq!(count, 2);
-        assert_eq!(skips.len(), 7);
-        assert!(skips.iter().all(|s| s.starts_with("手稿/") && s.contains(".canvas：")));
+        assert_eq!(report.boards, 2);
+        assert_eq!(report.canvases, 7);
+        assert_eq!(report.details.len(), 7);
+        assert!(report.details.iter().all(|s| s.starts_with("手稿/") && s.contains(".canvas：")));
         assert_eq!(tx.query_row("SELECT count(*) FROM boards", [], |r| r.get::<_, i64>(0))?, 2);
         assert_eq!(tx.query_row("SELECT count(*) FROM board_edges WHERE from_note=7 AND to_note=42", [], |r| r.get::<_, i64>(0))?, 2);
         let positions = tx.prepare("SELECT note_id,x,y FROM board_cards ORDER BY board_id,note_id")?

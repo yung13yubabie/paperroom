@@ -659,7 +659,7 @@ impl Notebook {
     pub(crate) fn import_heptabase_handoff(
         &mut self, folder: &str, files: Vec<crate::archive::ImportedPage>,
         media: migration_media::MediaPlan, handoff: crate::archive::HeptabaseHandoff,
-    ) -> Result<(i64, usize, Vec<String>)> {
+    ) -> Result<(i64, heptabase_boards::CompanionReport)> {
         self.import_pages_with_handoff(folder, files, true, media, None, None, Some(handoff))
     }
 
@@ -673,7 +673,7 @@ impl Notebook {
         portable_links: Option<vault_zip_links::LinkPlan>,
     ) -> Result<i64> {
         self.import_pages_with_handoff(folder, files, vault, media, csv, portable_links, None)
-            .map(|(root, _, _)| root)
+            .map(|(root, _)| root)
     }
 
     fn import_pages_with_handoff(
@@ -685,7 +685,7 @@ impl Notebook {
         csv: Option<notion_handoff::CsvSources>,
         portable_links: Option<vault_zip_links::LinkPlan>,
         handoff: Option<crate::archive::HeptabaseHandoff>,
-    ) -> Result<(i64, usize, Vec<String>)> {
+    ) -> Result<(i64, heptabase_boards::CompanionReport)> {
         use std::collections::HashMap;
 
         let tx = self
@@ -764,17 +764,15 @@ impl Notebook {
         if let Some(links) = portable_links {
             links.rebind(&tx, root)?;
         }
-        let (boards, warnings) = if let Some(handoff) = handoff {
-            let (boards, board_warnings) =
-                heptabase_boards::import_companion_boards(&tx, handoff.canvases, &exact_sources)?;
-            let mut warnings = handoff.warnings;
-            warnings.extend(board_warnings);
-            (boards, warnings)
+        let report = if let Some(handoff) = handoff {
+            let mut report = heptabase_boards::import_companion_boards(&tx, handoff.canvases, &exact_sources)?;
+            report.details.extend(handoff.warnings);
+            report
         } else {
-            (0, Vec::new())
+            heptabase_boards::CompanionReport::default()
         };
         tx.commit()?;
-        Ok((root, boards, warnings))
+        Ok((root, report))
     }
 }
 

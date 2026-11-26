@@ -42,9 +42,9 @@
 - **匯入 Markdown**：選擇 **檔案 → 匯入 Markdown**，讀取 UTF-8 編碼的 `.md` 或 `.markdown` 檔案。
 - **匯入 Notion**：在 Notion 匯出時選擇 **Markdown & CSV** 並勾選 **Include subpages**，再於紙間選擇 **匯入 Notion Markdown ZIP**。紙間依包內路徑建立 Markdown 頁面與子頁，保留可辨識的包內附件及原始 CSV，並列出未能匯入的項目。
 - **先看 Notion CSV**：選 **檔案 → 預覽 Notion ZIP 關聯（唯讀）**，選定 ZIP 和其中一份 CSV，再選 **檢視原始 CSV**。關聯預覽需要明確的來源頁面 ID，只顯示候選結果，不會寫入工作區。匯入不會把原始 CSV 還原成 Notion 資料庫，也不會重建原有關聯或公式。
-- **Notion MCP 文字交接**使用選用的[離線封裝工具](docs/NOTION-MCP-TRANSFER.md)，將明確選取的頁面匯入現有 Notion ZIP 入口。來源原始收據留在自訂交接 ZIP，原廠 Markdown & CSV 入口繼續支援。
-- **Obsidian Bases**先在紙間開啟已匯入的 Vault 筆記，再選 **檔案 → 匯入 Obsidian Bases 檢視**。支援部分表格與清單、資料夾條件及欄位順序。檢視參照現有筆記，並將原始 `.base` 收在來源筆記的附件。檔案衍生欄位只顯示在本次匯入的集合。這些欄位與成員反映匯入當下，後續 Vault 變更不會自動同步。公式、frontmatter 欄位與其他未支援語法會提示停止。
-- **Heptabase 備份**可透過 **檔案 → 匯入 Markdown ZIP（相對附件）** 帶入 Markdown 及可辨識的包內附件。非巢狀 ZIP 若帶有 `All-Data.json`，紙間依原始 Markdown 路徑解析同包筆記連結。同包另外放入的標準 JSON Canvas 可依完整路徑，在多張紙間白板重用同一篇筆記。此處支援普通 232 × 114 Markdown 檔案卡與無箭頭連線，其餘畫布會列出略過原因；ZIP 成員本身損壞或無法讀取時，會停止匯入。原廠 `All-Data.json` 的配置與資料庫未還原，請保留原 ZIP。
+- **Notion MCP 文字交接**使用選用的[離線封裝工具](docs/NOTION-MCP-TRANSFER.md)，將明確選取的頁面匯入現有 Notion ZIP 入口。來源原始收據留在自訂交接 ZIP。若另外提供已確認的同批頁面引用，紙間會在來源頁下建立「本機頁面引用」，用來開啟對應筆記。原廠 Markdown & CSV 入口仍可使用。
+- **Obsidian Bases**先在紙間開啟已匯入的 Vault 筆記，再選 **檔案 → 匯入 Obsidian Bases 檢視**。支援部分表格與清單、資料夾條件及欄位順序。檢視參照現有筆記，並將原始 `.base` 收在來源筆記的附件。欄位可顯示檔名、資料夾、相對路徑、副檔名與已儲存 Markdown 頁首的單行值。值和成員取自匯入當下，後續 Vault 變更不會自動同步。選到無法識別的 YAML 欄位、公式或其他未支援語法時，紙間會顯示原因。
+- **Heptabase 備份**可透過 **檔案 → 匯入 Markdown ZIP（相對附件）** 帶入 Markdown 及可辨識的包內附件。非巢狀 ZIP 若帶有 `All-Data.json`，紙間依原始 Markdown 路徑解析同包筆記連結。同包另外放入的標準 JSON Canvas 可依完整路徑，在多張紙間白板重用同一篇筆記。普通 232 × 114 Markdown 檔案卡及無箭頭連線可成為原生白板。無法完整轉換但能讀取的標準圖檔，會保留為可編輯的 Canvas。可從 **檔案 → 開啟已匯入的 Canvas** 找到它，不會自動將檔案節點綁到本機筆記。匯入報告會列出無法讀取或未帶入的項目。原廠 `All-Data.json` 的配置與資料庫未還原，請保留原 ZIP。
 - **匯出單篇**：選擇 **匯出目前筆記為 Markdown**。這只輸出目前頁面的文字。
 - **備份整個工作區**：選擇 **備份工作區** 並使用新的檔名，可保留筆記、白板位置、標星和垃圾桶。
 - **另開備份**：在另一個資料夾放一份 `Paperroom.exe`，於其旁建立 `paperroom-data` 資料夾，將備份複製到其中並命名為 `notes.sqlite3`，再開啟該處的程式。如此可在原工作區之外檢視備份。

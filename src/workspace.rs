@@ -27,6 +27,20 @@ CREATE TABLE canvas_cameras(
 );
 ";
 
+pub(super) fn save_canvas_on(db: &rusqlite::Connection, title: &str, canvas: &canvas::Document) -> Result<i64> {
+    let title = super::clean_title(title);
+    let changed = db.execute(
+        "INSERT INTO saved_canvases(title,source)
+         SELECT ?1,?2
+         WHERE (SELECT count(*) FROM saved_canvases)<128
+         AND (SELECT coalesce(sum(length(CAST(source AS BLOB))),0) FROM saved_canvases)
+             +length(CAST(?2 AS BLOB)) <= ?3",
+        params![title, canvas.as_str(), MAX_CANVAS_STORAGE_BYTES],
+    )?;
+    if changed != 1 { return Err("已達工作區 Canvas 儲存上限。".into()); }
+    Ok(db.last_insert_rowid())
+}
+
 impl Notebook {
     pub(crate) fn canvas_camera(&self, id: i64) -> Result<Option<Camera>> {
         let camera = self.connection.query_row(
@@ -51,17 +65,7 @@ impl Notebook {
     }
 
     pub fn save_canvas(&self, title: &str, canvas: &canvas::Document) -> Result<i64> {
-        let title = super::clean_title(title);
-        let changed = self.connection.execute(
-            "INSERT INTO saved_canvases(title,source)
-             SELECT ?1,?2
-             WHERE (SELECT count(*) FROM saved_canvases)<128
-             AND (SELECT coalesce(sum(length(CAST(source AS BLOB))),0) FROM saved_canvases)
-                 +length(CAST(?2 AS BLOB)) <= ?3",
-            params![title, canvas.as_str(), MAX_CANVAS_STORAGE_BYTES],
-        )?;
-        if changed != 1 { return Err("已達工作區 Canvas 儲存上限。".into()); }
-        Ok(self.connection.last_insert_rowid())
+        save_canvas_on(&self.connection, title, canvas)
     }
 
     pub fn saved_canvases(&self) -> Result<Vec<(i64, String)>> {

@@ -108,6 +108,11 @@ function Snapshot29([string]$Database,[switch]$First) {
     if ($First) {[IO.File]::WriteAllText($prior27,($json -join [Environment]::NewLine),$utf27)}
 }
 
+if ($SharedFixtureCase -ne 'shared-workflow') {
+    . (Join-Path $PSScriptRoot 'windows-phase31-shared-fixture.ps1')
+    return
+}
+
 Collection27 'Source'
 BranchRelation27 canonical $false 1 exact
 BranchRelation27 canonical $false 1 decoy

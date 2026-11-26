@@ -26,3 +26,5 @@
 ## 離線不可實現的雲端服務
 
 - 邀請 Space 分享、權限、多人即時白板編輯和提供外部閱讀的即時發佈連結。[協作與權限](https://support.heptabase.com/en/articles/10510497-collaboration-and-permissions) · [發佈白板](https://support.heptabase.com/en/articles/12121546-publish-a-whiteboard)
+
+在紙間的原生白板上，以右鍵點選卡片，再選「定位連線另一端…」。清單列出同一張白板上與這張卡片相連的筆記，並附上筆記編號，方便分辨同名卡片。選取後畫面會定位到該卡；雙擊可開啟正文。這類連線可以從任一端查看。

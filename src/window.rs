@@ -2576,6 +2576,7 @@ impl App {
             }
             let origin = self.notebook.native_card_origin(board,id)?;
             items.push((8,"查看這張卡片的其他白板位置…"));
+            items.push((9,"定位連線另一端…"));
             let action = popup(self.hwnd, null_mut(), Some(point), &items);
             if action == 8 { return self.show_other_card_locations(origin); }
             if action == 7 {
@@ -2607,31 +2608,7 @@ impl App {
                 }
                 return self.refresh_board();
             }
-            if !matches!(action, 2 | 3) {
-                return Ok(());
-            }
-            let is_connected = |other| self.extras.edges.iter().any(|edge| {
-                (edge.from == id && edge.to == other) || (edge.to == id && edge.from == other)
-            });
-            let candidates = self.extras.cards.iter().filter(|card| {
-                card.id != id && is_connected(card.id) == (action == 3)
-            }).collect::<Vec<_>>();
-            if candidates.is_empty() {
-                label(self.widgets.status, "沒有符合的連線卡片。");
-                return Ok(());
-            }
-            let choices = candidates.iter().enumerate()
-                .map(|(index, card)| (index + 1, card.title.as_str()))
-                .collect::<Vec<_>>();
-            let action_id = popup(self.hwnd, null_mut(), Some(point), &choices);
-            if let Some(card) = action_id.checked_sub(1).and_then(|index| candidates.get(index)) {
-                if action == 2 {
-                    self.notebook.add_edge_on(board, id, card.id)?;
-                } else {
-                    self.notebook.remove_edge_on(board, id, card.id)?;
-                }
-                self.refresh_board()?;
-            }
+            if matches!(action,2|3|9) { return self.card_edge_menu(origin,action); }
             Ok(())
         }
     }

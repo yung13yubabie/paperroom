@@ -11,3 +11,13 @@
 `alloc-stdlib 0.2.4` 的 crate 封存沒有可收錄的授權檔名。封裝另附官方固定上游版本的原文與對應說明，並以雜湊核對。其他缺件列為未解，不能把開放原始碼宣告當成原始通知。這份清冊提供建置和通知證據。發行者仍要以實際最終產物審查適用條款與未辨識元件。
 
 沿用相同 build 腳本產出新包後，可用 `package-windows-gnu-audit.py verify --require-dependency-evidence` 與其既有必要參數重新核對下載檔。舊包仍可用一般 `verify` 查驗其原有證據。若要做真正的用戶端斷網測試，使用 [Windows GNU 候選的斷網驗收](../qa/windows-client-offline/GNU-CANDIDATE.md)。Windows Server CI 不填入用戶端結果欄。
+
+## GCC／MinGW 執行階段與再散布證據
+
+以下核對 #30 草稿 `2b442a77a9e4bad034832c07c1eba72cd42167f7` 的實際下載物。EXE SHA-256 為 `a101eb041173c80b1a360095e116dc1c83bec462d952c323aa8b8c5d445c1787`，GNU ZIP SHA-256 為 `60a2a0060d7083247e4fc6b149afbd1185d725a55bc4a5910aa1734135fb74cd`。其他候選以自己的封裝收據核對。
+
+- **GCC。** 非空最終連結成員為 `crtbegin.o`、`crtend.o` 與 `libgcc_eh.a(unwind-seh.o)`。三筆連結記錄所指檔案的雜湊均與固定 Debian `gcc-mingw-w64-x86-64-posix` 14.2.0-19+27+b1 內原件相符。該包的控制資料指向 `Built-Using: gcc-14 (= 14.2.0-19)`。上游的兩個啟動物件和 SEH 來源皆標明 GPL-3.0-or-later 搭配 GCC Runtime Library Exception 3.1。 [GCC 14.2.0 啟動物件規則](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/libgcc/config/i386/t-cygming) · [crtbegin](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/libgcc/config/i386/cygming-crtbegin.c) · [crtend](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/libgcc/config/i386/cygming-crtend.c) · [SEH](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/libgcc/unwind-seh.c) · [Debian GCC 14.2.0-19 版權](https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright)
+- **實際隨附的文字。** ZIP 另附完整 GPLv3 與 GCC Runtime Library Exception 3.1。對照 GCC 14.2.0 的原始檔，差異限於排版、版權符號及連結表示。GCC cross package 隨附的 Debian copyright 確實重印舊的 GCC 9 說明。GCC 14.2.0-19 的 Debian 來源歸屬以本節連結補足。本輪將包內兩份授權文字更新為同標籤的 `COPYING3` 與 `COPYING.RUNTIME` 原件。 [GCC 14.2.0 GPLv3 原檔](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/COPYING3) · [GCC 14.2.0 exception 原檔](https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.2.0/COPYING.RUNTIME)
+- **MinGW 與 Rust。** MinGW-w64 12.0.0-5 的啟動物件、靜態成員及 DLL 匯入封存，另對應該版 Debian copyright。Rust 1.100.0 的 14 個 sysroot 封存輸入及 `COPYRIGHT-library.html` 也逐一比對實際工具鏈。本包的 PE 有 `msvcrt.dll` 等 Windows 系統匯入。ZIP 只有一個 EXE，沒有 Windows DLL 或工具鏈封存檔。
+
+GCC 的額外許可適用於有原件聲明的執行階段，條件包含與獨立模組組合、且所有目標碼均來自符合定義的編譯流程。此配方以 Rust／LLVM 和固定 GNU 工具鏈產生並連結目標碼，關閉跨 crate LTO，未設定 GCC 中間碼外部最佳化。發行者仍需依所採配方、實際產物與各模組原條款判定適用範圍，並決定 Paperroom 自身的授權及通知提供方式。現有文件和清冊提供可追溯證據，正式發行仍需由權利人審查。 [GCC 例外條件](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html) · [Cargo LTO 設定](https://doc.rust-lang.org/cargo/reference/profiles.html#lto)

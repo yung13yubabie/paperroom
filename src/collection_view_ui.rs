@@ -1783,3 +1783,6 @@ fn current_month() -> Month {
 
 
 fn current_day() -> Result<CalendarDay> { CalendarDay::local_today() }
+
+#[path = "collection_bulk_edit_ui.rs"]
+mod bulk_edit_ui;

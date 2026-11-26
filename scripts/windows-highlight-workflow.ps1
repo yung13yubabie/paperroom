@@ -23,6 +23,7 @@ param(
     [switch]$TypedRelationBranchOnly,
     [switch]$RelationRollupRecoveryOnly,
     [switch]$SharedNoteWorkflowOnly,
+    [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation')][string]$SharedFixtureCase='shared-workflow',
     [switch]$VaultHeadingOnly,
     [switch]$ReceiptHistoryOnly,
     [switch]$BasesDescendingOnly

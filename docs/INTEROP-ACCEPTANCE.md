@@ -5,7 +5,7 @@
 | 想完成的工作 | Notion | Obsidian | Heptabase |
 | --- | --- | --- | --- |
 | 把頁面、欄位與附件搬進紙間 | [資料列和原始頁面](INTEROP-NOTION.md) | [Vault 與 Bases](INTEROP-OBSIDIAN.md) | [Markdown 及伴隨畫布](INTEROP-HEPTABASE.md) |
-| 在本機修改和導覽 | [集合、排序和來源關聯](INTEROP-NOTION.md#已實裝且驗證) | [動態檢視與 Canvas 卡片](INTEROP-OBSIDIAN.md#已實裝且驗證) | [筆記卡和子白板](INTEROP-HEPTABASE.md#已實裝且驗證) |
+| 在本機修改和導覽 | [集合、批次欄位編輯和來源關聯](INTEROP-NOTION.md#已實裝且驗證) | [動態檢視與 Canvas 卡片](INTEROP-OBSIDIAN.md#已實裝且驗證) | [筆記卡、連線端點和子白板](INTEROP-HEPTABASE.md#已實裝且驗證) |
 | 檢查原廠備份或連線服務 | [原廠 ZIP、協作和發佈](INTEROP-NOTION.md#已實裝待真實來源) | [原廠設定、Sync 和 Publish](INTEROP-OBSIDIAN.md#未實裝) | [All-Data、Space 和分享](INTEROP-HEPTABASE.md#已實裝待真實來源) |
 
 - **已實裝且驗證**表示已從指定入口跑完所述流程。合成輸入、原廠實檔和實際原廠介面證據各以連結標出。Windows Server 驗收只覆蓋所列 Windows Server 情境。

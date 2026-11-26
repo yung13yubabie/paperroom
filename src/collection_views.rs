@@ -1112,14 +1112,20 @@ impl Notebook {
     pub(crate) fn edit_collection_field(
         &self, collection: i64, note_id: i64, status: &str, edit: FieldEdit<'_>,
     ) -> Result<()> {
-        let key = key_checked(edit.key)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Self::write_member_field(&tx,collection,note_id,status,edit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_member_field(tx:&Transaction<'_>, collection:i64, note_id:i64, status:&str, edit:FieldEdit<'_>)->Result<()> {
+        let key=key_checked(edit.key)?;
         let member: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collection_notes c JOIN notes n ON n.id=c.note_id
                 WHERE c.collection_id=?1 AND c.note_id=?2 AND c.status=?3 AND n.trash_root IS NULL)",
             params![collection, note_id, status], |row| row.get(0),
         )?;
-        if !member || lookup(&tx, key)? != Some(edit.kind) {
+        if !member || lookup(tx, key)? != Some(edit.kind) {
             return Err("資料列或欄位型別已變更，請重新整理。".into());
         }
         let previous: Option<String> = tx.query_row(
@@ -1136,15 +1142,14 @@ impl Notebook {
             return Err(format!("「{key}」需要輸入{}。", edit.kind.hint()).into());
         }
         if edit.kind == PropertyType::Date {
-            validate_collection_field_dates(&tx, note_id, [(key, edit.value.and_then(CalendarDay::parse)), ("", None)])?;
+            validate_collection_field_dates(tx, note_id, [(key, edit.value.and_then(CalendarDay::parse)), ("", None)])?;
         }
-        super::note_history_state::checkpoint(&tx, note_id)?;
+        super::note_history_state::checkpoint(tx, note_id)?;
         if let Some(value) = edit.value {
-            write_value(&tx, note_id, key, value, previous.is_none())?;
+            write_value(tx, note_id, key, value, previous.is_none())?;
         } else {
-            super::properties::delete_value(&tx, note_id, key)?;
+            super::properties::delete_value(tx, note_id, key)?;
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -2709,3 +2714,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[path = "collection_bulk_edit.rs"]
+pub(crate) mod bulk_edit;

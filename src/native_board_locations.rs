@@ -2,12 +2,22 @@
 use super::{Note, Notebook, Result, read_row};
 use rusqlite::{OptionalExtension, params};
 
+#[derive(Clone)]
 pub(crate) struct NativeBoardLocation {
     pub board: i64,
     pub title: String,
     pub note: i64,
     token: String,
     ancestors: Vec<(i64,String)>,
+}
+
+pub(crate) struct EdgeEndpoint {
+    pub(crate) location: NativeBoardLocation,
+    name: String,
+}
+
+impl EdgeEndpoint {
+    pub(crate) fn label(&self) -> String { format!("[#{}]　{}",self.location.note,self.name) }
 }
 
 impl NativeBoardLocation {
@@ -67,6 +77,60 @@ impl Notebook {
         if !rows.iter().any(|r|r.board==origin.board && r.token==origin.token) { return Err("來源卡片已變更。".into()); }
         tx.commit()?;
         Ok(rows.into_iter().filter(|r|r.board!=origin.board).collect())
+    }
+
+    fn active_placement_name(&self, location: &NativeBoardLocation) -> Result<String> {
+        Ok(self.connection.query_row("SELECT n.title FROM board_cards c
+            JOIN notes n ON n.id=c.note_id JOIN note_link_identities i ON i.note_id=n.id
+            WHERE c.board_id=?1 AND n.id=?2 AND i.token=?3 AND n.trash_root IS NULL",
+            params![location.board,location.note,location.token],|r|r.get(0))
+            .optional()?.ok_or("卡片已離開白板或身分已變更。")?)
+    }
+
+    pub(crate) fn edge_endpoints(&self, origin:&NativeBoardLocation, connected:bool) -> Result<Vec<EdgeEndpoint>> {
+        let tx=self.connection.unchecked_transaction()?;
+        self.validate_board_path(origin)?;
+        self.active_placement_name(origin)?;
+        let mut stmt=tx.prepare("SELECT n.id,n.title,i.token FROM board_cards c JOIN notes n ON c.note_id=n.id
+            JOIN note_link_identities i ON i.note_id=n.id WHERE c.board_id=?1 AND n.id<>?2 AND n.trash_root IS NULL
+            AND EXISTS(SELECT 1 FROM board_edges e WHERE e.board_id=c.board_id
+                AND e.from_note=min(n.id,?2) AND e.to_note=max(n.id,?2))=?3 ORDER BY n.id")?;
+        let endpoints=stmt.query_map(params![origin.board,origin.note,connected],|r|Ok(EdgeEndpoint {
+            location:NativeBoardLocation { note:r.get(0)?, token:r.get(2)?, ..origin.clone() }, name:r.get(1)?,
+        }))?.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        tx.commit()?;
+        Ok(endpoints)
+    }
+
+    fn validate_edge_endpoint(&self, origin:&NativeBoardLocation, endpoint:&EdgeEndpoint, connected:bool) -> Result<()> {
+        let target=&endpoint.location;
+        if origin.board!=target.board || origin.ancestors!=target.ancestors || origin.note==target.note {
+            return Err("請重新選取目前白板的連線端點。".into());
+        }
+        self.validate_board_path(origin)?;
+        self.active_placement_name(origin)?;
+        if self.active_placement_name(target)?!=endpoint.name { return Err("目的卡片名稱已變更，請重新選取。".into()); }
+        let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM board_edges WHERE board_id=?1
+            AND from_note=min(?2,?3) AND to_note=max(?2,?3))",params![origin.board,origin.note,target.note],|r|r.get(0))?;
+        if exists!=connected { return Err("兩張卡片的連線已變更，請重新選取。".into()); }
+        Ok(())
+    }
+
+    pub(crate) fn follow_card_edge(&self, origin:&NativeBoardLocation, endpoint:&EdgeEndpoint) -> Result<()> {
+        let tx=self.connection.unchecked_transaction()?;
+        self.validate_edge_endpoint(origin,endpoint,true)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn edit_card_edge(&self, origin:&NativeBoardLocation, endpoint:&EdgeEndpoint, add:bool) -> Result<()> {
+        let tx=rusqlite::Transaction::new_unchecked(&self.connection,rusqlite::TransactionBehavior::Immediate)?;
+        self.validate_edge_endpoint(origin,endpoint,!add)?;
+        if add { self.add_edge_on(origin.board,origin.note,endpoint.location.note)?; }
+        else { self.remove_edge_on(origin.board,origin.note,endpoint.location.note)?; }
+        tx.commit()?;
+        Ok(())
     }
 
     fn validate_board_path(&self, location:&NativeBoardLocation) -> Result<()> {
@@ -169,6 +233,101 @@ mod tests {
         assert!(restored.cards_on(leaf)?.iter().any(|card|card.id==a && (card.x,card.y)==(3250,780)));
         drop(restored);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn edge_picker_follows_only_the_chosen_canonical_neighbor_and_rechecks_edits() -> Result<()> {
+        let dir=super::super::tests::data_dir();
+        let path=dir.join("live.db");
+        let backup=dir.join("backup.db");
+        let mut db=Notebook::open(&path,false)?;
+        let target=db.add(None,"鏡頭","正本")?;
+        let decoy=db.add(None,"鏡頭","備選")?;
+        let a=db.add(None,"場記","來源")?;
+        let root=db.create_board("組織")?;
+        let board=db.new_child_board(root,"工作板")?;
+        let elsewhere=db.create_board("另一板")?;
+        for note in [a,target,decoy] { db.add_card_on(board,note)?; }
+        for note in [a,decoy] { db.add_card_on(elsewhere,note)?; }
+        db.move_card_on(board,target,3400,3000)?;
+        db.add_edge_on(elsewhere,a,decoy)?;
+        db.set_relation(a,"參考",decoy,true)?;
+        let bytes=dir.join("場記.txt");
+        fs::write(&bytes,"正本附件")?;
+        let file=db.import_attachment(target,&bytes)?;
+        let origin=db.native_card_origin(board,a)?;
+        let choices=db.edge_endpoints(&origin,false)?;
+        assert_eq!(choices.iter().map(EdgeEndpoint::label).collect::<Vec<_>>(),
+            [format!("[#{target}]　鏡頭"),format!("[#{decoy}]　鏡頭")]);
+        db.edit_card_edge(&origin,&choices[0],true)?;
+        assert!(db.edit_card_edge(&origin,&choices[0],true).is_err());
+        let linked=db.edge_endpoints(&origin,true)?;
+        assert_eq!(linked.len(),1);
+        let selected=&linked[0];
+        let observed:i64=db.connection.query_row("SELECT total_changes()",[],|r|r.get(0))?;
+        db.follow_card_edge(&origin,selected)?;
+        assert_eq!(db.connection.query_row("SELECT total_changes()",[],|r|r.get::<_,i64>(0))?,observed);
+        let opposite=db.native_card_origin(board,target)?;
+        assert_eq!(db.edge_endpoints(&opposite,true)?[0].location.note,a);
+        let mut writer=Notebook::open(&path,false)?;
+        writer.remove_edge_on(board,a,target)?;
+        assert!(db.follow_card_edge(&origin,selected).is_err());
+        assert!(db.edit_card_edge(&origin,selected,false).is_err());
+        writer.add_edge_on(board,a,target)?;
+        writer.save(target,1,"新鏡頭","正本")?;
+        assert!(db.follow_card_edge(&origin,selected).is_err());
+        let current=db.edge_endpoints(&origin,true)?.remove(0);
+        db.follow_card_edge(&origin,&current)?;
+        db.backup(&backup)?;
+        writer.reparent_board(board,Some(root),None)?;
+        assert!(db.edit_card_edge(&origin,&current,false).is_err());
+        let refreshed=db.native_card_origin(board,a)?;
+        let next=db.edge_endpoints(&refreshed,true)?.remove(0);
+        writer.trash(target)?;
+        assert!(db.follow_card_edge(&refreshed,&next).is_err());
+        writer.restore(target)?;
+        db.edit_card_edge(&refreshed,&next,false)?;
+        assert!(db.edges_on(board)?.is_empty());
+        assert_eq!(db.edges_on(elsewhere)?.len(),1);
+        drop(writer);drop(db);
+        let db=Notebook::open(&backup,false)?;
+        db.follow_card_edge(&origin,&current)?;
+        assert_eq!(db.note_at_native_board_location(&current.location)?.body,"正本");
+        assert_eq!(db.relations(a)?[0].1.id,decoy);
+        assert!(db.cards_on(board)?.iter().any(|v|v.id==target && (v.x,v.y)==(3400,3000)));
+        db.save_attachment_copy(file,&dir.join("匯出.txt"))?;
+        assert_eq!(fs::read(dir.join("匯出.txt"))?,"正本附件".as_bytes());
+        drop(db);fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reusing_a_deleted_numeric_id_cannot_retarget_the_stale_edge_picker() -> Result<()> {
+        let dir=super::super::tests::data_dir();
+        let file=dir.join("reuse.db");
+        let mut db=Notebook::open(&file,false)?;
+        let from=db.add(None,"共同","來源")?;
+        let old=db.add(None,"同一個標題","過去的正本")?;
+        db.add_card_on(1,from)?;
+        db.add_card_on(1,old)?;
+        db.add_edge_on(1,from,old)?;
+        let origin=db.native_card_origin(1,from)?;
+        let old_target=db.edge_endpoints(&origin,true)?.remove(0);
+        let mut writer=Notebook::open(&file,false)?;
+        writer.remove_card_on(1,old)?;
+        // Represent a permanently discarded note in a synthetic database.
+        writer.connection.execute("DELETE FROM notes WHERE id=?1",[old])?;
+        let new=writer.add(None,"同一個標題","另一篇新的正文")?;
+        assert_eq!(new,old);
+        writer.add_card_on(1,new)?;
+        writer.add_edge_on(1,from,new)?;
+        assert!(db.follow_card_edge(&origin,&old_target).is_err());
+        assert!(db.edit_card_edge(&origin,&old_target,false).is_err());
+        let fresh=db.edge_endpoints(&origin,true)?.remove(0);
+        db.follow_card_edge(&origin,&fresh)?;
+        assert_eq!(db.note_at_native_board_location(&fresh.location)?.body,"另一篇新的正文");
+        drop(writer);drop(db);fs::remove_dir_all(dir)?;
         Ok(())
     }
 

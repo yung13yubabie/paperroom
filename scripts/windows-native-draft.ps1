@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExeSha256,
-    [Parameter(Mandatory)][ValidateSet('shared-workflow','vault-heading','receipt-history')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('shared-workflow','vault-heading','receipt-history','collection-bulk-edit','native-board-edge-navigation')][string]$Scenario,
     [Parameter(Mandatory)][string]$Receipt
 )
 Set-StrictMode -Version Latest
@@ -28,6 +28,8 @@ Write-Host "Native desktop: $os. Scenario: $Scenario. Candidate: $ExeSha256."
 $control=switch ($Scenario) {
     'receipt-history' { @{ReceiptHistoryOnly=$true} }
     'vault-heading' { @{VaultHeadingOnly=$true} }
+    'collection-bulk-edit' { @{SharedNoteWorkflowOnly=$true; SharedFixtureCase='collection-bulk-edit'} }
+    'native-board-edge-navigation' { @{SharedNoteWorkflowOnly=$true; SharedFixtureCase='native-board-edge-navigation'} }
     'shared-workflow' { @{SharedNoteWorkflowOnly=$true} }
 }
 $temp=Join-Path (Split-Path -Parent $out) ([guid]::NewGuid().ToString()+'.partial.json')

@@ -74,7 +74,7 @@
 | 公式運算 | 部分 | 可編輯既有集合公式並在保存後重算。支援數字／布林／日期型別值、條件和關聯計數／加總。錯誤顯示在結果，完整語法待做。 | [官方](https://www.notion.com/help/formulas) · [formula.rs](../src/formula.rs) |
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
 | 分組 | 部分 | 集合表格與看板可依單一欄位分組。具名看板和依屬性分組的表格可收合群組並保存狀態。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [操作](UI-ACCEPTANCE.md#具名集合檢視的分組收合) |
-| 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可從同一視圖編輯已宣告的型別欄位。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
+| 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可在集合中編輯已宣告的型別欄位，或從具名表格檢視確認多筆可見資料列後，一次設定或清空同一欄。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
 | 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期篩選本週、未來七天、逾期，也可選其他週月或前後日數。條件和群組可在同層複製或移動。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [日期篩選操作](UI-ACCEPTANCE.md#集合相對日期篩選) |
 | 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用，支援屬性、公式結果、具名關聯的彙總筆數及加總。空值和無效值置後，關聯目標清單與自訂選項排序仍待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |
 | 資料庫範本 | 部分 | 可從現有列或空白建立範本，修改型別預設並撰寫多層 Markdown 子頁。可選根頁的關聯和附件。嵌入、子頁專屬資源與從現有筆記整棵擷取待做。 | [規格與文件](https://www.notion.com/help/database-templates) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
@@ -238,7 +238,7 @@
 | 白板獨立矩形與橢圓 | 部分 | 草稿版可新增、直接拖曳移動、以數值調整位置與尺寸，以及刪除指定形狀。原生 Windows 介面驗收及原廠手勢、樣式與匯入相容仍待核對。研究 ZIP 會拒絕匯出含形狀的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_shape_tag_ui.rs](../src/board_shape_tag_ui.rs) |
 | 白板標籤 | 部分 | 草稿版可新增、移除白板本身的標籤，並以完整標籤找白板，或一併找指定 Vault 的筆記。原生 Windows 介面驗收及原廠匯出匯入仍待核對。研究 ZIP 會拒絕匯出含白板標籤的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_tags.rs](../src/board_tags.rs) |
 | 分區 | 部分 | 可重新命名、整組移動可見成員、收合及展開，並打開來源筆記或 PDF。自由分區幾何待做。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
-| 連線 | 部分 | 同白板連線連到卡片 ID，分區平移後端點仍連到原卡片。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
+| 連線 | 部分 | 同白板連線連到筆記卡 ID，分區平移後端點仍連到原卡片。可依筆記編號選取同名端點、增刪連線或定位另一端。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
 | 卡片拖曳 | 部分 | 同板可拖曳多選物件。跨板可把選取的筆記或 PDF 摘錄卡拖至已指定的目的區，再確認位移。保留相對位置、組內連線及完整分區。文字方塊與子白板尚不支援跨板。 | [官方](https://support.heptabase.com/en/articles/17060792-heptabase-mcp-tool-reference) · [白板操作](UI-ACCEPTANCE.md#第-18-版的資料列範本區塊返回與跨板拖曳) |
 | 跨白板重用卡片 | 已驗證 | 可將多張現有筆記卡及 PDF 摘錄卡一起放到另一張白板。兩張板共用原卡片內容和來源，位置各自保存。重複放入保留原位。離線重開後，從兩張板都能看到同一次編輯。 | [官方](https://wiki.heptabase.com/how-Heptabases-founder-use-Heptabase-for-learning) · [白板操作](UI-ACCEPTANCE.md#第-16-版的篩選標題與跨板卡片) |
 | 巢狀子白板 | 已驗證 | 白板可建立、拖曳並開啟子白板，顯示並跳至目前板的任一上層。變更上層後仍保存內容。會拒絕循環與超過 16 層。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |

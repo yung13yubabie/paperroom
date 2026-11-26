@@ -684,7 +684,7 @@ impl App {
                 (18, "編輯資料列的型別欄位…"), (19, "編輯資料列關聯…"), (20, "跳至時間軸月份…"),
                 (21, "資料列範本…"), (22, "新增資料列…"), (23, "集合欄位規則…"),
                 (24, "表格與清單欄位…"), (25, "群組收合…"),
-                (26, "資料列附件…"), (27, "編輯資料列的關聯欄位…"),
+                (26, "資料列附件…"), (27, "編輯資料列的關聯欄位…"), (28, "批次編輯資料列屬性…"),
             ]);
             match action {
                 1 => {
@@ -698,6 +698,7 @@ impl App {
                 24 => return self.collection_display_menu(id, title),
                 25 => return self.collection_fold_menu(id, title),
                 26 => return self.collection_attachment_ui(id),
+                28 => return self.bulk_edit_collection(id,title),
                 27 => {
                     let rows = self.visible_collection_rows(id)?;
                     let Some(index) = navigation_ui::choose_navigation_page(hwnd, anchor, rows.len(), |i| {

@@ -40,6 +40,9 @@ BEGIN
 END;
 ";
 
+pub(crate) const BASE_SOURCE_GUIDANCE: &str =
+    "這份原始附件由 Bases 來源收據使用。請用「儲存附件副本…」另存原檔；若要使用另一份定義，可將它匯入為新來源。";
+
 pub(crate) struct Revision {
     pub id: i64,
     pub version: i64,
@@ -75,6 +78,7 @@ impl Notebook {
         let data_version = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
         let (title, body) = revision_content(&tx, note, revision)?;
         let state = snapshot_properties(&tx, revision)?;
+        let base_source_blocked = state.is_some() && super::note_history_state::changes_base_source(&tx,note,revision)?;
         let (metadata, metadata_changed) = if let Some(properties) = state {
             let changed = properties != current_properties(&tx, note)? || attachments_changed(&tx, note, revision)?;
             let files = summaries(&tx, revision)?;
@@ -91,7 +95,7 @@ impl Notebook {
             ("此舊快照只保存標題與正文。還原會保留目前的屬性與附件。".into(), false)
         };
         tx.commit()?;
-        Ok(RevisionPreview { title, body, metadata, metadata_changed, data_version })
+        Ok(RevisionPreview { title, body, metadata, metadata_changed, base_source_blocked, data_version })
     }
 
     pub(crate) fn restore_note_revision(
@@ -137,6 +141,7 @@ pub(crate) struct RevisionPreview {
     pub(crate) body: String,
     pub(crate) metadata: String,
     pub(crate) metadata_changed: bool,
+    pub(crate) base_source_blocked: bool,
     pub(crate) data_version: i64,
 }
 

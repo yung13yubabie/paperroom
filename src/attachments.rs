@@ -229,6 +229,14 @@ fn publish_attachment(path: &Path, content: &[u8]) -> Result<()> {
     })
 }
 
+fn protect_base_source(db: &rusqlite::Connection, attachment: i64) -> Result<()> {
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM base_card_receipts WHERE attachment=?1)", [attachment], |r| r.get(0),
+    )?;
+    if protected { return Err(super::note_history::BASE_SOURCE_GUIDANCE.into()); }
+    Ok(())
+}
+
 impl Notebook {
     pub fn list_attachments(&self, note: i64) -> Result<Vec<Attachment>> {
         let mut query = self.connection.prepare(
@@ -346,6 +354,10 @@ impl Notebook {
         publish_attachment(path, &content)
     }
 
+    pub(crate) fn check_attachment_removal(&self, attachment: i64) -> Result<()> {
+        protect_base_source(&self.connection, attachment)
+    }
+
     pub fn remove_attachment(&self, attachment: i64) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let note: i64 = tx.query_row(
@@ -353,6 +365,7 @@ impl Notebook {
              WHERE a.id=?1 AND n.trash_root IS NULL",
             [attachment], |row| row.get(0),
         ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
+        protect_base_source(&tx, attachment)?;
         super::note_history_state::checkpoint(&tx, note)?;
         tx.execute("DELETE FROM attachments WHERE id=?1", [attachment])?;
         tx.commit()?;

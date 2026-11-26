@@ -43,7 +43,9 @@ impl App {
             };
             let changes = crate::store::note_history::diff::comparison(before_title, before_body, title, body);
             let identical = before_title == title && before_body == body && !preview.metadata_changed;
-            let guidance = if draft.is_some() {
+            let guidance = if preview.base_source_blocked {
+                crate::store::note_history::BASE_SOURCE_GUIDANCE
+            } else if draft.is_some() {
                 "這份草稿保留在編輯器。先儲存草稿，再重新開啟預覽即可還原。"
             } else if identical {
                 "本版與目前保存內容完全相同。"
@@ -54,7 +56,7 @@ impl App {
             };
             let report = format!("比較 {baseline} 與版本 {}　{}　#{}\n{guidance}\n\n{}\n\n{changes}",
                 revision.version, revision.timestamp, revision.id, preview.metadata);
-            if draft.is_some() || identical {
+            if draft.is_some() || identical || preview.base_source_blocked {
                 return crate::dialog::show_text(self.hwnd, "筆記版本差異", &report);
             }
             if !crate::dialog::preview_decision(self.hwnd, "筆記版本差異", &report, "還原此版本", "取消")? {

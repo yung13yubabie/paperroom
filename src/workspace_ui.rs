@@ -970,6 +970,7 @@ impl App {
                         }
                     }
                     2 => {
+                        self.notebook.check_attachment_removal(file.id)?;
                         if message(hwnd, "刪除附件", "附件及其 PDF 摘錄將從工作區移除。確定刪除？",
                                    MB_OKCANCEL | MB_ICONQUESTION) == IDOK {
                             self.notebook.remove_attachment(file.id)?;

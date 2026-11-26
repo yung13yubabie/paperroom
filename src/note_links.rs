@@ -200,6 +200,8 @@ impl Notebook {
     }
 }
 
+#[path = "vault_heading_rename.rs"]
+mod vault_heading_rename;
 #[path = "vault_block_audit.rs"]
 mod vault_block_audit;
 #[path = "vault_mentions.rs"]

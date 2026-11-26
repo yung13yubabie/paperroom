@@ -1592,6 +1592,24 @@ impl App {
         }
     }
 
+    unsafe fn rename_vault_heading(&mut self,source:i64)->Result<()> {
+        unsafe {
+            let selection=self.notebook.vault_heading_choices(source)?;
+            let headings=&selection.titles;
+            if headings.is_empty(){return Err("沒有可重新命名的唯一純文字 ATX 小節。".into());}
+            let Some(i)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,headings.len(),
+                |i|headings[i].as_str()) else {return Ok(())};
+            let old=&headings[i];
+            let Some(new)=crate::dialog::prompt(self.hwnd,"重新命名 Vault 小節","新小節名稱",old,180)? else {return Ok(())};
+            let plan=self.notebook.preview_heading_rename(&selection,old,&new)?;
+            if crate::dialog::preview_decision(self.hwnd,"確認重新命名小節",&plan.summary(),"重新命名","取消")? {
+                self.notebook.apply_heading_rename(&plan)?;
+                self.open_import(source,"已重新命名 Vault 小節並更新引用。");
+            }
+            Ok(())
+        }
+    }
+
     unsafe fn open_import(&mut self, id: i64, info: &str) {
         unsafe {
             self.view = View::All;
@@ -2120,6 +2138,10 @@ impl App {
                 labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
                 labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
                 labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
+                let rename_heading = named + 4;
+                if app.notebook.graph_vault(source)?.is_some() {
+                    labels.insert(4,(rename_heading,"重新命名 Vault 小節…".to_owned()));
+                }
                 let notion_source = named + 3;
                 if app.notebook.notion_row_token(source)?.is_some() {
                     labels.insert(4, (notion_source, "連結已匯入的 Notion 來源頁…".to_owned()));
@@ -2136,6 +2158,7 @@ impl App {
                     index if index == graph => app.open_note_graph(source)?,
                     index if index == named => app.show_named_relation_navigation(source)?,
                     index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == rename_heading => app.rename_vault_heading(source)?,
                     index if index == notion_source => app.bind_notion_source_page(source)?,
                     index if index == native_board => app.show_native_board_locations(source)?,
                     index => {

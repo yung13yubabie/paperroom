@@ -163,3 +163,53 @@ fn restore_refuses_to_remove_a_pdf_used_by_a_current_annotation() -> Result<()> 
     let _ = fs::remove_dir_all(dir);
     result
 }
+
+#[test]
+fn protected_base_source_survives_history_and_backup_but_other_receipt_files_remain_editable() -> Result<()> {
+    use crate::archive::ImportedPage;
+    let dir = super::super::tests::data_dir();
+    let live = dir.join("live.db");
+    let backup = dir.join("backup.db");
+    let mut db = Notebook::open(&live,false)?;
+    let root = db.import_vault("合成",vec![ImportedPage {
+        parts:vec!["A.md".into()], title:"A".into(), body:"正文".into(),
+    }])?;
+    let raw = b"views:\n  - type: table\n    name: Pin\n    order: [file.path]\n";
+    let (receipt,_) = db.import_obsidian_base(root,"Shipping.base",raw.to_vec())?;
+    let original = db.list_attachments(receipt)?[0].id;
+    let doc = crate::canvas::parse(r##"{"nodes":[{"id":"p","type":"file","file":"Shipping.base","subpath":"#Pin","x":0,"y":0,"width":232,"height":114}]}"##.to_owned())?;
+    let canvas = db.save_canvas("合成圖",&doc)?;
+    db.set_canvas_vault(canvas,Some(root))?;
+    db.bind_base_card(canvas,&doc,root,"p",receipt,None)?;
+    let start = db.note_revisions(receipt)?.len();
+    let other = Notebook::open(&live,false)?;
+    assert!(other.remove_attachment(original).unwrap_err().to_string().contains("Bases 來源收據"));
+    assert_eq!(db.note_revisions(receipt)?.len(),start);
+    let extra = add_file(&mut db,receipt,&dir,b"independent")?;
+    let revision = db.note_revisions(receipt)?[0].id;
+    let preview = db.preview_note_revision(receipt,revision)?;
+    assert!(!preview.base_source_blocked);
+    let version = db.note(receipt)?.unwrap().version;
+    assert!(db.restore_note_revision(receipt,version,revision,Some(preview.data_version))?);
+    assert_eq!(db.list_attachments(receipt)?.len(),1);
+    assert!(payload(&db,extra).is_err());
+    // Model an imported old snapshot with different source bytes. Refusing this
+    // operation must preserve the current note and all of its live source links.
+    db.connection.execute("UPDATE note_revision_attachments SET content=?1 WHERE revision_id=?2 AND original_id=?3",
+        params![b"historical different source".to_vec(),revision,original])?;
+    let preview=db.preview_note_revision(receipt,revision)?;
+    assert!(preview.base_source_blocked);
+    let latest=db.note(receipt)?.unwrap().version;
+    assert!(db.restore_note_revision(receipt,latest,revision,Some(preview.data_version)).is_err());
+    db.backup(&backup)?;
+    drop(other);drop(db);
+    for path in [&live,&backup] {
+        let db=Notebook::open(path,false)?;
+        assert_eq!(payload(&db,original)?,raw);
+        assert_eq!(db.base_path_receipt(canvas,root,"Shipping.base")?,Some(receipt));
+        assert_eq!(db.resolve_base_card(canvas,&doc,root,"p")?.3.name,"Pin");
+        assert_eq!(db.note(receipt)?.unwrap().version,latest);
+    }
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}

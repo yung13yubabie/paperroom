@@ -40,7 +40,7 @@
 | 垃圾桶 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 還原筆記 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 整頁複製 | 部分 | 可複製單篇或使用中的子頁，保留正文、屬性和附件。關聯、白板、PDF 標註及版本歷史仍留在原筆記。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [duplicate_note.rs](../src/duplicate_note.rs) |
-| 頁面歷史版本還原 | 部分 | 可逐行比較標題／正文，也可預覽及還原新版快照的屬性值、附件清單與原始檔。頁面配置、關聯及 PDF 標註的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
+| 頁面歷史版本還原 | 部分 | 可逐行比較標題／正文，也可預覽及還原新版快照的屬性值、附件清單與原始檔。已綁定的 Bases 來源附件會保護原檔，涉及改動該附件的整次還原會停止。頁面配置、關聯及 PDF 標註的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
 | 區塊編輯 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 斜線選單 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 文字樣式 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
@@ -153,7 +153,7 @@
 | Markdown 摺疊 | 未實作 | 未核得等效操作。 | [官方](https://obsidian.md/help/advanced-syntax) · [markdown.rs](../src/markdown.rs) |
 | 自訂圖示 | 未實作 | 未核得等效操作。 | [官方](https://obsidian.md/help/advanced-syntax) · [markdown.rs](../src/markdown.rs) |
 | WikiLinks | 部分 | 外部工具已搬移的 Vault 筆記，若相對路徑改寫後仍唯一指向同一個筆記，可在備份後採用。保留別名和區塊 ID。多義連結、正文不同或無法核對時會停止。自動原地維護待做。 | [官方](https://obsidian.md/help/links) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
-| 標題跳轉 | 部分 | 可從同篇或指定 Vault 路徑的連結跳到標題。父子標題鏈可區分同名小節。Markdown 支援百分比編碼。重名無法唯一定位時會提示。原廠桌面對照待完成。 | [官方](https://obsidian.md/help/links) · [筆記連結](../src/note_links.rs) |
+| 標題跳轉 | 部分 | 可從同篇或指定 Vault 路徑的連結跳到標題。父子標題鏈可區分同名小節。Markdown 支援百分比編碼。重名無法唯一定位時會提示。已匯入 Vault 可預覽並重新命名唯一的純文字小節，同批可明確解析的 Markdown 和 Wiki 引用會一起維護。 | [官方](https://obsidian.md/help/links) · [筆記連結](../src/note_links.rs) |
 | 顯示別名 | 部分 | Vault 路徑消歧、別名及唯一標題段落；選單呈現段落。 | [官方](https://obsidian.md/help/links) · [note_links.rs](../src/note_links.rs) |
 | YAML aliases 作為查找索引 | 部分 | 匯入 Vault 的來源搜尋可比對常見 YAML 別名。可用唯一別名找未連結提及，原始碼編輯器的自動連結建議仍待做。 | [官方](https://obsidian.md/help/aliases) · [vault_search.rs](../src/vault_search.rs) |
 | 區塊引用 | 部分 | 可搜尋並複製唯一區塊的工作區連結，預覽後跳到區塊，再按 F9 返回。傳入連結報告可檢視同批次來源與重複或遺失的 ID。已支援同一批次內的文字區塊嵌入和反向追查。自動產生區塊 ID 及原 Vault 檔的即時偵測仍待做。 | [官方](https://obsidian.md/help/links) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |

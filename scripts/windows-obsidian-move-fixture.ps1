@@ -1,8 +1,10 @@
-# Move only a synthetic file in an ephemeral runner, using the official desktop UI.
+# Exercise only a synthetic fixture in an ephemeral runner, using the official desktop UI.
+[CmdletBinding(DefaultParameterSetName='Move')]
 param(
     [Parameter(Mandatory)][string]$Vault,
-    [Parameter(Mandatory)][string]$From,
-    [Parameter(Mandatory)][string]$To,
+    [Parameter(Mandatory,ParameterSetName='Move')][string]$From,
+    [Parameter(Mandatory,ParameterSetName='Move')][string]$To,
+    [Parameter(Mandatory,ParameterSetName='Heading')][switch]$HeadingProbe,
     [switch]$Initialize
 )
 Set-StrictMode -Version Latest
@@ -12,16 +14,27 @@ if (!$IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -
 }
 $vault = [IO.Path]::GetFullPath($Vault)
 $tempTarget = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-if (!$vault.StartsWith($tempTarget,[StringComparison]::OrdinalIgnoreCase) -or
-    (Split-Path $vault -Leaf) -cne 'VaultScopeA' -or
-    $From -notmatch '^(Active|Moved)/Flip\.md$' -or $To -notmatch '^(Active|Moved)/Flip\.md$' -or $From -ceq $To) {
-    throw 'Only the isolated, fixed fixture may be moved.'
+$vaultName = Split-Path $vault -Leaf
+if (!$vault.StartsWith($tempTarget,[StringComparison]::OrdinalIgnoreCase)) { throw 'Requires a synthetic Vault under this runner temporary directory.' }
+if ($HeadingProbe) {
+    if (!$Initialize -or $vaultName -cne 'PaperroomHeadingProbe' -or
+        !(Test-Path -LiteralPath $vault -PathType Container) -or @(Get-ChildItem -LiteralPath $vault -Force).Count) {
+        throw 'Heading mode requires -Initialize and an empty PaperroomHeadingProbe folder.'
+    }
+    for ($dir=Get-Item -LiteralPath $vault; $dir -and $dir.FullName.StartsWith($tempTarget,[StringComparison]::OrdinalIgnoreCase); $dir=$dir.Parent) {
+        if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Synthetic Vault path must not include a reparse point.' }
+    }
+} else {
+    if ($vaultName -cne 'VaultScopeA' -or
+        $From -notmatch '^(Active|Moved)/Flip\.md$' -or $To -notmatch '^(Active|Moved)/Flip\.md$' -or $From -ceq $To) {
+        throw 'Only the isolated, fixed fixture may be moved.'
+    }
+    $fromFile = Join-Path $vault $From
+    $toFile = Join-Path $vault $To
+    if (!(Test-Path -LiteralPath $fromFile -PathType Leaf) -or (Test-Path -LiteralPath $toFile) -or
+        !(Test-Path -LiteralPath (Split-Path $toFile -Parent) -PathType Container)) { throw 'Unexpected source or target fixture.' }
+    $before = (Get-FileHash -LiteralPath $fromFile -Algorithm SHA256).Hash
 }
-$fromFile = Join-Path $vault $From
-$toFile = Join-Path $vault $To
-if (!(Test-Path -LiteralPath $fromFile -PathType Leaf) -or (Test-Path -LiteralPath $toFile) -or
-    !(Test-Path -LiteralPath (Split-Path $toFile -Parent) -PathType Container)) { throw 'Unexpected source or target fixture.' }
-$before = (Get-FileHash -LiteralPath $fromFile -Algorithm SHA256).Hash
 $run = Split-Path $vault -Parent
 $expected = '218c7d30acc065355ce94719dd996d5e2a2347cde3811ea5dc29380583f02b58'
 $exe = Join-Path $env:LOCALAPPDATA 'Programs/Obsidian/Obsidian.exe'
@@ -208,7 +221,7 @@ do {
     try {
         $fresh = [Windows.Automation.AutomationElement]::FromHandle($handle)
         $items=@($fresh.FindAll($tree,$truth) | Where-Object {
-            !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'VaultScopeA' -and $_.Current.ControlType -ne [Windows.Automation.ControlType]::Edit
+            !$_.Current.IsOffscreen -and $_.Current.Name -ceq $vaultName -and $_.Current.ControlType -ne [Windows.Automation.ControlType]::Edit
         })
     } catch {
         Start-Sleep -Milliseconds 250
@@ -246,9 +259,141 @@ if ($confirm -eq [IntPtr]::Zero) { throw 'The selected folder has no native conf
 [ExactPicker]::ClickDefault($handle,$confirm)
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)
-    @($nodes | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and $_.Current.Name -match 'VaultScopeA' -and $_.Current.Name -match '1\.15\.1(?![\d.])' }).Count -gt 0
+    @($nodes | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and
+        $_.Current.Name.Contains($vaultName) -and $_.Current.Name -match '1\.15\.1(?![\d.])' }).Count -gt 0
 }
 
+}
+if ($HeadingProbe) {
+    $oldHeading='目標段落731'
+    $newHeading='更新段落731'
+    $utf=[Text.UTF8Encoding]::new($false)
+    $receiptPath=Join-Path $run 'obsidian-heading-receipt.json'
+    if (Test-Path -LiteralPath $receiptPath) { throw 'An existing heading receipt would be overwritten.' }
+    $first=[ordered]@{
+        'Target.md'=(("## $oldHeading","正文記號 TARGET-731","[[#$oldHeading|保留內文]]","## 別的段落","SEP-731") -join [char]10)
+        'Inbound.md'=(("[[Target#$oldHeading|保留顯示]]","[[Decoy#$oldHeading|相同標題的其他筆記]]","INBOUND-731") -join [char]10)
+        'Decoy.md'=(("## $oldHeading","正文記號 DECOY-731") -join [char]10)
+    }
+    $before=[ordered]@{}
+    foreach ($name in $first.Keys) {
+        $path=Join-Path $vault $name
+        $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew)
+        try {
+            $bytes=$utf.GetBytes($first[$name])
+            $stream.Write($bytes,0,$bytes.Length)
+        } finally { $stream.Dispose() }
+        $before[$name]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    function OpenHeading([string]$Heading) {
+        $uri='obsidian://open?vault='+[uri]::EscapeDataString($vaultName)+'&file='+[uri]::EscapeDataString("Target#$Heading")
+        Start-Process $uri
+        WaitFor 'exact synthetic Target window is foreground' {
+            param($nodes)
+            $handle=[ExactPicker]::GetForegroundWindow()
+            @($nodes | Where-Object {
+                $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and
+                [IntPtr]$_.Current.NativeWindowHandle -eq $handle -and
+                $_.Current.Name -like "Target - $vaultName - Obsidian 1.15.1*"
+            }) | Select-Object -First 1
+        }
+    }
+    function InVerifiedWindow([string]$keys) {
+        if ([ExactPicker]::GetForegroundWindow() -ne $window) { throw 'The verified synthetic Obsidian window lost focus.' }
+        [Windows.Forms.SendKeys]::SendWait($keys)
+    }
+    $vendor=OpenHeading $oldHeading
+    $window=[IntPtr]$vendor.Current.NativeWindowHandle
+    $bounds=[ExactPicker]::Bounds($window)
+    $heading=WaitFor 'exact source heading is visible in the note editor' {
+        param($nodes)
+        $exact=@($nodes | Where-Object {
+            $rect=$_.Current.BoundingRectangle
+            $_.Current.Name -ceq $oldHeading -and !$rect.IsEmpty -and $rect.Left -gt ($bounds[0]+$bounds[2]*0.30)
+        })
+        if ($exact.Count -eq 1) { $exact[0] }
+    }
+    $box=$heading.Current.BoundingRectangle
+    [ExactPicker]::ClickFixture($window,[int]($box.Left+$box.Width/2),[int]($box.Top+$box.Height/2),$false)
+    InVerifiedWindow '^p'
+    $null=WaitFor 'visible focused Command Palette search' {
+        param($nodes)
+        @($nodes | Where-Object { $_.Current.HasKeyboardFocus -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and
+            $_.Current.Name -match '^(Type a command|Command palette)' }).Count -eq 1
+    }
+    Set-Clipboard -Value 'Rename heading'
+    InVerifiedWindow '^v'
+    $command=WaitFor 'exact Rename heading palette command' {
+        param($nodes)
+        $exact=@($nodes | Where-Object {
+            $_.Current.Name -in 'Rename heading','Editor: Rename heading' -and
+            $_.Current.ControlType -ne [Windows.Automation.ControlType]::Edit -and !$_.Current.BoundingRectangle.IsEmpty
+        })
+        if ($exact.Count -eq 1) { $exact[0] }
+    }
+    $box=$command.Current.BoundingRectangle
+    [ExactPicker]::ClickFixture($window,[int]($box.Left+$box.Width/2),[int]($box.Top+$box.Height/2),$false)
+    function FocusedHeadingValue([string]$ExpectedValue) {
+        WaitFor 'focused rename input equals expected heading' {
+            param($nodes)
+            $hit=@($nodes | Where-Object {
+                $pattern=$null
+                $_.Current.HasKeyboardFocus -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and
+                $_.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern,[ref]$pattern) -and
+                !$pattern.Current.IsReadOnly -and $pattern.Current.Value -ceq $ExpectedValue
+            })
+            if ($hit.Count -eq 1) { $hit[0] }
+        }
+    }
+    $null=FocusedHeadingValue $oldHeading
+    Set-Clipboard -Value $newHeading
+    InVerifiedWindow '^a'
+    InVerifiedWindow '^v'
+    $null=FocusedHeadingValue $newHeading
+    InVerifiedWindow '{ENTER}'
+    $null=WaitFor 'native heading change reached disk' {
+        param($nodes)
+        [IO.File]::ReadAllText((Join-Path $vault 'Target.md')).Split([char]10)[0].TrimEnd([char]13) -ceq "## $newHeading"
+    }
+    $vendorProcess=Get-Process -Id $vendor.Current.ProcessId
+    if ($vendorProcess.Path -cne $exe -or !$vendorProcess.CloseMainWindow() -or !$vendorProcess.WaitForExit(20000)) {
+        throw 'The verified fixture GUI did not close.'
+    }
+    $after=[ordered]@{}
+    $observed=[ordered]@{}
+    foreach ($name in $first.Keys) {
+        $path=Join-Path $vault $name
+        $observed[$name]=[IO.File]::ReadAllText($path)
+        $after[$name]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    if ($after['Decoy.md'] -cne $before['Decoy.md'] -or
+        !$observed['Inbound.md'].Contains("[[Decoy#$oldHeading|相同標題的其他筆記]]") -or
+        !$observed['Inbound.md'].Contains('INBOUND-731') -or
+        !$observed['Target.md'].Contains('TARGET-731') -or !$observed['Target.md'].Contains('SEP-731')) {
+        throw 'Unrelated synthetic content was changed.'
+    }
+    $same=$observed['Target.md'].Contains("[[#$newHeading|保留內文]]") -and !$observed['Target.md'].Contains("[[#$oldHeading|保留內文]]")
+    $cross=$observed['Inbound.md'].Contains("[[Target#$newHeading|保留顯示]]") -and !$observed['Inbound.md'].Contains("[[Target#$oldHeading|保留顯示]]")
+    $reopened=OpenHeading $newHeading
+    $null=WaitFor 'new heading visible after genuine process restart' {
+        param($nodes)
+        @($nodes | Where-Object { $_.Current.ProcessId -eq $reopened.Current.ProcessId -and $_.Current.Name -ceq $newHeading }).Count -gt 0
+    }
+    $process=Get-Process -Id $reopened.Current.ProcessId
+    if ($process.Path -cne $exe -or !$process.CloseMainWindow() -or !$process.WaitForExit(20000)) { throw 'Reopened fixture GUI did not close.' }
+    foreach ($name in $first.Keys) {
+        if ((Get-FileHash -LiteralPath (Join-Path $vault $name) -Algorithm SHA256).Hash -ine $after[$name]) { throw 'A fixture unexpectedly changed on reopen.' }
+    }
+    [ordered]@{
+        product='Obsidian desktop'; product_version=$info.ProductVersion; file_version=$info.FileVersion
+        installer_sha256=$expected; os=(Get-CimInstance Win32_OperatingSystem).Caption
+        old_heading=$oldHeading; new_heading=$newHeading; native_command='Rename heading'
+        same_note_wikilink_alias_preserved=$same; cross_note_wikilink_alias_preserved=$cross
+        decoy_unchanged=$true; restarted=$true; before_sha256=$before; after_sha256=$after
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding utf8
+    if (!$same -or !$cross) { throw 'The vendor command ran and persisted the heading; inspect the receipt and actual files for differing link behavior.' }
+    Write-Host 'Verified native heading rename, same-note and cross-note wikilinks, unchanged decoy, and restart.'
+    return
 }
 $uri = 'obsidian://open?vault=VaultScopeA&file=' + [uri]::EscapeDataString($From)
 Start-Process $uri

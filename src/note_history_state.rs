@@ -52,6 +52,18 @@ fn unchanged_ids(db: &Connection, note: i64, revision: i64) -> Result<BTreeSet<i
     Ok(query.query_map(params![note, revision], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
+// Only an existing protected source that the snapshot would remove or alter
+// blocks restoration. Unrelated files on the same receipt remain editable.
+pub(super) fn changes_base_source(db: &Connection, note: i64, revision: i64) -> Result<bool> {
+    Ok(db.query_row("SELECT EXISTS(
+        SELECT 1 FROM base_card_receipts b JOIN attachments a ON a.id=b.attachment
+        LEFT JOIN attachment_origins o ON o.attachment_id=a.id
+        WHERE a.note_id=?1 AND NOT EXISTS(
+            SELECT 1 FROM note_revision_attachments h WHERE h.revision_id=?2 AND h.original_id=a.id
+                AND h.name=a.name AND h.kind=a.kind AND h.content=a.content AND h.origin IS o.relative_path
+        ))", params![note,revision], |r|r.get(0))?)
+}
+
 pub(super) fn current_properties(db: &Connection, note: i64) -> Result<Properties> {
     let mut query = db.prepare("SELECT key,value FROM note_properties WHERE note_id=?1")?;
     Ok(query.query_map([note], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -114,6 +126,9 @@ pub(super) struct AttachmentRestore {
 
 impl AttachmentRestore {
     pub(super) fn read(tx: &Transaction<'_>, note: i64, revision: i64) -> Result<Self> {
+        if changes_base_source(tx,note,revision)? {
+            return Err(super::note_history::BASE_SOURCE_GUIDANCE.into());
+        }
         let same = unchanged_ids(tx, note, revision)?;
         let (count, total, elsewhere): (i64, i64, i64) = tx.query_row(
             "SELECT count(*),coalesce(sum(length(content)),0),

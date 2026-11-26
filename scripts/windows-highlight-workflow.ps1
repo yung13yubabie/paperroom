@@ -23,6 +23,8 @@ param(
     [switch]$TypedRelationBranchOnly,
     [switch]$RelationRollupRecoveryOnly,
     [switch]$SharedNoteWorkflowOnly,
+    [switch]$VaultHeadingOnly,
+    [switch]$ReceiptHistoryOnly,
     [switch]$BasesDescendingOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -1453,6 +1455,14 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($ReceiptHistoryOnly) {
+        . (Join-Path $PSScriptRoot 'windows-receipt-history.ps1')
+        return
+    }
+    if ($VaultHeadingOnly) {
+        . (Join-Path $PSScriptRoot 'windows-vault-heading.ps1')
+        return
+    }
     if ($TypedRelationBranchOnly -or $RelationRollupRecoveryOnly -or $SharedNoteWorkflowOnly) {
         . (Join-Path $PSScriptRoot 'windows-typed-relation-branch.ps1')
         return

@@ -53,12 +53,17 @@ fn text_for_receipt(value:&str) -> String {
 impl Notebook {
     pub(crate) fn import_obsidian_base(&self, root:i64, filename:&str, raw:Vec<u8>)
         -> Result<(i64,Vec<(i64,String,i64,bool)>)> {
+        self.import_obsidian_base_mode(root,filename,raw,false)
+    }
+    pub(crate) fn import_obsidian_base_mode(&self, root:i64, filename:&str, raw:Vec<u8>, live:bool)
+        -> Result<(i64,Vec<(i64,String,i64,bool)>)> {
         crate::output::windows_output_name(filename.as_ref())?;
         let stem = filename.rsplit_once('.').filter(|(s,e)| !s.trim().is_empty() && e.eq_ignore_ascii_case("base"))
             .map(|(s,_)|s).ok_or("請選擇 .base 原檔。")?;
         if filename.encode_utf16().count()>255 || filename.chars().any(char::is_control)
             || !attachments::has_expected_signature("text",&raw) { return Err("Bases 檔名或文字格式無效。".into()); }
         let base = obsidian_base::parse(&raw)?;
+        if live && !base.has_live_status() {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
         let token:String=tx.query_row("SELECT i.token FROM notes n JOIN note_link_identities i ON i.note_id=n.id
             WHERE n.id=?1 AND n.trash_root IS NULL AND EXISTS(SELECT 1 FROM vault_paths WHERE import_root=n.id)",
@@ -68,6 +73,8 @@ impl Notebook {
         let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
         let mut created=Vec::new();
         let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
+        if live && normalized_handoff {return Err("此來源可能曾移除 Markdown 首行，請使用快照模式。".into());}
+        if live {report.push_str("\n已連結的 status 欄位使用工作區目前保存的 Markdown；編輯時只更新該筆記。\n");}
         let mut remaining_front_bytes=32*1024*1024usize;
         if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.") && !base.formulas.contains_key(key)) {
             return Err("只支援檔案與筆記頁首欄位的顯示名稱。".into());
@@ -76,8 +83,16 @@ impl Notebook {
             let name=format!("{stem}／{}",view.name);
             let collection=insert_collection(&tx,&name)?;
             let cols=columns(&base,view)?;
-            for (key, _) in &cols {
+            for (key, col) in &cols {
                 tx.execute("INSERT INTO obsidian_base_file_columns(collection_id,key) VALUES(?1,?2)",params![collection,key])?;
+                let predicate=match col {
+                    Column::Front(key) if key=="status"=>Some(None),
+                    Column::Formula(expr)=>expr.status_literal().map(Some),
+                    _=>None
+                };
+                if live && let Some(equals)=predicate {
+                    tx.execute("INSERT INTO obsidian_base_live_columns(collection_id,key,import_root,equals_text) VALUES(?1,?2,?3,?4)",params![collection,key,root,equals])?;
+                }
             }
             let mut members=Vec::new();
             {
@@ -91,7 +106,11 @@ impl Notebook {
                     members.push((row.get::<_,i64>(0)?,path.to_owned()));
                 }
             }
-            let selected: std::collections::BTreeSet<_>=cols.iter().filter_map(|(_,col)|match col { Column::Front(key)=>Some(key.as_str()), _=>None }).collect();
+            let selected: std::collections::BTreeSet<_> = cols.iter().filter_map(|(_,col)| match col {
+                Column::Front(key) if !live || key != "status" => Some(key.as_str()),
+                Column::Formula(expr) if !live && expr.status_literal().is_some() => Some("status"),
+                _ => None,
+            }).collect();
             for (note,path) in &members {
                 let fields=if !selected.is_empty() {
                     let prefix:Vec<u8>=tx.prepare_cached("SELECT substr(CAST(body AS BLOB),1,?2) FROM notes WHERE id=?1 AND trash_root IS NULL")?
@@ -101,12 +120,20 @@ impl Notebook {
                         return Err(format!("「{path}」的 Markdown ZIP 可能已移除首行標題，無法核對頁首位置。").into());
                     }
                     remaining_front_bytes=remaining_front_bytes.checked_sub(prefix.len()).ok_or("頁首資料讀取量超過 32 MiB，請縮小檢視範圍。")?;
+                    if !live && cols.iter().any(|(_,c)|matches!(c,Column::Formula(e) if e.status_literal().is_some())) {
+                        let valid=std::str::from_utf8(&prefix).map_or_else(|e|e.valid_up_to(),|s|s.len());
+                        super::obsidian_base_live::read_status(std::str::from_utf8(&prefix[..valid])?).map_err(|e|format!("「{path}」：{e}"))?;
+                    }
                     obsidian_base::front_fields(&prefix,&selected).map_err(|err|format!("「{path}」：{err}"))?
                 }else{Default::default()};
                 let (folder,file)=path.rsplit_once('/').unwrap_or(("",path));
                 tx.execute("INSERT INTO collection_notes(collection_id,note_id,status) VALUES(?1,?2,'已匯入')",params![collection,note])?;
                 for (label,col) in &cols {
                     let value=match col {
+                        // These rows fix the membership of the binding. The current value is read from the note.
+                        Column::Front(key) if live && key == "status" => "",
+                        Column::Formula(expr) if live && expr.status_literal().is_some() => "",
+                        Column::Formula(expr) if expr.status_literal().is_some() => if fields.get("status").map(String::as_str)==expr.status_literal() {"true"} else {"false"},
                         Column::Formula(expr) => expr.display(path,folder,file),
                         Column::Filename => file,
                         Column::Folder => folder,
@@ -140,6 +167,90 @@ mod tests {
     use crate::archive::ImportedPage;
     fn page(dir:&str)->ImportedPage {
         ImportedPage{parts:vec![dir.into(),"鏡頭.md".into()],title:"編輯後標題".into(),body:"內容".into()}
+    }
+    #[test]
+    fn bad_live_status_is_local_to_its_row_and_recovers_after_normal_edit() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let mut a=page("甲");let mut b=page("乙");
+        a.body="---\nstatus: 完成\n---".into();b.body=a.body.clone();
+        let root=db.import_vault("來源",vec![a,b])?;
+        let raw="formulas: {ok: 'status == \"完成\"'}\nviews: [{type: table, name: 所有, order: [status, formula.ok]}]";
+        let (_,views)=db.import_obsidian_base_mode(root,"rows.base",raw.as_bytes().to_vec(),true)?;
+        let col=views[0].0;
+        let ids:Vec<i64>=db.connection.prepare("SELECT note_id FROM vault_paths WHERE import_root=?1 ORDER BY relative_path")?
+            .query_map([root],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let (bad,good)=(ids[0],ids[1]);
+        for broken in ["取消頁首","---\nstatus: [a,b]\n---","---\nstatus: old\nstatus: duplicate\n---"] {
+            let n=db.note(bad)?.unwrap();db.save(bad,n.version,&n.row.title,broken)?;
+            let shown=db.collection_display_snapshot(col)?.unwrap();
+            assert_eq!(&shown[0].1[&bad],"（status 無法讀取）");
+            assert_eq!(&shown[1].1[&bad],"（status 無法讀取）");
+            assert_eq!(&shown[1].1[&good],"true");
+            assert_eq!(db.editable_status_rows(col,"status")?.keys().copied().collect::<Vec<_>>(),vec![good]);
+            assert!(db.live_status_snapshot(col,"status",bad).is_err());
+        }
+        let (v,_)=db.live_status_snapshot(col,"status",good)?;
+        db.edit_live_status(col,"status",good,v,"待辦")?;
+        assert_eq!(&db.collection_display_values(col,"ok")?[&good],"false");
+        let n=db.note(bad)?.unwrap();db.save(bad,n.version,&n.row.title,"---\nstatus: 完成\n---")?;
+        assert_eq!(db.editable_status_rows(col,"status")?.len(),2);
+        assert_eq!(&db.collection_display_values(col,"ok")?[&bad],"true");
+        Ok(())
+    }
+    #[test]
+    fn writable_status_aliases_share_canonical_source_and_recalculate_only_when_opened() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let original="\u{feff}---\r\nstatus: 待辦\r\ntags: [test]\r\n---\r\n正文🙂提示";
+        let mut a=page("甲");a.body=original.into();
+        let mut b=page("乙"); b.body="---\nstatus: 保留\n---\n乙".into();
+        let root=db.import_vault("測試庫",vec![a,b])?;
+        let id_for=|path:&str|->rusqlite::Result<i64>{db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",params![root,path],|r|r.get(0))};
+        let a=id_for("甲/鏡頭.md")?;let b=id_for("乙/鏡頭.md")?;
+        db.set_property(a,"進度",Some("原生值"))?;
+        let start=original.find("提示").unwrap();
+        db.connection.execute("INSERT INTO note_highlights(note_id,start_byte,end_byte) VALUES(?1,?2,?3)",params![a,start as i64,original.len() as i64])?;
+        let mut ids=Vec::new();
+        for (filename,alias,live) in [("A.base","進度",true),("B.base","狀態",true),("S.base","快照",false)] {
+            let raw=format!("properties: {{status: {{displayName: {alias}}}}}\nformulas: {{done: 'note.status == \"完成\"'}}\nviews: [{{type: table, name: 表, filters: 'file.folder == \"甲\"', order: [status, formula.done]}}]");
+            let (_,saved)=db.import_obsidian_base_mode(root,filename,raw.into_bytes(),live)?;
+            ids.push(saved[0].0);
+        }
+        let (v,initial)=db.live_status_snapshot(ids[0],"進度",a)?;
+        assert_eq!(initial,"待辦");
+        assert!(db.edit_live_status(ids[0],"進度",b,v,"不可寫").is_err());
+        db.edit_live_status(ids[0],"進度",a,v,"完成")?;
+        assert!(db.edit_live_status(ids[1],"狀態",a,v,"過時").is_err());
+        let values=db.collection_display_snapshot(ids[1])?.unwrap();
+        assert_eq!(values[0].1.get(&a).unwrap(),"完成");
+        assert_eq!(values[1].1.get(&a).unwrap(),"true");
+        let body=db.note(a)?.unwrap().body;
+        assert_eq!(body,original.replacen("status: 待辦","status: \"完成\"",1));
+        let marks=db.note_highlights(a,&body)?;
+        assert_eq!(marks.len(),1);assert_eq!(&body[marks[0].clone()],"提示");
+        let revision=db.note_revisions(a)?;
+        assert_eq!(db.note_revision(a,revision[0].id)?.1,original);
+        let (next,_)=db.live_status_snapshot(ids[1],"狀態",a)?;
+        db.edit_live_status(ids[1],"狀態",a,next,"規劃中")?;
+        assert_eq!(db.live_status_snapshot(ids[0],"進度",a)?.1,"規劃中");
+        assert_eq!(db.collection_display_values(ids[0],"done")?.get(&a).unwrap(),"false");
+        assert_eq!(db.collection_display_values(ids[2],"快照")?.get(&a).unwrap(),"待辦");
+        assert!(db.live_status_snapshot(ids[2],"快照",a).is_err());
+        assert_eq!(db.note(b)?.unwrap().body,"---\nstatus: 保留\n---\n乙");
+        assert_eq!(db.properties(a)?,vec![("進度".into(),"原生值".into())]);
+        let saved=db.note(a)?.unwrap();
+        db.save(a,saved.version,&saved.row.title,&saved.body.replace("規劃中","完成"))?;
+        assert_eq!(db.collection_display_values(ids[0],"done")?.get(&a).unwrap(),"true");
+        let dir=std::env::temp_dir().join(format!("paperroom-bases-live-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir(&dir)?;
+        let file=dir.join("backup.sqlite");db.backup(&file)?;
+        let restored=Notebook::open(&file,false)?;
+        assert_eq!(restored.live_status_snapshot(ids[1],"狀態",a)?.1,"完成");
+        assert_eq!(restored.collection_display_values(ids[0],"done")?.get(&a).unwrap(),"true");
+        drop(restored);std::fs::remove_dir_all(dir)?;
+        db.remove_from_collection(ids[0],a,"已匯入")?;
+        db.add_to_collection(ids[0],a,"重新加入")?;
+        assert!(db.live_status_snapshot(ids[0],"進度",a).is_err());
+        Ok(())
     }
     #[test]
     fn file_formulas_are_snapshot_columns_for_exact_vault_members() -> Result<()> {

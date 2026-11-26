@@ -452,9 +452,23 @@ impl App {
                             node["type"].as_str() == Some("file")
                             && node["id"].as_str().is_some_and(|id| view.selection.contains(id)))
                     } else { None };
+                    if companion { choices.push((14,"新增同包筆記節點…")); }
                     if selected_file.is_some() { choices.push((13, "開啟已選節點的來源筆記")); }
                     let action = popup(hwnd, anchor, None, &choices);
-                    if action == 13 {
+                    if action == 14 {
+                        let candidates = self.notebook.companion_note_choices(id)?;
+                        if candidates.is_empty() { return Err("這份畫布沒有可使用的同包筆記。".into()); }
+                        let Some(index) = super::navigation_ui::choose_navigation_page(hwnd, anchor, candidates.len(),
+                            |i| format!("{}  (#{})", candidates[i].1, candidates[i].0)) else { return Ok(()); };
+                        let Some(rect) = canvas_editor_ui::geometry(hwnd, "0 0 232 114")? else { return Ok(()); };
+                        let (note,path) = &candidates[index];
+                        let revised = self.notebook.add_companion_note_node(id,&view.doc,*note,path,rect)?;
+                        let Some(WorkspaceView::Canvas(current)) = self.extras.workspace.as_mut() else { return Ok(()); };
+                        current.doc = revised;
+                        current.selection.clear();
+                        self.present();
+                        label(self.widgets.status,"已新增同包筆記節點。");
+                    } else if action == 13 {
                         let node = selected_file.ok_or("請先選取一個 Canvas 檔案節點。")?;
                         let node_id = node["id"].as_str().ok_or("Canvas 檔案節點缺少 ID。")?;
                         let link = self.notebook.resolve_canvas_file_link(id, initial_binding, node_id)?;

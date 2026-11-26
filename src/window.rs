@@ -1349,7 +1349,11 @@ impl App {
                             if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
                                 return Ok(());
                             }
-                            let (receipt, views) = app.notebook.import_obsidian_base(root, filename, raw)?;
+                            let mode=if parsed.has_live_status() {
+                                popup(app.hwnd,app.widgets.files,None,&[(1,"固定快照"),(2,"連結工作區 status（可編輯）")])
+                            } else {1};
+                            if !matches!(mode,1|2) { return Ok(()); }
+                            let (receipt, views) = app.notebook.import_obsidian_base_mode(root, filename, raw, mode==2)?;
                             app.open_import(receipt, &format!("已匯入 {} 個 Bases 檢視。", views.len()));
                         }
                         return Ok(());

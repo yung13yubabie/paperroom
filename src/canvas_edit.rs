@@ -253,34 +253,42 @@ pub(super) fn serialize_edit(original: &Document, tree: Value) -> Result<Documen
     original.reparse(raw)
 }
 
+const COMPANION_NOTES: &str =
+    "SELECT p.note_id,p.relative_path FROM companion_canvases c
+     JOIN vault_paths p ON p.import_root=c.import_root
+     JOIN notes n ON n.id=p.note_id JOIN notes r ON r.id=p.import_root
+     WHERE c.canvas_id=?1 AND n.trash_root IS NULL AND r.trash_root IS NULL";
+
 impl Notebook {
     pub(crate) fn edit_canvas(
         &self, canvas_id: i64, expected: &Document, edit: CanvasEdit<'_>,
     ) -> Result<Document> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        // Undo restores the original JSON and its source. A newly allocated
-        // object must never inherit that source, even while the node is absent.
-        let reserved = if matches!(&edit, CanvasEdit::AddNode {..} | CanvasEdit::GroupSelection {..} | CanvasEdit::AddEdge {..}) {
-            let mut query = tx.prepare("SELECT node_id FROM companion_node_sources WHERE canvas_id=?1")?;
-            query.query_map([canvas_id], |r| r.get(0))?.collect::<rusqlite::Result<HashSet<String>>>()?
-        } else {
-            HashSet::new()
-        };
-        let revised = apply(expected, edit, &reserved)?;
-        replace_source(&tx, canvas_id, expected, &revised)?;
-        if revised.as_str() != expected.as_str() {
-            tx.execute("INSERT INTO canvas_edit_undo(canvas_id, source) VALUES (?1, ?2)",
-                params![canvas_id, expected.as_str()])?;
-            // Keep the most recent action per canvas with a workspace-wide byte budget.
-            tx.execute(
-                "DELETE FROM canvas_edit_undo WHERE rowid IN (
-                    SELECT rowid FROM (
-                        SELECT rowid, sum(length(CAST(source AS BLOB))) OVER (ORDER BY rowid DESC) AS bytes
-                        FROM canvas_edit_undo
-                    ) WHERE bytes > ?1
-                 )", [super::workspace::MAX_CANVAS_STORAGE_BYTES],
-            )?;
+        let revised = edit_on(&tx, canvas_id, expected, edit)?;
+        tx.commit()?;
+        Ok(revised)
+    }
+
+    pub(crate) fn companion_note_choices(&self, id: i64) -> Result<Vec<(i64,String)>> {
+        let mut stmt = self.connection.prepare(&format!("{COMPANION_NOTES} ORDER BY p.relative_path COLLATE BINARY"))?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub(crate) fn add_companion_note_node(&self, id:i64, expected:&Document, note:i64, path:&str, geometry:[i64;4]) -> Result<Document> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let lookup = format!("{COMPANION_NOTES} AND p.note_id=?2 AND p.relative_path=?3 COLLATE BINARY");
+        if !super::notion_handoff::windows_zip_path(path) ||
+            tx.query_row(&lookup, params![id,note,path], |_| Ok(())).optional()?.is_none() {
+            return Err("這篇同包筆記的來源已變更，請重新選取。".into());
         }
+        let revised = edit_on(&tx,id,expected,CanvasEdit::AddNode{kind:"file",content:path,geometry})?;
+        let node = revised.json()["nodes"].as_array().and_then(|nodes| nodes.last())
+            .and_then(|n| n["id"].as_str()).ok_or("找不到新增的節點。")?;
+        let inserted = tx.execute("INSERT INTO companion_node_sources(canvas_id,node_id,path,note_id)
+            SELECT ?1,?2,?3,?4 WHERE (SELECT COUNT(*) FROM companion_node_sources WHERE canvas_id=?1)<15000",
+            params![id,node,path,note])?;
+        if inserted != 1 { return Err("這張畫布已達來源節點數量上限。".into()); }
         tx.commit()?;
         Ok(revised)
     }
@@ -296,6 +304,33 @@ impl Notebook {
         tx.commit()?;
         Ok(Some(restored))
     }
+}
+
+fn edit_on(tx:&Transaction<'_>, canvas_id:i64, expected:&Document, edit:CanvasEdit<'_>) -> Result<Document> {
+    // Undo restores the original JSON and its source. A newly allocated
+    // object must never inherit that source, even while the node is absent.
+    let reserved = if matches!(&edit, CanvasEdit::AddNode {..} | CanvasEdit::GroupSelection {..} | CanvasEdit::AddEdge {..}) {
+        let mut query = tx.prepare("SELECT node_id FROM companion_node_sources WHERE canvas_id=?1")?;
+        query.query_map([canvas_id], |r| r.get(0))?.collect::<rusqlite::Result<HashSet<String>>>()?
+    } else {
+        HashSet::new()
+    };
+    let revised = apply(expected, edit, &reserved)?;
+    replace_source(tx, canvas_id, expected, &revised)?;
+    if revised.as_str() != expected.as_str() {
+        tx.execute("INSERT INTO canvas_edit_undo(canvas_id, source) VALUES (?1, ?2)",
+            params![canvas_id, expected.as_str()])?;
+        // Keep the most recent action per canvas with a workspace-wide byte budget.
+        tx.execute(
+            "DELETE FROM canvas_edit_undo WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, sum(length(CAST(source AS BLOB))) OVER (ORDER BY rowid DESC) AS bytes
+                    FROM canvas_edit_undo
+                ) WHERE bytes > ?1
+             )", [super::workspace::MAX_CANVAS_STORAGE_BYTES],
+        )?;
+    }
+    Ok(revised)
 }
 
 fn replace_source(
@@ -319,6 +354,56 @@ fn replace_source(
 mod tests {
     use super::*;
     use CanvasEdit::*;
+
+    #[test]
+    fn explicitly_place_companion_notes_preserves_scope_reopen_and_undo() -> Result<()> {
+        use crate::archive::ImportedPage;
+        let dir = std::env::temp_dir().join(format!("paperroom-companion-placement-{}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        let file = dir.join("live.db");
+        let backup = dir.join("copy.db");
+        let mut db = Notebook::open(&file,false)?;
+        let pages = || ["甲","乙"].into_iter().map(|folder| ImportedPage {
+            parts:vec![folder.into(),"鏡頭.md".into()],title:"鏡頭".into(),body:folder.into()
+        }).collect();
+        let root = db.import_vault("本批",pages())?;
+        let other = db.import_vault("另批",pages())?;
+        db.connection.execute("INSERT INTO heptabase_import_roots VALUES(?1)", [root])?;
+        let source = |r| db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path='甲/鏡頭.md'",[r],|row|row.get::<_,i64>(0));
+        let (a,decoy) = (source(root)?,source(other)?);
+        let raw = r#"{"nodes":[{"type":"group","id":"g","x":0,"y":0,"width":600,"height":400,"label":"分鏡"}]}"#;
+        super::super::heptabase_boards::import_companion_boards(&db.connection,root,vec![("圖.canvas".into(),raw.into())],&Default::default())?;
+        let id=db.saved_canvases()?[0].0;
+        let original=db.read_canvas(id)?;
+        let path="甲/鏡頭.md";
+        let choices=db.companion_note_choices(id)?;
+        assert_eq!(choices.len(),2);
+        assert!(choices.contains(&(a,path.into())));
+        let rect=[-250,80,232,114];
+        assert!(db.add_companion_note_node(id,&original,decoy,path,rect).is_err());
+        assert!(db.add_companion_note_node(id,&original,a,"甲/./鏡頭.md",rect).is_err());
+        db.trash(a)?;
+        assert!(db.add_companion_note_node(id,&original,a,path,rect).is_err());
+        db.restore(a)?;
+        let first=db.add_companion_note_node(id,&original,a,path,rect)?;
+        assert!(db.add_companion_note_node(id,&original,a,path,rect).is_err());
+        let second=db.add_companion_note_node(id,&first,a,path,[30,80,232,114])?;
+        assert_eq!(second.json()["nodes"][0],original.json()["nodes"][0]);
+        assert_eq!(db.canvas_note_placements(a)?[0].occurrences,2);
+        assert!(db.canvas_note_placements(decoy)?.is_empty());
+        db.backup(&backup)?;
+        drop(db);
+        for file in [&file,&backup] {
+            let db=Notebook::open(file,false)?;
+            assert_eq!(db.read_canvas(id)?.as_str(),second.as_str());
+            assert!(db.canvas_file_links(id)?.iter().all(|link|link.note_id==Some(a)));
+            let back=db.undo_canvas_edit(id,&second)?.unwrap();
+            assert_eq!(back.as_str(),first.as_str());
+            assert_eq!(db.canvas_note_placements(a)?[0].occurrences,1);
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn new_file_node_cannot_reuse_a_deleted_companion_identity_but_undo_can() -> Result<()> {

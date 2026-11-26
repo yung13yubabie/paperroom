@@ -160,3 +160,7 @@ Vault 的文字嵌入在同一次匯入的筆記中解析，來源改動須先�
 Linux 主機測試通過 13 項；Windows 測試程式在 Wine 10 UTF-8 環境通過 16 項，涵蓋長 Unicode 路徑、Markdown 匯出、SQLite 備份與重開、控制項及工作區路徑。斷網 Wine 測試涵蓋預設及可攜工作區、正常退出與強制結束後重啟、中文筆記與搜尋，以及 Notion ZIP 父頁和子頁匯入。同一份 v0.1.1 EXE 也在 GitHub 的 Windows Server 2022 runner 通過預設與可攜模式的首啟、儲存及中斷復原測試。Windows 10／11 標準帳戶、實體中文輸入法與 SmartScreen 提示仍待驗證。詳細結果與限制見 [驗證紀錄](VERIFICATION.md)。
 
 執行檔未經 Authenticode 簽章。下載後若遭 Windows 或組織政策阻擋，可先核對發行頁 SHA-256，再將實際錯誤、Windows 版本與雜湊提供給管理員；雜湊無法代替簽章信任。尚未在原生 Windows 觀察 SmartScreen 的實際提示或阻擋結果，不應假設每台電腦會出現相同畫面。
+
+## 工作區第 39 版與 Bases 的連結欄位
+
+第 39 版另保存明確選用的連結欄位及其 Vault 根目錄。舊集合保留固定快照。連結的 `note.status` 直接讀取這篇工作區筆記的 Markdown 頁首，修改會沿用筆記版本檢查、歷史及搜尋更新。無法讀取為單行文字的 status 會在該列提示無法讀取，保留其他資料列。工作區備份會連同這些設定一起保存。升級前請先另存備份。

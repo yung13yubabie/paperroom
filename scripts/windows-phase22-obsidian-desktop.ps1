@@ -96,34 +96,35 @@ if ($edit.Count -ne 1) {
     throw 'Unable to identify exactly one folder path edit.'
 }
 $value=$edit[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-$value.SetValue($vault)
-if ($value.Current.Value -cne $vault) { throw 'Synthetic path was not entered exactly.' }
-$choose=@($pickerNodes | Where-Object {
-    $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and $_.Current.Name -in 'Select Folder','Open','OK'
-})
-if ($choose.Count -eq 1) {
-    Button $choose[0]
-} else {
-    $default = @($picker.FindAll($tree,$truth) | Where-Object {
-        !$_.Current.IsOffscreen -and $_.Current.IsEnabled -and $_.Current.AutomationId -eq '1' -and
-        $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button'
-    })
-    if ($default.Count -eq 1) {
-        Button $default[0]
-    } else {
-        Add-Type -AssemblyName System.Windows.Forms
-        Add-Type -TypeDefinition @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class ExactPicker {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, int id);
 }
 '@
-        $edit[0].SetFocus()
-        if ([ExactPicker]::GetForegroundWindow().ToInt64() -ne $picker.Current.NativeWindowHandle -or
-            $value.Current.Value -cne $vault) { throw 'The verified synthetic picker is no longer foreground.' }
-        [Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    }
+$handle=[IntPtr]$picker.Current.NativeWindowHandle
+$edit[0].SetFocus()
+if ([ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'The synthetic picker is not foreground.' }
+Set-Clipboard -Value $vault
+[Windows.Forms.SendKeys]::SendWait('^a')
+[Windows.Forms.SendKeys]::SendWait('^v')
+$deadline=[datetime]::UtcNow.AddSeconds(6)
+while ($value.Current.Value -cne $vault -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 150 }
+if ($value.Current.Value -cne $vault -or [ExactPicker]::GetForegroundWindow() -ne $handle) {
+    throw 'The real folder field did not receive the exact synthetic path.'
+}
+"Verified physical path entry for the isolated test Vault."
+[Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Start-Sleep -Milliseconds 1000
+if ([ExactPicker]::GetForegroundWindow() -eq $handle) {
+    $visible=@($picker.FindAll($tree,$truth) | Where-Object { !$_.Current.IsOffscreen })
+    $pathShown=@($visible | Where-Object { $_.Current.Name -match '\bPaperroomFixture\b' }).Count -gt 0
+    $confirm=[ExactPicker]::GetDlgItem($handle,1)
+    if (!$pathShown -or $confirm -eq [IntPtr]::Zero) { throw 'The navigated folder was not confirmed inside the original picker.' }
+    Button ([Windows.Automation.AutomationElement]::FromHandle($confirm))
 }
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)

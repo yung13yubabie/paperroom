@@ -152,6 +152,24 @@ function Confirm-RestoreSource([string]$Witness,[string]$DbHash,[string]$BackupH
         throw 'The live original workspace or its backup changed during portable restore.'
     }
 }
+function Close-RestoreApplication($Notebook,[IntPtr]$KnownWindow,[string]$Role) {
+    # Keep the process handle for the exit status rather than reopening a PID
+    # that may disappear by the time the normally closed window returns.
+    $retainedHandle = $Notebook.Handle
+    [uint32]$owner = 0
+    if ($retainedHandle -eq [IntPtr]::Zero -or $Notebook.HasExited -or
+        ![PaperroomHighlightGui]::IsWindowVisible($KnownWindow) -or
+        ![PaperroomHighlightGui]::GetWindowThreadProcessId($KnownWindow,[ref]$owner) -or
+        $owner -ne $Notebook.Id -or [PaperroomHighlightGui]::GetDlgItem($KnownWindow,103) -eq [IntPtr]::Zero) {
+        throw "$Role no longer has its tracked native Paperroom window."
+    }
+    if (![PaperroomHighlightGui]::PostMessageW($KnownWindow,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)) {
+        throw "Normal close request failed for $Role (PID $owner)."
+    }
+    if (!$Notebook.WaitForExit(10000)) { throw "$Role (PID $owner) did not exit after normal WM_CLOSE." }
+    if ($Notebook.ExitCode -ne 0) { throw "$Role (PID $owner) closed with exit code $($Notebook.ExitCode)." }
+    Write-Host "Verified normal window close and exit 0 for $Role (PID $owner)."
+}
 function Find-LaunchedPortableWorkspace {
     $running = @(Get-Process -Name Paperroom -ErrorAction SilentlyContinue | Where-Object {
         $_.Id -ne $sourceProcess.Id -and ($_.Path -ieq $restoreExe -or $_.Path -ieq "\\?\$restoreExe")
@@ -251,6 +269,7 @@ try {
     Assert-Hash $restoreExe
     $autoChild = Wait-For 'copy of exact EXE actually launched in its generated workspace' { Find-LaunchedPortableWorkspace }
     $childPid = $autoChild.Id
+    if ($autoChild.Handle -eq [IntPtr]::Zero) { throw 'Could not retain the app-launched child process.' }
     Write-Host "Verified the application's automatic portable launch (PID $childPid)."
     $process = $autoChild
     $window = $process.MainWindowHandle
@@ -292,7 +311,7 @@ try {
     $copyIdentity = ($copyWitness | ConvertFrom-Json).static | ConvertTo-Json -Depth 10 -Compress
     if ($baseIdentity -cne $copyIdentity) { throw 'Editing the restored copy changed attachment, relation or collection identity.' }
     Confirm-RestoreSource $sourceWitness $sourceHash $backupHash
-    Close-Notebook $process
+    Close-RestoreApplication $process $window 'automatically launched portable copy'
     $process.Dispose()
     $process = $null
     $autoChild = $null
@@ -306,7 +325,7 @@ try {
     if ((Read-WorkspaceRestoreWitness $restoreDb 'edited') -cne $copyWitness) {
         throw 'The isolated edit or its revision did not persist after reopening.'
     }
-    Close-Notebook $process
+    Close-RestoreApplication $process $window 'reopened portable copy'
     $process.Dispose()
     $process = $null
     Confirm-RestoreSource $sourceWitness $sourceHash $backupHash
@@ -316,7 +335,7 @@ try {
     }
     $process = $sourceProcess
     $window = $sourceWindow
-    Close-Notebook $process
+    Close-RestoreApplication $process $window 'original workspace'
     $process.Dispose()
     $process = $null
     $sourceProcess = $null

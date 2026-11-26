@@ -7,6 +7,7 @@ on:
       - 'docs/WINDOWS-DRAFT-QA.md'
       - 'scripts/windows-about-notices.ps1'
       - 'scripts/windows-highlight-workflow.ps1'
+      - 'scripts/windows-imported-legacy-link.ps1'
       - 'scripts/verify-windows-notice-bundle.py'
       - 'scripts/test_windows_notice_bundle.py'
 

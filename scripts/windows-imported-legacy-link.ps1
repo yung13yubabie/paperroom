@@ -41,7 +41,7 @@ function Assert-NoNativeLegacyJump {
     }
     [PaperroomHighlightGui]::TapKey($window,$process.Id,0x1B)
     $null = Wait-For 'legacy link menu dismissed' {
-        ![PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0)
+        [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32768',$null,0) -eq [IntPtr]::Zero
     }
 }
 

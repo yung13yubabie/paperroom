@@ -65,12 +65,13 @@ function WaitFor($stage,[scriptblock]$check) {
             Start-Sleep -Milliseconds 300
             continue
         }
-        $result = & $check $nodes
+        try { $result = & $check $nodes }
+        catch [Windows.Automation.ElementNotAvailableException] { Start-Sleep -Milliseconds 250; continue }
         if ($result) { Write-Host "Passed $stage"; return $result }
         Start-Sleep -Milliseconds 500
     } while ([datetime]::UtcNow -lt $end)
     @($nodes | Where-Object { $_.Current.Name -and $_.Current.Name.Length -le 150 }) |
-        Select-Object -First 50 | ForEach-Object { Write-Host ("Visible fixture control: " + $_.Current.ControlType.ProgrammaticName + " " + $_.Current.Name) }
+        Select-Object -First 50 | ForEach-Object { Write-Host ("Visible fixture control: " + [string]$_.Current.ControlType + " " + $_.Current.Name) }
     throw "Blocked at $stage. No matching visible UI in the verified Obsidian process."
 }
 function Exact($nodes,$name,$kind) {
@@ -182,7 +183,7 @@ $picker = WaitFor 'native folder picker' {
 }
 $pickerNodes=@($picker.FindAll($tree,$truth) | Where-Object { !$_.Current.IsOffscreen })
 $edits=@($pickerNodes | Where-Object {
-    $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $_.Current.IsEnabled
+    $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and $_.Current.IsEnabled
 })
 $edit=@($edits | Where-Object { $_.Current.Name.TrimEnd(':') -in 'Folder','Folder name','File name' })
 if ($edit.Count -eq 0 -and $edits.Count -eq 1) { $edit=$edits }
@@ -206,7 +207,7 @@ do {
     try {
         $fresh = [Windows.Automation.AutomationElement]::FromHandle($handle)
         $items=@($fresh.FindAll($tree,$truth) | Where-Object {
-            !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'VaultScopeA' -and $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
+            !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'VaultScopeA' -and $_.Current.ControlType -ne [Windows.Automation.ControlType]::Edit
         })
     } catch {
         Start-Sleep -Milliseconds 250
@@ -230,7 +231,7 @@ if ($confirm -eq [IntPtr]::Zero) { throw 'The selected folder has no native conf
 [ExactPicker]::ClickDefault($handle,$confirm)
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)
-    @($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' -and $_.Current.Name -match 'VaultScopeA' -and $_.Current.Name -match '1\.15\.1(?![\d.])' }).Count -gt 0
+    @($nodes | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and $_.Current.Name -match 'VaultScopeA' -and $_.Current.Name -match '1\.15\.1(?![\d.])' }).Count -gt 0
 }
 
 }
@@ -239,7 +240,7 @@ Start-Process $uri
 $vendor = WaitFor 'native Obsidian has the exact fixture tab in foreground' {
     param($nodes)
     $handle = [ExactPicker]::GetForegroundWindow()
-    @($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' -and
+    @($nodes | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and
         [IntPtr]$_.Current.NativeWindowHandle -eq $handle -and $_.Current.Name -like 'Flip - VaultScopeA - Obsidian 1.15.1*' }) | Select-Object -First 1
 }
 $window = [IntPtr]$vendor.Current.NativeWindowHandle
@@ -251,7 +252,7 @@ $sourceEnd=if ($sourceFolder -ceq 'Active') { 'Archive' } else { 'PinNative' }
 function Find-ExplorerLabel($nodes,[string]$name,[int]$top=-1,[int]$bottom=[int]::MaxValue) {
     $visible=@($nodes | Where-Object {
         $box=$_.Current.BoundingRectangle
-        $_.Current.Name -ceq $name -and $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Text' -and
+        $_.Current.Name -ceq $name -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Text -and
         !$box.IsEmpty -and $box.Left -ge $bounds[0] -and $box.Right -lt ($bounds[0]+[int]($bounds[2]*0.30)) -and
         $box.Top -gt $top -and $box.Bottom -lt $bottom
     })

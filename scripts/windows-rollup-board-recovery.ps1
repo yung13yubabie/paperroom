@@ -15,7 +15,7 @@ function Save-Rollup28([string]$Role,[bool]$Reverse,[bool]$Sum,[string]$Name) {
         [PaperroomHighlightGui]::Read((Control $window 116)) -ceq '已儲存集合彙總公式。'
     }
 }
-function Compare-Rollup28([string]$Formula,[hashtable]$Rows) {
+function Compare-Rollup28([string]$Formula,[hashtable]$Rows,[int]$Occurrences=1) {
     Native-Menu 120 5 '檢視公式結果…'
     Choose-CollectionRow $Formula
     $dialog=Wait-For 'formula values visibly shown' {
@@ -24,7 +24,7 @@ function Compare-Rollup28([string]$Formula,[hashtable]$Rows) {
     $text=[PaperroomHighlightGui]::Read((Control $dialog 101))
     foreach ($name in $Rows.Keys) {
         $pattern='(?m)^'+[regex]::Escape($name)+'\s+'+[regex]::Escape([string]$Rows[$name])+'\r?$'
-        if ($text -cnotmatch $pattern) { throw "Wrong visible $Formula result for $name. Window showed: $text" }
+        if ([regex]::Matches($text,$pattern).Count -ne $Occurrences) { throw "Wrong visible $Formula result or duplicate count for $name. Window showed: $text" }
     }
     Finish-Revision $dialog 1
 }
@@ -43,8 +43,11 @@ function TargetDuration28([string]$Old,[string]$New) {
     }
 }
 function Open-NativeBoard28([string]$Title) {
-    Select-Note '共同筆記'
-    Click-WorkspaceButton 119
+    if ([PaperroomHighlightGui]::Read((Control $window 119)) -cne '返回筆記' -or
+        [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') {
+        Select-Note '共同筆記'
+        Click-WorkspaceButton 119
+    }
     $null=Wait-For 'native board controls ready before board selection' {
         if ([PaperroomHighlightGui]::Read((Control $window 119)) -cne '返回筆記' -or
             [PaperroomHighlightGui]::Read((Control $window 120)) -cne '白板操作') { return $false }
@@ -92,9 +95,9 @@ with closing(sqlite3.connect(Path(path).as_uri()+"?mode=ro",uri=True)) as c:
     assert json.loads(rules)==[False,[["DurationTotal","formula-number",4,"0"]],[["DurationTotal","formula-number",True]]],rules
     terms=dict(c.execute("select name,expression from collection_formulas"))
     field_id,=c.execute("select id from relation_fields where name='關聯'").fetchone()
-    assert terms["DurationTotal"].startswith(f'field_sum("{field_id}"'),terms
-    assert terms["RelatedCount"].startswith(f'field_count("{field_id}"'),terms
-    assert terms["IncomingCount"].startswith(f'field_count("{field_id}"'),terms
+    assert terms["DurationTotal"]==f'field_sum("{field_id}","out","Duration")',terms
+    assert terms["RelatedCount"]==f'field_count("{field_id}","out")',terms
+    assert terms["IncomingCount"]==f'field_count("{field_id}","in")',terms
     for note,value in [(int(exact),"12"),(int(decoy),"1")]:
         assert c.execute("select value from note_properties where note_id=? and key='Duration'",(note,)).fetchone()==(value,)
     assert c.execute("select source_id,target_id from note_relations where name='關聯'").fetchall()==[(int(id0),int(decoy))]
@@ -131,7 +134,7 @@ Compare-Rollup28 'DurationTotal' @{'共同筆記'=8;'對照筆記'=1}
 Compare-Rollup28 'RelatedCount' @{'共同筆記'=1;'對照筆記'=1}
 Collection27 'Target'
 Save-Rollup28 'exact' $true $false 'IncomingCount'
-Compare-Rollup28 'IncomingCount' @{'場景'=1}
+Compare-Rollup28 'IncomingCount' @{'場景'=1} 2
 
 Collection27 'Source'
 Native-Menu 120 11 '集合檢視…'

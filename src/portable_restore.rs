@@ -66,12 +66,66 @@ fn copy_new(input:&mut File,destination:&Path,created:&mut bool)->Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn origin_stream_path(path: &Path) -> PathBuf {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    PathBuf::from(stream)
+}
+
+#[cfg(windows)]
+fn origin_mark(path: &Path) -> Result<Option<Vec<u8>>> {
+    let input = match File::open(origin_stream_path(path)) {
+        Ok(input) => input,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        // A filesystem without named streams cannot contain the mark.
+        Err(error) if matches!(error.raw_os_error(), Some(50 | 123)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    const LIMIT: usize = 64 * 1024;
+    let mut mark = Vec::new();
+    input.take((LIMIT + 1) as u64).read_to_end(&mut mark)?;
+    if mark.len() > LIMIT {
+        return Err("Windows 來源標記大小超出可核對範圍。".into());
+    }
+    Ok(Some(mark))
+}
+
+#[cfg(windows)]
+fn copy_application(source: &Path, destination: &Path, created: &mut bool) -> Result<()> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Storage::FileSystem::CopyFileExW;
+    const COPY_FILE_FAIL_IF_EXISTS: u32 = 0x00000001;
+
+    // Win32's copy also copies named streams such as the Windows download mark.
+    let origin = origin_mark(source)?;
+    let from = path_wide(source);
+    let to = path_wide(destination);
+    if unsafe {
+        CopyFileExW(
+            from.as_ptr(), to.as_ptr(), None, null_mut(), null_mut(), COPY_FILE_FAIL_IF_EXISTS,
+        )
+    } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    *created = true;
+    if origin_mark(destination)? != origin {
+        return Err("目的地無法保留目前紙間的 Windows 來源標記。".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn path_wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
 fn publish_folder(stage:&Path,destination:&Path)->Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        let wide=|p:&Path|p.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        let from=wide(stage);let to=wide(destination);
+        let from = path_wide(stage);
+        let to = path_wide(destination);
         if unsafe {windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(),to.as_ptr(),0)}==0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -101,15 +155,24 @@ pub(crate) fn restore_workspace(source:&Path,parent:&Path,name:&str,live_db:&Pat
         Err(e) if e.kind()==io::ErrorKind::NotFound=>(),
         Err(e)=>return Err(e.into()),
     }
+    #[cfg(windows)]
+    let (_, _source_path_guards) = attachments::pin_local_parents(source)
+        .map_err(|error| format!("無法檢查備份來源資料夾：{error}"))?;
     if fs::canonicalize(source)?==fs::canonicalize(live_db)? {return Err("請選擇獨立的紙間備份，不能使用目前開啟的工作區。".into());}
-    let (mut db_file,_source_guards)=attachments::open_local_file(source)?;
+    let (mut db_file,_source_guards)=attachments::open_local_file(source)
+        .map_err(|error| format!("無法讀取備份來源：{error}"))?;
     sidecars(source)?;
     let mut header=[0u8;20];
     if db_file.read_exact(&mut header).is_err() || &header[..16]!=b"SQLite format 3\0" || header[18..]!=[1,1] {
         return Err("請選擇「備份工作區」產生的獨立紙間備份。".into());
     }
     db_file.rewind()?;
-    let (mut app_file,_exe_guards)=attachments::open_local_file(exe)?;
+    let (app_file, _exe_guards) = attachments::open_local_file(exe)
+        .map_err(|error| format!("無法檢查目前紙間程式：{error}"))?;
+    #[cfg(not(windows))]
+    let mut app_file = app_file;
+    #[cfg(windows)]
+    let _app_file = app_file;
     let stage=loop {
         let stage=parent.join(format!(".paperroom-restore-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
         if stage==destination {continue;}
@@ -125,21 +188,29 @@ pub(crate) fn restore_workspace(source:&Path,parent:&Path,name:&str,live_db:&Pat
     let (mut made_data,mut made_db,mut made_exe)=(false,false,false);
     let result=(||->Result<()>{
         #[cfg(windows)]
-        let (_, _stage_guards)=attachments::pin_local_parents(&staged_exe)?;
-        fs::create_dir(&data)?;
+        let (_, _stage_guards)=attachments::pin_local_parents(&staged_exe)
+            .map_err(|error| format!("無法檢查準備中的工作區：{error}"))?;
+        fs::create_dir(&data).map_err(|error| format!("無法建立工作區資料目錄：{error}"))?;
         made_data=true;
         #[cfg(windows)]
-        let (_, _data_guards)=attachments::pin_local_parents(&staged_db)?;
-        copy_new(&mut db_file,&staged_db,&mut made_db)?;
+        let (_, _data_guards)=attachments::pin_local_parents(&staged_db)
+            .map_err(|error| format!("無法檢查工作區資料目錄：{error}"))?;
+        copy_new(&mut db_file,&staged_db,&mut made_db)
+            .map_err(|error| format!("無法複製紙間備份：{error}"))?;
         sidecars(source)?;
         validate_database(&staged_db).map_err(|e|format!("無法驗證紙間備份：{e}"))?;
-        copy_new(&mut app_file,&staged_exe,&mut made_exe)?;
+        #[cfg(windows)]
+        copy_application(exe, &staged_exe, &mut made_exe)
+            .map_err(|error| format!("無法複製目前的紙間程式：{error}"))?;
+        #[cfg(not(windows))]
+        copy_new(&mut app_file, &staged_exe, &mut made_exe)?;
         if fs::read_dir(&stage)?.count()!=2 || fs::read_dir(&data)?.count()!=1 {
             return Err("建立期間資料夾內容已變更，已停止另開工作區。".into());
         }
         #[cfg(windows)]
         { drop(_data_guards);drop(_stage_guards); }
-        publish_folder(&stage,&destination)?;
+        publish_folder(&stage, &destination)
+            .map_err(|error| format!("無法完成新的工作區資料夾：{error}"))?;
         Ok(())
     })();
     if let Err(error)=result {
@@ -163,15 +234,22 @@ mod tests {
         let backup=dir.join("saved.sqlite3");
         let exe=dir.join("original.exe");
         fs::write(&exe,b"synthetic binary identity")?;
+        #[cfg(windows)]
+        let expected_origin = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        #[cfg(windows)]
+        fs::write(origin_stream_path(&exe), expected_origin)?;
         let mut db=Notebook::open(&live,false)?;
         let note=db.add(None,"分鏡","備份的正文")?;
         let text=dir.join("附件.txt");fs::write(&text,b"exact bytes")?;
         let asset=db.import_attachment(note,&text)?;
-        db.backup(&backup)?;
+        db.backup(&backup).map_err(|error| format!("create test backup: {error}"))?;
         let original=fs::read(&backup)?;
         db.save(note,1,"分鏡","備份之後")?;
         let restored=restore_workspace(&backup,&dir,"副本",&live,&exe)?;
-        assert_eq!(fs::read(restored.join("Paperroom.exe"))?,fs::read(&exe)?);
+        let restored_exe = restored.join("Paperroom.exe");
+        assert_eq!(fs::read(&restored_exe)?, fs::read(&exe)?);
+        #[cfg(windows)]
+        assert_eq!(origin_mark(&restored_exe)?.as_deref(), Some(expected_origin.as_slice()));
         let copy=restored.join("paperroom-data/notes.sqlite3");
         assert_eq!(fs::read(&copy)?,original);
         let work=Notebook::open(&copy,false)?;
@@ -226,7 +304,9 @@ mod tests {
         assert_eq!(upgraded.note(note)?.unwrap().body,"備份的正文");drop(upgraded);
         for target in ["非工作區","未知結構","日誌中","新版","活動來源"] {assert!(!dir.join(target).exists());}
         assert!(!dir.read_dir()?.any(|p|p.unwrap().file_name().to_string_lossy().starts_with(".paperroom-restore-")));
-        drop(db);drop(work);fs::remove_dir_all(dir)?;
+        drop(db);
+        drop(work);
+        fs::remove_dir_all(dir).map_err(|error| format!("remove closed test workspaces: {error}"))?;
         Ok(())
     }
 }

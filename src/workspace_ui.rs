@@ -107,7 +107,8 @@ impl App {
             let Some(source) = file_dialog(
                 self.hwnd, "紙間備份\0*.sqlite3;*.db\0所有檔案\0*.*\0\0", "", None,
             )? else { return Ok(()); };
-            let Some(parent) = folder_dialog(self.hwnd)? else { return Ok(()); };
+            let Some(parent) = folder_dialog_with_title(self.hwnd, "選擇新可攜工作區的上層資料夾")?
+                else { return Ok(()); };
             let Some(name) = crate::dialog::prompt(
                 self.hwnd, "新可攜工作區", "在所選資料夾內建立新的子資料夾，請輸入名稱。",
                 "Paperroom-還原", 180,
@@ -125,14 +126,18 @@ impl App {
             let destination = crate::store::portable_restore::restore_workspace(
                 &source, &parent, &name, &self.data_dir.join("notes.sqlite3"), &std::env::current_exe()?,
             )?;
-            std::process::Command::new(destination.join("Paperroom.exe"))
-                .arg("--portable")
-                .current_dir(&destination)
-                .spawn()
-                .map_err(|error| format!(
-                    "工作區已建立於 {}；請雙擊其中的 Paperroom.exe。啟動時發生錯誤：{error}",
-                    destination.display()
-                ))?;
+            let exe = wide_path(&destination.join("Paperroom.exe"));
+            let location = wide_path(&destination);
+            let opened = ShellExecuteW(
+                self.hwnd, wide("open").as_ptr(), exe.as_ptr(), wide("--portable").as_ptr(),
+                location.as_ptr(), SW_SHOWNORMAL,
+            );
+            if opened as usize <= 32 {
+                return Err(format!(
+                    "工作區已建立於 {}。Windows 未開啟副本（{}），可從該資料夾開啟 Paperroom.exe。",
+                    destination.display(), opened as usize
+                ).into());
+            }
             label(self.widgets.status, "已從備份另開可攜工作區。");
             Ok(())
         }

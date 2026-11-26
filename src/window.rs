@@ -2063,13 +2063,17 @@ unsafe fn file_dialog_in(
 }
 
 unsafe fn folder_dialog(owner: HWND) -> Result<Option<PathBuf>> {
+    unsafe { folder_dialog_with_title(owner, "選擇要匯入的 Obsidian Vault 資料夾") }
+}
+
+unsafe fn folder_dialog_with_title(owner: HWND, instruction: &str) -> Result<Option<PathBuf>> {
     unsafe {
         use std::os::windows::ffi::OsStringExt;
         let status = CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
         if status < 0 {
             return Err(format!("無法開啟資料夾選擇器（{status:#x}）。").into());
         }
-        let title = wide("選擇要匯入的 Obsidian Vault 資料夾");
+        let title = wide(instruction);
         let mut display = [0u16; 260];
         let options = BROWSEINFOW {
             hwndOwner: owner,

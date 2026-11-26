@@ -111,6 +111,13 @@ function Open-RestoreConfirmation([string]$Backup,[string]$ChildName) {
         [PaperroomHighlightGui]::OwnedWindow($window,$process.Id,'#32770','確認另開備份',7)
     }
 }
+function Wait-ForRestoreCollectionView {
+    $null = Wait-For 'native restore fixture collection switched to the intended board' {
+        [PaperroomHighlightGui]::Read((Control $window 115)).Contains($restoreCollection) -and
+        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作' -and
+        [PaperroomHighlightGui]::Read((Control $window 119)) -ceq '返回筆記'
+    }
+}
 function Confirm-RestoreRefusal([string]$Text) {
     $errorWindow = Wait-For 'native workspace restore refusal' {
         [PaperroomHighlightGui]::ForegroundAlert($window,$process.Id,'紙間')
@@ -168,10 +175,12 @@ $null = Wait-For 'restorable source version saved' {
 Native-Menu 109 10 '資料集合與看板…'
 Native-Menu 109 2 '新增集合…' -MenuOpen
 Collection-Prompt '新增集合' $restoreCollection
+Wait-ForRestoreCollectionView
 foreach ($title in $restoreNoteTitle,$restorePeerTitle) {
     Native-Menu 120 1 '加入筆記…'
     Choose-CollectionRow "$title  ("
     Collection-Prompt '加入集合'
+    Wait-ForRestoreCollectionView
 }
 Command $window 119
 $null = Wait-For 'source note view after creating the collection' {
@@ -226,8 +235,8 @@ try {
     Write-Host "Verified the application's automatic portable launch (PID $childPid)."
     $process = $autoChild
     $window = $process.MainWindowHandle
-    if (![PaperroomHighlightGui]::Read((Control $window 118)).Contains('可攜工作區')) {
-        throw 'Restored copy did not open in portable mode.'
+    $null = Wait-For 'restored child has presented its portable workspace indicator' {
+        [PaperroomHighlightGui]::Read((Control $window 118)).Contains('可攜工作區')
     }
     if ((Read-WorkspaceRestoreWitness $restoreDb 'baseline') -cne $sourceWitness) {
         throw 'Newly created portable workspace does not match the backed-up notes, assets and identities.'
@@ -237,9 +246,7 @@ try {
     Native-Menu 109 10 '資料集合與看板…'
     Native-Menu 109 1 '開啟集合看板…' -MenuOpen
     Choose-CollectionRow $restoreCollection
-    $null = Wait-For 'backed-up collection open from restored copy' {
-        [PaperroomHighlightGui]::Read((Control $window 120)) -ceq '看板操作'
-    }
+    Wait-ForRestoreCollectionView
     Native-Menu 120 3 '開啟資料列…'
     Choose-CollectionRow "待處理　$restoreNoteTitle  ("
     $null = Wait-For 'restored collection opens the backed-up source note' {

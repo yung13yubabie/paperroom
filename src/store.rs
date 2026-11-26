@@ -135,7 +135,7 @@ pub use properties::{MAX_KEY_BYTES, MAX_VALUE_BYTES, key_checked};
 #[path = "integration_imports.rs"]
 mod integration_imports;
 
-const SCHEMA_VERSION: i32 = 35;
+const SCHEMA_VERSION: i32 = 36;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const MAX_NOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -202,6 +202,15 @@ pub fn clean_title(title: &str) -> String {
     title.chars().take(MAX_TITLE_CHARS).collect()
 }
 
+fn confirm_workspace_journal(connection: &Connection, memory: bool) -> Result<()> {
+    let actual: String = connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    let expected = if memory { "memory" } else { "wal" };
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!("工作區日誌需要 {expected} 模式，SQLite 回報 {actual}。請確認工作區仍在可寫入的本機磁碟。").into());
+    }
+    Ok(())
+}
+
 impl Notebook {
     pub fn open(path: &Path, seed: bool) -> Result<Self> {
         // The Win32 VFS ultimately opens this UTF-16 name. Use extended
@@ -227,7 +236,7 @@ impl Notebook {
         if version > SCHEMA_VERSION {
             return Err("這份筆記由較新的紙間版本建立。".into());
         }
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        confirm_workspace_journal(&connection, path == Path::new(":memory:"))?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -399,6 +408,9 @@ impl Notebook {
         }
         if version < 35 {
             tx.execute_batch(collection_group_folds::SCHEMA)?;
+        }
+        if version < 36 {
+            note_links::preserve_legacy_links(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1106,6 +1118,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_verifies_real_sqlite_journal_mode_before_writing() -> Result<()> {
+        let dir = data_dir();
+        let path = dir.join("workspace.sqlite3");
+        let backup = dir.join("reopened.sqlite3");
+        let read_mode = |connection: &Connection| {
+            connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+        };
+        let mut disk = Notebook::open(&path, false)?;
+        assert_eq!(read_mode(&disk.connection)?, "wal");
+        let id = disk.add(None, "日誌測試", "已儲存")?;
+        disk.backup(&backup)?;
+        drop(disk);
+
+        for opened in [&path, &backup] {
+            let live = Notebook::open(opened, false)?;
+            assert_eq!(read_mode(&live.connection)?, "wal");
+            assert_eq!(live.note(id)?.unwrap().body, "已儲存");
+        }
+        let memory = Notebook::open(Path::new(":memory:"), false)?;
+        assert_eq!(read_mode(&memory.connection)?, "memory");
+        assert!(confirm_workspace_journal(&memory.connection, false)
+            .unwrap_err().to_string().contains("SQLite 回報 memory"));
+
+        let locked_path = dir.join("locked-before-open.sqlite3");
+        let holder = Connection::open(&locked_path)?;
+        holder.execute_batch("CREATE TABLE existing_record(value TEXT);
+            INSERT INTO existing_record VALUES('原樣');
+            BEGIN IMMEDIATE;")?;
+        assert!(Notebook::open(&locked_path, true).is_err());
+        assert_eq!(read_mode(&holder)?, "delete");
+        assert_eq!(holder.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?, 0);
+        assert_eq!(holder.query_row("SELECT value FROM existing_record", [], |row| row.get::<_, String>(0))?, "原樣");
+        assert!(!holder.prepare("SELECT name FROM sqlite_schema WHERE name='notes'")?.exists([])?);
+        holder.execute_batch("ROLLBACK")?;
+        drop(holder);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn newer_database_keeps_its_journal_mode() -> Result<()> {
         let dir = data_dir();
         let path = dir.join("future.sqlite3");
@@ -1266,7 +1318,10 @@ mod tests {
         assert_eq!(target.body, "second");
         assert_eq!(db.related(&target)?.1[0].id, source_id);
         let version = note.version;
-        db.save(source_id, version, "Source", &format!("[[paperroom:note:{local}|Outside]]"))?;
+        let token: String = db.connection.query_row(
+            "SELECT token FROM note_link_identities WHERE note_id=?1", [local], |row| row.get(0),
+        )?;
+        db.save(source_id, version, "Source", &note_links::note_link_markup(local, &token, "Outside"))?;
         assert_eq!(db.related(&db.note(source_id)?.unwrap())?.0[0].id, local);
         Ok(())
     }

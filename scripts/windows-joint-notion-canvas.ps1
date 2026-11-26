@@ -62,7 +62,7 @@ vault_assets = {
 }
 with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db, \
      ZipFile(notion) as raw, ZipFile(portable) as moved:
-    assert db.execute("PRAGMA user_version").fetchone() == (35,)
+    assert db.execute("PRAGMA user_version").fetchone() == (36,)
     assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert set(moved.namelist()) == {canvas.name, "附件/畫面.png"}

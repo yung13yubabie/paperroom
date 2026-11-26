@@ -119,6 +119,38 @@ struct StoredAttachment {
     origin: Option<String>,
 }
 
+/// Only changed or removed live attachments can invalidate those references.
+pub(super) fn protected_attachment_changes(db: &Connection, note: i64, revision: i64) -> Result<Vec<String>> {
+    let same = unchanged_ids(db,note,revision)?;
+    protected_changes_excluding(db,note,&same)
+}
+
+fn protected_changes_excluding(db:&Connection,note:i64,same:&BTreeSet<i64>)->Result<Vec<String>> {
+    let mut query = db.prepare("SELECT a.id,a.name,
+        EXISTS(SELECT 1 FROM pdf_annotations WHERE attachment_id=a.id),
+        EXISTS(SELECT 1 FROM pdf_excerpt_origins WHERE attachment_id=a.id),
+        EXISTS(SELECT 1 FROM board_group_sources s JOIN pdf_annotations p ON s.annotation_id=p.id WHERE p.attachment_id=a.id),
+        EXISTS(SELECT 1 FROM collection_template_resources WHERE attachment_id=a.id),
+        EXISTS(SELECT 1 FROM board_image_cards WHERE attachment_id=a.id),
+        EXISTS(SELECT 1 FROM zotero_imports WHERE original_attachment=a.id)
+        FROM attachments a WHERE a.note_id=?1 ORDER BY a.id")?;
+    let mut items=Vec::new();
+    let mut rows=query.query([note])?;
+    while let Some(row)=rows.next()? {
+        let id:i64=row.get(0)?;
+        if same.contains(&id) { continue; }
+        let mut uses=Vec::new();
+        for (i,kind) in ["PDF 標註","PDF 摘錄卡","白板分區釘選","資料列範本","白板圖片卡","Zotero 書目"].iter().enumerate() {
+            if row.get::<_,bool>(i+2)? { uses.push(*kind); }
+        }
+        if !uses.is_empty() {
+            let name:String=row.get(1)?;
+            items.push(format!("{}　[#{id}]（{}）",super::note_history::preview_field(&name),uses.join("、")));
+        }
+    }
+    Ok(items)
+}
+
 pub(super) struct AttachmentRestore {
     remove: Vec<i64>,
     replace: Vec<StoredAttachment>,
@@ -130,6 +162,10 @@ impl AttachmentRestore {
             return Err(super::note_history::BASE_SOURCE_GUIDANCE.into());
         }
         let same = unchanged_ids(tx, note, revision)?;
+        let blocked=protected_changes_excluding(tx,note,&same)?;
+        if !blocked.is_empty() {
+            return Err(format!("附件仍被其他資料使用，無法整份還原：{}",blocked.join("；")).into());
+        }
         let (count, total, elsewhere): (i64, i64, i64) = tx.query_row(
             "SELECT count(*),coalesce(sum(length(content)),0),
               (SELECT coalesce(sum(length(content)),0) FROM attachments WHERE note_id<>?1)
@@ -163,19 +199,6 @@ impl AttachmentRestore {
             replacements.push(item);
         }
         let remove = live.keys().filter(|id| !retained.contains(*id)).copied().collect::<Vec<_>>();
-        for id in live.keys().filter(|id| !same.contains(*id)) {
-            let used: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pdf_annotations WHERE attachment_id=?1)
-                     OR EXISTS(SELECT 1 FROM pdf_excerpt_origins WHERE attachment_id=?1)
-                     OR EXISTS(SELECT 1 FROM collection_template_resources WHERE attachment_id=?1)
-                     OR EXISTS(SELECT 1 FROM board_image_cards WHERE attachment_id=?1)
-                     OR EXISTS(SELECT 1 FROM zotero_imports WHERE original_attachment=?1)",
-                [id], |r| r.get(0),
-            )?;
-            if used {
-                return Err(format!("「{}」仍被標註、摘錄、範本、白板或書目使用，已取消整份還原。", live[id]).into());
-            }
-        }
         Ok(Self { remove, replace: replacements })
     }
 

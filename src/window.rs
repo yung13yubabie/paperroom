@@ -2088,6 +2088,24 @@ unsafe fn folder_dialog(owner: HWND) -> Result<Option<PathBuf>> {
 }
 
 impl App {
+    unsafe fn open_vault_backlink_position(&mut self,target:i64)->Result<()> {
+        unsafe {
+            let hits=self.notebook.vault_backlink_positions(target)?;
+            if hits.is_empty(){label(self.widgets.status,"這篇筆記沒有可定位的 Vault 反向連結。");return Ok(())}
+            let Some(i)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,hits.len(),|i|hits[i].label.as_str()) else{return Ok(())};
+            let hit=&hits[i];
+            let note=self.notebook.recheck_vault_backlink(hit)?;
+            let cursor=crate::store::navigation::editor_source_selection(&note.body,hit.range.clone()).ok_or("找不到反向連結的原文。")?;
+            self.view=View::All;
+            self.editing=false;
+            label(self.widgets.search,"");
+            self.set_current_note(Some(note));
+            self.rebuild();
+            if self.focus_source_selection(cursor.start,cursor.end)? {label(self.widgets.status,"已定位 Vault 反向連結原文。")}
+            Ok(())
+        }
+    }
+
     unsafe fn links_menu(&mut self) {
         use crate::markdown::AnchorSyntax;
         unsafe {
@@ -2139,7 +2157,11 @@ impl App {
                 labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
                 labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
                 let rename_heading = named + 4;
+                let backlink_positions = named + 5;
                 if app.notebook.graph_vault(source)?.is_some() {
+                    if app.notebook.supports_vault_backlink_positions(source)? {
+                        labels.insert(4,(backlink_positions,"查看 Vault 反向連結原文位置…".to_owned()));
+                    }
                     labels.insert(4,(rename_heading,"重新命名 Vault 小節…".to_owned()));
                 }
                 let notion_source = named + 3;
@@ -2158,6 +2180,7 @@ impl App {
                     index if index == graph => app.open_note_graph(source)?,
                     index if index == named => app.show_named_relation_navigation(source)?,
                     index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == backlink_positions => app.open_vault_backlink_position(source)?,
                     index if index == rename_heading => app.rename_vault_heading(source)?,
                     index if index == notion_source => app.bind_notion_source_page(source)?,
                     index if index == native_board => app.show_native_board_locations(source)?,

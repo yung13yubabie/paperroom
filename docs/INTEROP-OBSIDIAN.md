@@ -42,3 +42,7 @@
 ## 離線不可實現的雲端服務
 
 - Obsidian Sync 的遠端儲存、跨裝置歷史及共同 Vault，以及 Obsidian Publish 的網站服務。[Sync](https://obsidian.md/help/sync) · [Publish](https://obsidian.md/publish)
+
+### 找到反向連結在原文中的位置
+
+在已匯入 Vault 的目標筆記開啟「連結 → 查看 Vault 反向連結原文位置…」，選擇來源路徑、行號和連結文字。編輯器會反白該次引用的完整 Markdown。同一篇來源引用兩次會出現兩列。這份清單限於同一 Vault 其他現用筆記的 Markdown 與 Wiki 筆記連結。程式碼、嵌入、無法唯一解析的同名連結不列入。若來源在選單開啟期間改動，請重新開啟清單。完整掃描上限為 5,000 份路徑、64 MiB 含連結正文及 500 個命中。

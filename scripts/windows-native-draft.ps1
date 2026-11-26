@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExeSha256,
-    [Parameter(Mandatory)][ValidateSet('shared-workflow','vault-heading','receipt-history','collection-bulk-edit','native-board-edge-navigation','native-board-transfer','notion-reverse-rows')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('shared-workflow','vault-heading','receipt-history','collection-bulk-edit','native-board-edge-navigation','native-board-transfer','notion-reverse-rows','pdf-history-text','vault-deep-backlinks')][string]$Scenario,
     [Parameter(Mandatory)][string]$Receipt
 )
 Set-StrictMode -Version Latest
@@ -32,6 +32,8 @@ $control=switch ($Scenario) {
     'native-board-edge-navigation' { @{SharedNoteWorkflowOnly=$true; SharedFixtureCase='native-board-edge-navigation'} }
     'native-board-transfer' { @{SharedNoteWorkflowOnly=$true; SharedFixtureCase='native-board-transfer'} }
     'notion-reverse-rows' { @{NotionSourceOnly=$true; NotionReverseRows=$true} }
+    'pdf-history-text' { @{PdfHistoryTextOnly=$true} }
+    'vault-deep-backlinks' { @{VaultDeepBacklinksOnly=$true} }
     'shared-workflow' { @{SharedNoteWorkflowOnly=$true} }
 }
 $temp=Join-Path (Split-Path -Parent $out) ([guid]::NewGuid().ToString()+'.partial.json')

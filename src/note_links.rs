@@ -204,6 +204,8 @@ impl Notebook {
 mod vault_heading_rename;
 #[path = "vault_block_audit.rs"]
 mod vault_block_audit;
+#[path = "vault_backlink_positions.rs"]
+mod vault_backlink_positions;
 #[path = "vault_mentions.rs"]
 mod vault_mentions;
 pub(crate) use vault_mentions::VaultMention;

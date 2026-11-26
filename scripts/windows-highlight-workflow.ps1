@@ -27,6 +27,8 @@ param(
     [ValidateSet('shared-workflow','collection-bulk-edit','native-board-edge-navigation','native-board-transfer')][string]$SharedFixtureCase='shared-workflow',
     [switch]$VaultHeadingOnly,
     [switch]$ReceiptHistoryOnly,
+    [switch]$PdfHistoryTextOnly,
+    [switch]$VaultDeepBacklinksOnly,
     [switch]$BasesDescendingOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -1457,6 +1459,14 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($PdfHistoryTextOnly) {
+        . (Join-Path $PSScriptRoot 'windows-pdf-history-text.ps1')
+        return
+    }
+    if ($VaultDeepBacklinksOnly) {
+        . (Join-Path $PSScriptRoot 'windows-vault-deep-backlinks.ps1')
+        return
+    }
     if ($ReceiptHistoryOnly) {
         . (Join-Path $PSScriptRoot 'windows-receipt-history.ps1')
         return

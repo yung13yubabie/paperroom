@@ -79,6 +79,7 @@ impl Notebook {
         let (title, body) = revision_content(&tx, note, revision)?;
         let state = snapshot_properties(&tx, revision)?;
         let base_source_blocked = state.is_some() && super::note_history_state::changes_base_source(&tx,note,revision)?;
+        let protected_files = if state.is_some() { super::note_history_state::protected_attachment_changes(&tx,note,revision)? } else { Vec::new() };
         let (metadata, metadata_changed) = if let Some(properties) = state {
             let changed = properties != current_properties(&tx, note)? || attachments_changed(&tx, note, revision)?;
             let files = summaries(&tx, revision)?;
@@ -95,12 +96,20 @@ impl Notebook {
             ("此舊快照只保存標題與正文。還原會保留目前的屬性與附件。".into(), false)
         };
         tx.commit()?;
-        Ok(RevisionPreview { title, body, metadata, metadata_changed, base_source_blocked, data_version })
+        Ok(RevisionPreview { title, body, metadata, metadata_changed, base_source_blocked, protected_files, data_version })
     }
 
     pub(crate) fn restore_note_revision(
         &self, note: i64, expected: i64, revision: i64, reviewed_data_version: Option<i64>,
     ) -> Result<bool> {
+        self.restore_revision_parts(note,expected,revision,reviewed_data_version,false)
+    }
+
+    pub(crate) fn restore_revision_text(&self,note:i64,expected:i64,revision:i64,reviewed:i64)->Result<bool> {
+        self.restore_revision_parts(note,expected,revision,Some(reviewed),true)
+    }
+
+    fn restore_revision_parts(&self,note:i64,expected:i64,revision:i64,reviewed_data_version:Option<i64>,text_only:bool)->Result<bool> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let data_version: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
         if reviewed_data_version.is_some_and(|reviewed| reviewed != data_version) {
@@ -113,6 +122,12 @@ impl Notebook {
         ).optional()?.ok_or("目前版本已變更。請重新開啟筆記並預覽。")?;
 
         let text_changed = current.0 != title || current.1 != body;
+        if text_only {
+            if !text_changed {return Ok(false);}
+            super::save_in(&tx,note,expected,&title,&body)?;
+            tx.commit()?;
+            return Ok(true);
+        }
         let properties = snapshot_properties(&tx, revision)?;
         let current_properties = properties.as_ref().map(|_| current_properties(&tx, note)).transpose()?;
         let files_changed = properties.is_some() && attachments_changed(&tx, note, revision)?;
@@ -142,10 +157,11 @@ pub(crate) struct RevisionPreview {
     pub(crate) metadata: String,
     pub(crate) metadata_changed: bool,
     pub(crate) base_source_blocked: bool,
+    pub(crate) protected_files: Vec<String>,
     pub(crate) data_version: i64,
 }
 
-fn preview_field(value: &str) -> String {
+pub(super) fn preview_field(value: &str) -> String {
     let mut text: String = value.chars().take(120)
         .map(|c| if c.is_control() { ' ' } else { c }).collect();
     if value.chars().nth(120).is_some() { text.push('…'); }

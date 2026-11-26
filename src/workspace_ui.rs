@@ -102,6 +102,42 @@ unsafe fn choose<T>(
 }
 
 impl App {
+    pub(super) unsafe fn restore_workspace_ui(&self) -> Result<()> {
+        unsafe {
+            let Some(source) = file_dialog(
+                self.hwnd, "紙間備份\0*.sqlite3;*.db\0所有檔案\0*.*\0\0", "", None,
+            )? else { return Ok(()); };
+            let Some(parent) = folder_dialog(self.hwnd)? else { return Ok(()); };
+            let Some(name) = crate::dialog::prompt(
+                self.hwnd, "新可攜工作區", "在所選資料夾內建立新的子資料夾，請輸入名稱。",
+                "Paperroom-還原", 180,
+            )? else { return Ok(()); };
+            let destination = parent.join(&name);
+            let summary = format!(
+                "從 {} 讀取備份，在 {} 建立可攜工作區，並用目前版本的紙間另開視窗？",
+                source.display(), destination.display()
+            );
+            if message(self.hwnd, "確認另開備份", &summary, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES {
+                return Ok(());
+            }
+
+            let parent = resolved_workspace_directory(&parent)?;
+            let destination = crate::store::portable_restore::restore_workspace(
+                &source, &parent, &name, &self.data_dir.join("notes.sqlite3"), &std::env::current_exe()?,
+            )?;
+            std::process::Command::new(destination.join("Paperroom.exe"))
+                .arg("--portable")
+                .current_dir(&destination)
+                .spawn()
+                .map_err(|error| format!(
+                    "工作區已建立於 {}；請雙擊其中的 Paperroom.exe。啟動時發生錯誤：{error}",
+                    destination.display()
+                ))?;
+            label(self.widgets.status, "已從備份另開可攜工作區。");
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn show_card_collections(&mut self, origin: &crate::store::native_board_locations::NativeBoardLocation) -> Result<()> {
         let memberships = self.notebook.card_memberships(origin)?;
         unsafe {

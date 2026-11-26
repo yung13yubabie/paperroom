@@ -29,6 +29,8 @@ param(
     [switch]$ReceiptHistoryOnly,
     [switch]$PdfHistoryTextOnly,
     [switch]$HistoryAttachmentExportOnly,
+    [switch]$WorkspaceRestoreOnly,
+    [switch]$WorkspacePdfSearchOnly,
     [switch]$VaultDeepBacklinksOnly,
     [switch]$BasesDescendingOnly
 )
@@ -1477,6 +1479,14 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($WorkspaceRestoreOnly) {
+        . (Join-Path $PSScriptRoot 'windows-workspace-restore35.ps1')
+        return
+    }
+    if ($WorkspacePdfSearchOnly) {
+        . (Join-Path $PSScriptRoot 'windows-workspace-pdf-search35.ps1')
+        return
+    }
     if ($HistoryAttachmentExportOnly) {
         . (Join-Path $PSScriptRoot 'windows-history-attachment-export.ps1')
         return

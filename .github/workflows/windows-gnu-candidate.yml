@@ -107,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flow: [shared-workflow, vault-heading, receipt-history, collection-bulk-edit, native-board-edge-navigation, native-board-transfer, notion-reverse-rows, pdf-history-text, vault-deep-backlinks, history-attachment-export, board-card-collection-row]
+        flow: [shared-workflow, vault-heading, receipt-history, collection-bulk-edit, native-board-edge-navigation, native-board-transfer, notion-reverse-rows, pdf-history-text, vault-deep-backlinks, history-attachment-export, board-card-collection-row, workspace-restore, workspace-pdf-search]
     env:
       EXPECTED_EXE: ${{ needs.build.outputs.exe_sha }}
       EXPECTED_ZIP: ${{ needs.build.outputs.zip_sha }}

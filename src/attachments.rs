@@ -43,6 +43,7 @@ pub struct PdfAnnotation {
 pub const MAX_PDF_SEARCH_QUERY: usize = 256;
 const MAX_PDF_SEARCH_HITS: usize = 100;
 
+#[derive(PartialEq,Eq)]
 pub struct PdfAnnotationHit {
     pub id: i64,
     pub note_id: i64,
@@ -174,7 +175,7 @@ fn open_checked(path: &Path, directory: bool) -> Result<File> {
 // Hold non-delete/non-write-shared handles for each directory before opening
 // the next component to avoid a directory being replaced with a reparse point.
 #[cfg(windows)]
-fn pin_local_parents(path: &Path) -> Result<(std::path::PathBuf, Vec<File>)> {
+pub(super) fn pin_local_parents(path: &Path) -> Result<(std::path::PathBuf, Vec<File>)> {
     use std::path::Component;
 
     if path.components().any(|part| part == Component::ParentDir) {
@@ -427,6 +428,13 @@ impl Notebook {
         ).optional()?)
     }
 
+    pub(crate) fn require_pdf_search_hit(&self, shown: &PdfAnnotationHit) -> Result<()> {
+        if self.pdf_annotation_hit(shown.id)?.as_ref() != Some(shown) {
+            return Err("這筆 PDF 標註或來源已變更，請重新搜尋。".into());
+        }
+        Ok(())
+    }
+
     pub fn add_pdf_annotation(&self, attachment: i64, page: u32, quote: &str, comment: &str) -> Result<i64> {
         if !(1..=MAX_PDF_PAGE).contains(&page) {
             return Err("PDF 頁碼須為 1 至 1,000,000。".into());
@@ -506,12 +514,21 @@ mod tests {
             assert_eq!((legacy[0].id, legacy[0].note_id,legacy[0].attachment_id), (old, old_note, old_file));
             assert_eq!(db.pdf_region(legacy[0].id)?, None);
             assert_eq!(db.pdf_region(page[0].id)?, Some(region));
+            db.require_pdf_search_hit(&both[0])?;
+            db.require_pdf_search_hit(&both[1])?;
+            let mut mismatched=db.pdf_annotation_hit(new)?.unwrap();
+            mismatched.attachment_id=old_file;
+            assert!(db.require_pdf_search_hit(&mismatched).is_err());
             db.trash(new_note)?;
+            assert!(db.require_pdf_search_hit(&both[0]).is_err());
+            db.require_pdf_search_hit(&both[1])?;
             assert!(db.pdf_annotation_hit(new)?.is_none());
             assert!(db.search_pdf_annotations("", Some(2))?.0.is_empty());
             db.restore(new_note)?;
             assert_eq!(db.pdf_annotation_hit(new)?.unwrap().id, new);
+            db.require_pdf_search_hit(&both[0])?;
             db.remove_attachment(new_file)?;
+            assert!(db.require_pdf_search_hit(&both[0]).is_err());
             assert!(db.pdf_annotation_hit(new)?.is_none());
             assert_eq!(db.pdf_annotation_hit(old)?.unwrap().note_id, old_note);
         }

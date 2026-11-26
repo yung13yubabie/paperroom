@@ -1236,6 +1236,7 @@ impl App {
                 (2, "匯入 Notion Markdown ZIP…"),
                 (3, "匯出目前筆記為 Markdown…"),
                 (4, "備份工作區…"),
+                (43, "從備份另開可攜工作區…"),
                 (5, "開啟資料所在資料夾"),
                 (6, "匯入 Obsidian Markdown 資料夾…"),
                 (7, "開啟今日筆記"),
@@ -1272,6 +1273,12 @@ impl App {
                 (42, "從同一 Vault 加入新 Markdown…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
+            if action == 43 {
+                if let Err(error) = self.restore_workspace_ui() {
+                    self.show_error(error);
+                }
+                return;
+            }
             if action == 33 {
                 let notices = crate::about_notices::body();
                 if let Err(error) = crate::dialog::show_text(self.hwnd, "第三方補充通知", &notices) {

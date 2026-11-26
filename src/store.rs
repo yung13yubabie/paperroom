@@ -85,6 +85,8 @@ pub use pdf_regions::PdfRegion;
 pub(crate) use pdf_regions::PdfPageText;
 #[path = "attachments.rs"]
 mod attachments;
+#[path = "portable_restore.rs"]
+pub(crate) mod portable_restore;
 #[cfg(windows)]
 pub use attachments::{MAX_PDF_SEARCH_QUERY, PdfAnnotationHit};
 #[path = "collections.rs"]

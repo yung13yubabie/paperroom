@@ -84,7 +84,7 @@ impl App {
         unsafe { self.open_pdf_view_at(attachment, page, Vec::new(), false, None, None) }
     }
 
-    pub(super) unsafe fn open_pdf_annotation_at(
+    pub(in crate::window) unsafe fn open_pdf_annotation_at(
         &mut self, attachment: i64, page: u32, annotation: i64,
     ) -> Result<()> {
         let focus = self.notebook.pdf_annotation_focus_regions(attachment, page, annotation)?;

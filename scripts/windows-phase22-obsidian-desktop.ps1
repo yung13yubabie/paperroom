@@ -83,12 +83,23 @@ $picker = WaitFor 'native folder picker' {
     $found=@($nodes | Where-Object { $_.Current.ClassName -eq '#32770' })
     if ($found.Count -eq 1) { $found[0] }
 }
-$pickerNodes=$picker.FindAll($tree,$truth)
-$edit=@($pickerNodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $_.Current.Name.TrimEnd(':') -eq 'Folder name' })
-if ($edit.Count -ne 1) { throw 'Native folder-name edit unavailable.' }
-$edit[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($vault)
-$choose=@(Exact $pickerNodes 'Select Folder' 'Button')
-if ($choose.Count -ne 1) { throw 'Native Select Folder button unavailable.' }
+$pickerNodes=@($picker.FindAll($tree,$truth) | Where-Object { !$_.Current.IsOffscreen })
+$edits=@($pickerNodes | Where-Object {
+    $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and $_.Current.IsEnabled
+})
+$edit=@($edits | Where-Object { $_.Current.Name.TrimEnd(':') -in 'Folder','Folder name','File name' })
+if ($edit.Count -eq 0 -and $edits.Count -eq 1) { $edit=$edits }
+if ($edit.Count -ne 1) {
+    $edits | ForEach-Object { Write-Host "Picker edit class $($_.Current.ClassName), AutomationId $($_.Current.AutomationId), Name $($_.Current.Name)" }
+    throw 'Unable to identify exactly one folder path edit.'
+}
+$value=$edit[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+$value.SetValue($vault)
+if ($value.Current.Value -cne $vault) { throw 'Synthetic path was not entered exactly.' }
+$choose=@($pickerNodes | Where-Object {
+    $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and $_.Current.Name -in 'Select Folder','Open','OK'
+})
+if ($choose.Count -ne 1) { throw 'Unable to identify the exact folder confirmation button.' }
 Button $choose[0]
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)

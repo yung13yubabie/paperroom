@@ -65,12 +65,18 @@ impl Notebook {
     }
     pub(crate) fn import_obsidian_base_mode(&self, root:i64, filename:&str, raw:Vec<u8>, live:bool)
         -> Result<(i64,Vec<(i64,String,i64,bool)>)> {
+        self.import_obsidian_base_options(root,filename,raw,live,false)
+    }
+    pub(crate) fn import_obsidian_base_options(&self,root:i64,filename:&str,raw:Vec<u8>,live:bool,dynamic:bool)
+        ->Result<(i64,Vec<(i64,String,i64,bool)>)>{
         crate::output::windows_output_name(filename.as_ref())?;
         let stem = filename.rsplit_once('.').filter(|(s,e)| !s.trim().is_empty() && e.eq_ignore_ascii_case("base"))
             .map(|(s,_)|s).ok_or("請選擇 .base 原檔。")?;
         if filename.encode_utf16().count()>255 || filename.chars().any(char::is_control)
             || !attachments::has_expected_signature("text",&raw) { return Err("Bases 檔名或文字格式無效。".into()); }
         let base = obsidian_base::parse(&raw)?;
+        if !dynamic && base.views.iter().any(|v|!v.sorts.is_empty()){return Err("這份 Bases 含型別排序，請選擇動態模式。".into())}
+        if dynamic && (!live || base.views.iter().any(|v|v.typed_filters.len()>8)){return Err("動態模式需連結來源，每個檢視最多 8 個條件。".into())}
         if live && !base.has_live_status() {return Err("這份 Bases 沒有連結的 status 或 status 等值公式。".into());}
         let tx=Transaction::new_unchecked(&self.connection,TransactionBehavior::Immediate)?;
         let token:String=tx.query_row("SELECT i.token FROM notes n JOIN note_link_identities i ON i.note_id=n.id
@@ -80,9 +86,11 @@ impl Notebook {
         if used>attachments::MAX_STORAGE_BYTES - base.raw.len() as i64 { return Err("工作區附件空間不足。".into()); }
         let mut report=format!("原始檔：{}\n\n來源 Vault：[[{NATIVE_NOTE_PREFIX}{root}:{token}|開啟來源]]\n\n這些集合使用匯入時的成員與檔案欄位。頁首欄位取自匯入此檢視當下，工作區內已儲存的 Markdown。可由集合選單開啟同名檢視。\n",text_for_receipt(filename));
         let mut created=Vec::new();
+        let mut named_views=Vec::new();
         let normalized_handoff:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM heptabase_import_roots WHERE import_root=?1)",[root],|r|r.get(0))?;
         if (live || !base.types.is_empty()) && normalized_handoff {return Err("此 Markdown ZIP 來源可能曾移除首行，無法核對連結欄位與型別比較的位置。".into());}
-        if !base.types.is_empty(){report.push_str("\n布林與數值比較篩選會在匯入時決定成員；缺少與 null 皆不符合比較。\n");}
+        if dynamic{report.push_str("\n動態檢視會在開啟或重新整理時，以匯入時所選路徑的候選筆記重新篩選及排序；原檔改名或搬離該路徑即暫停入選，需重新匯入以採用新路徑。只讀取工作區已儲存的 Markdown。\n");}
+        else if !base.types.is_empty(){report.push_str("\n布林與數值比較篩選會在匯入時決定成員；缺少與 null 皆不符合比較。\n");}
         if live {report.push_str("\n已連結的來源欄位使用工作區目前保存的 Markdown；編輯時只更新該筆記。\n");}
         let mut remaining_front_bytes=32*1024*1024usize;
         if base.display_names.keys().any(|key| !matches!(key.as_str(),"file.name" | "file.folder" | "file.path" | "file.ext") && !key.starts_with("note.") && !base.formulas.contains_key(key)) {
@@ -114,6 +122,7 @@ impl Notebook {
                     tx.execute("INSERT INTO obsidian_base_live_columns(collection_id,key,import_root,equals_text) VALUES(?1,?2,?3,?4)",params![collection,key,root,equals])?;
                 }
             }
+            if dynamic{super::obsidian_base_dynamic::register(&tx,collection,root,view,&base)?;}
             let mut members=Vec::new();
             {
                 let mut stmt=tx.prepare_cached("SELECT p.note_id,p.relative_path FROM vault_paths p JOIN notes n ON n.id=p.note_id
@@ -122,7 +131,7 @@ impl Notebook {
                 while let Some(row)=rows.next()? {
                     let path=row.get_ref(1)?.as_str()?;
                     if !view.matches_path(path) { continue; }
-                    if !view.typed_filters.is_empty(){
+                    if !dynamic && !view.typed_filters.is_empty(){
                         let id:i64=row.get(0)?;
                         let prefix=typed_prefix(&tx,id,&mut remaining_front_bytes)?;
                         let mut include=true;
@@ -160,6 +169,9 @@ impl Notebook {
                 let typed_source=if !live && cols.iter().any(|(_,c)|match c{Column::Front(k)=>base.types.contains_key(k),Column::Formula(e)=>e.typed().is_some(),_=>false}){
                     Some(typed_prefix(&tx,*note,&mut remaining_front_bytes)?)
                 }else{None};
+                if dynamic{
+                    tx.execute("INSERT INTO obsidian_base_candidates(collection_id,note_id,relative_path) VALUES(?1,?2,?3)",params![collection,note,path])?;
+                }
                 for (label,col) in &cols {
                     let ty=match col{
                         Column::Front(k)=>base.types.get(k).map(|kind|(k.as_str(),*kind,None)),
@@ -189,6 +201,7 @@ impl Notebook {
             let list=view.layout==Layout::List;
             tx.execute("INSERT INTO collection_views(collection_id,name,layout,status,keyword,list_mode)
                 VALUES(?1,?2,'table','','',?3)",params![collection,&view.name,list])?;
+            named_views.push((view.name.clone(),tx.last_insert_rowid()));
             if let Some(group)=&view.group {
                 let source=group.strip_prefix("note.").ok_or("無效的群組來源。")?;
                 let kind=base.types.get(source).ok_or("無法核對群組欄位型別。")?;
@@ -200,12 +213,19 @@ impl Notebook {
             let labels:Vec<_>=cols.iter().map(|(key,_)|key).collect();
             tx.execute("INSERT INTO collection_display_columns(collection_id,columns_json) VALUES(?1,?2)",
                 params![collection,serde_json::to_string(&labels)?])?;
-            report.push_str(&format!("\n- 集合 #{}　{}（{} 篇）",collection,text_for_receipt(&name),members.len()));
-            created.push((collection,name,members.len() as i64,list));
+            let count=if dynamic{super::obsidian_base_dynamic::rows(&tx,collection)?.ok_or("找不到動態候選")?.len()}else{members.len()};
+            report.push_str(&format!("\n- 集合 #{}　{}（匯入時 {} 篇）",collection,text_for_receipt(&name),count));
+            created.push((collection,name,count as i64,list));
         }
         let receipt=insert(&tx,Some(root),&format!("Bases 來源：{filename}"),&report)?;
         tx.execute("INSERT INTO attachments(note_id,name,kind,content) VALUES(?1,?2,'text',?3)",
             params![receipt,filename,base.raw])?;
+        let attachment=tx.last_insert_rowid();
+        tx.execute("INSERT INTO base_card_receipts(receipt,import_root,attachment,filename) VALUES(?1,?2,?3,?4)",
+            params![receipt,root,attachment,filename])?;
+        for (name,view) in named_views {
+            tx.execute("INSERT INTO base_card_views(receipt,name,view_id) VALUES(?1,?2,?3)",params![receipt,name,view])?;
+        }
         tx.commit()?;
         Ok((receipt,created))
     }
@@ -217,6 +237,87 @@ mod tests {
     use crate::archive::ImportedPage;
     fn page(dir:&str)->ImportedPage {
         ImportedPage{parts:vec![dir.into(),"鏡頭.md".into()],title:"編輯後標題".into(),body:"內容".into()}
+    }
+    #[test]
+    fn exact_file_path_filter_selects_distinct_case_sensitive_vault_members() -> Result<()> {
+        let mut db=Notebook::open(std::path::Path::new(":memory:"),false)?;
+        let files=["Default-307.md","Alpha-616.md","Bravo-926.md","alpha-616.md"];
+        let root=db.import_vault("Shipping",files.iter().map(|f|ImportedPage{parts:vec![f.to_string()],title:"同名".into(),body:"Proof".into()}).collect())?;
+        let mut raw="views:\n".to_string();
+        for file in &files[..3]{raw+=&format!("  - type: table\n    name: {file}\n    filters: 'file.path == \"{file}\"'\n    order: [file.name]\n");}
+        let (_,views)=db.import_obsidian_base(root,"Shipping.base",raw.into_bytes())?;
+        for ((col,_,count,_),file) in views.iter().zip(files){assert_eq!(*count,1);assert_eq!(db.collection_display_values(*col,"file.name")?.into_values().next().unwrap(),file);}
+        for bad in ["../Alpha.md","CON.md","A//B.md"]{
+            let input=format!("views: [{{type: table, name: X, filters: 'file.path == \"{bad}\"'}}]");
+            assert!(obsidian_base::parse(input.as_bytes()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_saved_rules_readmit_excluded_notes_and_restore_sort_without_writing() -> Result<()> {
+        let dir=std::env::temp_dir().join(format!("paperroom-dynamic-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir(&dir)?;
+        let path=dir.join("workspace.sqlite");
+        let mut db=Notebook::open(&path,false)?;
+        fn content(approved:&str,cost:&str,priority:&str)->String{format!("---\napproved: {approved}\ncost: {cost}\npriority: {priority}\n---\n正文")}
+        let mut pages=Vec::new();
+        for (name,approved,cost,priority) in [("C","true","10","false"),("B","true","2.0","true"),("A","false","2.00","true"),("G","false","2","false"),("D","true","2","false"),("E","true","null","false"),("F","true","[bad]","false")]{
+            let mut p=page(name);p.body=content(approved,cost,priority);pages.push(p);
+        }
+        let root=db.import_vault("來源庫",pages)?;
+        let mut unrelated=page("A");unrelated.body=content("true","1","true");db.import_vault("另庫",vec![unrelated])?;
+        let raw=r#"filters: 'note.approved == true'
+formulas: {more: 'note.cost >= 0', priorityFlag: 'note.priority == true'}
+views:
+  - type: table
+    name: 動態
+    order: [file.path, approved, cost, priority]
+    sort: [{property: note.cost, direction: ASC}, {property: note.priority, direction: DESC}]
+"#;
+        assert!(db.import_obsidian_base_mode(root,"unsupported.base",raw.as_bytes().to_vec(),true).is_err());
+        let (receipt,views)=db.import_obsidian_base_options(root,"shipping.base",raw.as_bytes().to_vec(),true,true)?;
+        assert_eq!(views[0].2,5);
+        let col=views[0].0;
+        let rows=|db:&Notebook|->Result<Vec<String>>{
+            let view=db.collection_views(col)?.remove(0);let (lanes,fields)=db.collection_lanes_and_display(col,&view)?;
+            let ids=lanes.into_iter().flat_map(|(_,rows)|rows.into_iter().map(|r|r.id)).collect::<Vec<_>>();
+            let fields=fields.unwrap();assert_eq!(fields[0].1.len(),ids.len());
+            Ok(ids.iter().map(|id|fields[0].1[id].split('/').next().unwrap().to_string()).collect())
+        };
+        assert_eq!(rows(&db)?,["B","D","C","E","F"]);
+        let id=|prefix:&str|->Result<i64>{Ok(db.connection.query_row("SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",params![root,format!("{prefix}/鏡頭.md")],|r|r.get(0))?)};
+        let a=id("A")?;let b=id("B")?;
+        assert!(!db.typed_base_rows(col,"cost")?.contains_key(&a));
+        let before=db.connection.total_changes();
+        assert!(db.add_collection_entry(col,super::super::collections::CollectionEntry::New("不應建立"),"新增",None).is_err());
+        assert!(db.add_to_collection(col,root,"新增").is_err());
+        assert!(db.remove_from_collection(col,b,"已匯入").is_err());
+        assert!(db.move_collection_note(col,b,"已匯入","移動").is_err());
+        assert_eq!(db.connection.total_changes(),before);
+        db.connection.execute("UPDATE vault_paths SET relative_path='B/重新命名.md' WHERE note_id=?1",[b])?;
+        assert!(!db.collection_rows(col)?.iter().any(|(row,_)|row.id==b));
+        db.connection.execute("UPDATE vault_paths SET relative_path='B/鏡頭.md' WHERE note_id=?1",[b])?;
+        let (stale,_)=db.typed_base_current(col,"cost",b)?;
+        let writer=Notebook::open(&path,false)?;
+        let edit=|db:&Notebook,note:i64,approved:&str|->Result<()>{
+            let n=db.note(note)?.unwrap();db.save(note,n.version,&n.row.title,&content(approved,"2.00","true"))?;Ok(())
+        };
+        edit(&writer,a,"true")?;
+        assert_eq!(rows(&db)?,["A","B","D","C","E","F"]);
+        edit(&writer,b,"false")?;
+        assert!(db.edit_typed_base(col,"cost",b,stale,"9").is_err());
+        assert_eq!(rows(&db)?,["A","D","C","E","F"]);
+        let history=db.note_revisions(a)?.len();
+        let writes=db.connection.total_changes();assert_eq!(rows(&db)?,["A","D","C","E","F"]);
+        assert_eq!(writer.note_revisions(a)?.len(),history); assert_eq!(db.connection.total_changes(),writes);
+        db.trash(a)?;assert_eq!(rows(&db)?,["D","C","E","F"]);db.restore(a)?;
+        let backup=dir.join("restore.sqlite");db.backup(&backup)?;
+        drop(writer);drop(db);let restored=Notebook::open(&backup,false)?;
+        assert_eq!(rows(&restored)?,["A","D","C","E","F"]);edit(&restored,b,"true")?;
+        assert_eq!(rows(&restored)?,["A","B","D","C","E","F"]);
+        assert_eq!(restored.connection.query_row("SELECT content FROM attachments WHERE note_id=?1",[receipt],|r|r.get::<_,Vec<u8>>(0))?,raw.as_bytes());
+        drop(restored);std::fs::remove_dir_all(dir)?;Ok(())
     }
     #[test]
     fn typed_group_uses_numeric_order_and_recomputes_after_save_and_backup() -> Result<()> {

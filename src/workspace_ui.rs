@@ -454,8 +454,55 @@ impl App {
                     } else { None };
                     if companion { choices.push((14,"新增同包筆記節點…")); }
                     if selected_file.is_some() { choices.push((13, "開啟已選節點的來源筆記")); }
+                    let bases = crate::store::canvas_base_cards::named_nodes(&view.doc);
+                    if !companion && !bases.is_empty() {
+                        choices.extend([(15,"手動配對 Bases 檔案來源…"),(16,"預覽或開啟 Bases 具名檢視…"),(17,"撤銷 Bases 路徑配對…")]);
+                    }
                     let action = popup(hwnd, anchor, None, &choices);
-                    if action == 14 {
+                    if matches!(action,15..=17) {
+                        let root=initial_binding.ok_or("請先將畫布綁定到匯入 Bases 時選取的 Vault。")?;
+                        let index = if view.selection.len()==1 {
+                            bases.iter().position(|(node,_,_)|view.selection.contains(*node))
+                        } else {None};
+                        let pick = index.or_else(||super::navigation_ui::choose_navigation_page(hwnd,anchor,bases.len(),|i|{
+                            let (node,file,name)=bases[i];format!("{file}#{name} 〔{node}〕")
+                        }));
+                        let Some(index)=pick else {return Ok(());};
+                        let (node,file,name)=bases[index];
+                        if action==15 {
+                            let physical=if self.notebook.base_card_needs_file(root,file)? {
+                                let Some(folder)=folder_dialog(hwnd)? else {return Ok(());};
+                                Some(folder)
+                            } else {None};
+                            let proof=physical.as_ref().map(|folder|crate::store::canvas_bundle::read_base_card_file(folder,file)).transpose()?;
+                            let receipt=self.notebook.base_card_candidate(id,&view.doc,root,node,proof.as_deref())?;
+                            let entry=format!("來源收據 #{receipt}");
+                            if popup(hwnd,anchor,None,&[(1,entry.as_str())])!=1{return Ok(());}
+                            let question=format!("Vault #{root} 的「{file}」要使用來源收據 #{receipt} 嗎？\r\n這是手動配對，會套用至這份畫布上具有相同完整檔案路徑的卡片。");
+                            if message(hwnd,"確認 Bases 來源路徑",&question,MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION)!=IDYES {return Ok(());}
+                            if let Some(folder)=physical && proof.as_deref()!=Some(crate::store::canvas_bundle::read_base_card_file(&folder,file)?.as_slice()){
+                                return Err("Bases 原檔在確認期間已變更，請重新核對。".into());
+                            }
+                            self.notebook.bind_base_card(id,&view.doc,root,node,receipt,proof.as_deref())?;
+                            label(self.widgets.status,"已保存這份畫布的 Bases 來源配對。");
+                        } else if action==17 {
+                            let receipt=self.notebook.base_path_receipt(id,root,file)?.ok_or("這個檔案尚未配對。")?;
+                            let question=format!("撤銷 Vault #{root} 中「{file}」與收據 #{receipt} 的配對？同圖同路徑卡片將停止開啟具名檢視。");
+                            if message(hwnd,"撤銷 Bases 路徑配對",&question,MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION)!=IDYES{return Ok(());}
+                            self.notebook.unbind_base_card(id,&view.doc,root,node,receipt)?;
+                            label(self.widgets.status,"已撤銷 Bases 路徑配對。");
+                        } else {
+                            let (receipt,col,_,saved)=self.notebook.resolve_base_card(id,&view.doc,root,node)?;
+                            let rows=self.notebook.filtered_collection_rows(col,Some(&saved))?;
+                            let mut preview=format!("{file}#{name}\r\nVault #{root}，來源收據 #{receipt}，檢視 #{}\r\n共 {} 筆，最多預覽 10 筆。",saved.id,rows.len());
+                            for (row,_) in rows.iter().take(10){write!(preview,"\r\n{}  (#{})",row.title,row.id)?;}
+                            crate::dialog::show_text(hwnd,"Bases 卡片預覽",&preview)?;
+                            if popup(hwnd,anchor,None,&[(1,"開啟此具名檢視"),(2,"留在畫布")])!=1{return Ok(());}
+                            let (checked,current,title,fresh)=self.notebook.resolve_base_card(id,&view.doc,root,node)?;
+                            if (checked,current,fresh.id)!=(receipt,col,saved.id){return Err("具名檢視已變更，請重新開啟預覽。".into());}
+                            self.open_collection_layout(current,title,Some(fresh))?;
+                        }
+                    } else if action == 14 {
                         let candidates = self.notebook.companion_note_choices(id)?;
                         if candidates.is_empty() { return Err("這份畫布沒有可使用的同包筆記。".into()); }
                         let Some(index) = super::navigation_ui::choose_navigation_page(hwnd, anchor, candidates.len(),

@@ -12,7 +12,10 @@ param(
     [switch]$TypedBasesOnly,
     [switch]$TypedNotionOnly,
     [switch]$CompanionAssetsOnly,
-    [switch]$VendorRichCanvasOnly
+    [switch]$VendorRichCanvasOnly,
+    [switch]$PinnedBasesOnly,
+    [switch]$NotionSourceOnly,
+    [switch]$NodeAssetsOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -291,6 +294,15 @@ public static class PaperroomHighlightGui {
         if (!ForegroundIsOwned(owner, pid) || (down && WindowFromPoint(Cursor()) != owner))
             throw new InvalidOperationException("The left button target changed.");
         SendPhysical(new[] { Mouse(down ? 0x02u : 0x04u) });
+    }
+
+    public static void RightCanvasClick(IntPtr owner, uint pid, int x, int y) {
+        var point = CanvasCursor(owner, pid, x, y);
+        if (WindowFromPoint(point) != owner || !WorkspaceInForeground(owner, pid))
+            throw new InvalidOperationException("Expected the exposed foreground test Canvas.");
+        foreach (int modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+            if (GetAsyncKeyState(modifier) < 0) throw new InvalidOperationException("An input modifier is held.");
+        SendPhysical(new[] { Mouse(8), Mouse(16) });
     }
     public static bool CanvasCaptured(IntPtr owner, uint pid) {
         uint thread = GetWindowThreadProcessId(owner, out uint actual);
@@ -1433,6 +1445,18 @@ $process = $null
 $window = [IntPtr]::Zero
 $previewFailures = [Collections.Generic.List[string]]::new()
 try {
+    if ($PinnedBasesOnly) {
+        . (Join-Path $PSScriptRoot 'windows-pinned-bases.ps1')
+        return
+    }
+    if ($NotionSourceOnly) {
+        . (Join-Path $PSScriptRoot 'windows-notion-source-edge.ps1')
+        return
+    }
+    if ($NodeAssetsOnly) {
+        . (Join-Path $PSScriptRoot 'windows-node-assets.ps1')
+        return
+    }
     if ($TypedBasesOnly) {
         . (Join-Path $PSScriptRoot 'windows-bases-typed.ps1')
         return

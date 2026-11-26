@@ -90,8 +90,10 @@ impl Notebook {
         Ok(columns)
     }
     pub(crate) fn collection_display_snapshot_in(&self,collection:i64)->Result<Option<Vec<(String,std::collections::HashMap<i64,String>)>>>{
+        let ids=super::obsidian_base_dynamic::visible_ids(&self.connection,collection)?;
         let columns=self.collection_display_columns(collection)?.map(|keys|keys.into_iter().map(|key|{
-            let values=self.collection_display_values(collection,&key)?;
+            let mut values=self.display_values_unfiltered(collection,&key)?;
+            if let Some(ids)=&ids {values.retain(|id,_|ids.contains(id));}
             Ok((key,values))
         }).collect::<Result<Vec<_>>>()).transpose()?;
 
@@ -109,6 +111,13 @@ impl Notebook {
     pub(crate) fn collection_display_values(
         &self, collection: i64, key: &str,
     ) -> Result<std::collections::HashMap<i64, String>> {
+        let tx=self.connection.is_autocommit().then(||self.connection.unchecked_transaction()).transpose()?;
+        let mut values=self.display_values_unfiltered(collection,key)?;
+        if let Some(ids)=super::obsidian_base_dynamic::visible_ids(&self.connection,collection)?{values.retain(|id,_|ids.contains(id));}
+        if let Some(tx)=tx{tx.commit()?;}
+        Ok(values)
+    }
+    fn display_values_unfiltered(&self,collection:i64,key:&str)->Result<std::collections::HashMap<i64,String>>{
         let key = key_checked(key)?;
         if let Some(typed)=super::obsidian_base_typed::display(&self.connection,collection,&key,false)? {return Ok(typed);}
         if let Some(live)=super::obsidian_base_live::display(&self.connection,collection,&key,false)? { return Ok(live); }

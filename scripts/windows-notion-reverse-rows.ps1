@@ -1,14 +1,14 @@
 function Test-NotionReverse32([string]$Database) {
     $ids=@'
-import sqlite3,sys,pathlib
+import json,sqlite3,sys,pathlib
 with sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+"?mode=ro",uri=True) as db:
     rows=db.execute("""select c.id,n.id,m.status from collections c join collection_notes m on m.collection_id=c.id
       join notes n on m.note_id=n.id where c.name='導演集合' and n.title='場景資料列'""").fetchall()
     assert len(rows)==1
-    print(*rows[0],sep="|")
+    print(json.dumps(rows[0], ensure_ascii=True))
 '@ | python -B - $Database
     if ($LASTEXITCODE -ne 0 -or !$ids) {throw 'Cannot resolve unique fixture row'}
-    $collection,$row,$status=$ids.Split('|')
+    $collection,$row,$status=($ids | ConvertFrom-Json)
     $label="導演集合　[#$collection]　｜ $status　｜ 場景資料列　[#$row]"
     foreach ($action in 1,2) {
         if ($action -eq 2) {

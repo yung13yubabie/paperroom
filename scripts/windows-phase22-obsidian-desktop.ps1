@@ -8,45 +8,38 @@ if ((Get-Process Obsidian -ErrorAction SilentlyContinue) -or (Test-Path "$env:AP
 }
 $run = Join-Path $env:RUNNER_TEMP ("paperroom-obsidian-" + [guid]::NewGuid().ToString('N'))
 $vault = Join-Path $run PaperroomFixture
-$null=New-Item -ItemType Directory (Join-Path $vault '媒體'),(Join-Path $vault '白板') -Force
-$relativeCanvas='白板/Board.canvas'
-$boardPath=Join-Path $vault $relativeCanvas
-$seed = @'
+$null=New-Item -ItemType Directory $vault -Force
+function Put([string]$Name,[string]$Contents) {
+    [IO.File]::WriteAllText((Join-Path $vault $Name),$Contents,[Text.UTF8Encoding]::new($false))
+}
+Put 'Alpha-616.md' "# Alpha Note"
+Put 'Bravo-926.md' "# Bravo Note"
+Put 'Default-307.md' "# Default Note"
+Put 'Shipping.base' @'
+views:
+  - type: table
+    name: Default view
+    filters: 'file.path == "Default-307.md"'
+    order: [file.name]
+  - type: table
+    name: Pin_A_601
+    filters: 'file.path == "Alpha-616.md"'
+    order: [file.name]
+  - type: table
+    name: Pin_B_904
+    filters: 'file.path == "Bravo-926.md"'
+    order: [file.name]
+'@
+Put 'PinNative.canvas' '{"nodes":[],"edges":[]}'
+Put 'PinSeeded.canvas' @'
 {
   "nodes": [
-    {"id":"1234567890abcde1","type":"group","label":"研究群組","background":"媒體/底圖-紫.png","backgroundStyle":"cover","x":-900,"y":-420,"width":600,"height":680},
-    {"id":"1234567890abcde2","type":"file","file":"媒體/場景-青.png","x":-812,"y":-270,"width":306,"height":222},
-    {"id":"1234567890abcde3","type":"text","text":"DRAG-CARD-882A","x":-230,"y":-210,"width":548,"height":414},
-    {"id":"1234567890abcde4","type":"text","text":"SUMMARY-CARD-17","x":500,"y":134,"width":295,"height":220}
+    {"id":"819f000000000001","type":"file","file":"Shipping.base","x":0,"y":0,"width":380,"height":256},
+    {"id":"819f000000000002","type":"file","file":"Shipping.base","x":540,"y":0,"width":380,"height":256}
   ],
-  "edges": [
-    {"id":"2234567890abcde1","fromNode":"1234567890abcde2","fromSide":"right","fromEnd":"none","toNode":"1234567890abcde3","toSide":"left","toEnd":"arrow","color":"#f4a24a","label":"原圖解讀"},
-    {"id":"2234567890abcde2","fromNode":"1234567890abcde1","fromSide":"right","fromEnd":"arrow","toNode":"1234567890abcde4","toSide":"top","toEnd":"arrow","color":"#4b68fb","label":"群組往返"},
-    {"id":"2234567890abcde3","fromNode":"1234567890abcde3","fromSide":"bottom","fromEnd":"none","toNode":"1234567890abcde4","toSide":"left","toEnd":"none","color":"#59504c","label":"無箭頭參照"}
-  ]
+  "edges": []
 }
 '@
-[IO.File]::WriteAllText($boardPath,$seed,[Text.UTF8Encoding]::new($false))
-Add-Type -AssemblyName System.Drawing
-function Make-FixturePng([string]$Name,[int]$R,[int]$G,[int]$B,[bool]$Horizontal) {
-    $img=[Drawing.Bitmap]::new(192,128)
-    try {
-        $gfx=[Drawing.Graphics]::FromImage($img)
-        try {
-            $gfx.Clear([Drawing.Color]::FromArgb($R,$G,$B))
-            if ($Horizontal) {
-                $gfx.FillRectangle([Drawing.Brushes]::White,13,16,150,15)
-                $gfx.FillRectangle([Drawing.Brushes]::Black,29,79,93,19)
-            } else {
-                $gfx.FillRectangle([Drawing.Brushes]::White,17,13,18,99)
-                $gfx.FillRectangle([Drawing.Brushes]::Black,113,35,22,71)
-            }
-        } finally { $gfx.Dispose() }
-        $img.Save((Join-Path $vault $Name),[Drawing.Imaging.ImageFormat]::Png)
-    } finally { $img.Dispose() }
-}
-Make-FixturePng '媒體/場景-青.png' 13 223 147 $false
-Make-FixturePng '媒體/底圖-紫.png' 192 31 212 $true
 $installer = Join-Path $run 'Obsidian-1.15.1.exe'
 Invoke-WebRequest 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.1/Obsidian-1.15.1.exe' -OutFile $installer
 $expected = '218c7d30acc065355ce94719dd996d5e2a2347cde3811ea5dc29380583f02b58'
@@ -160,6 +153,39 @@ public static class ExactPicker {
     }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint wheel, UIntPtr extra);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int which);
+    static void CheckFixturePoint(IntPtr window, int x, int y) {
+        if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(new Point{X=x,Y=y}),2)!=window)
+            throw new InvalidOperationException("Input point was not on the identified Vault window.");
+    }
+    public static void RightClick(IntPtr window,int x,int y) {
+        CheckFixturePoint(window,x,y);
+        if (!SetCursorPos(x,y)) throw new InvalidOperationException("Unable to point to the Canvas card.");
+        CheckFixturePoint(window,x,y);
+        mouse_event(8,0,0,0,UIntPtr.Zero);
+        mouse_event(16,0,0,0,UIntPtr.Zero);
+    }
+    public static void DragFile(IntPtr window, int x0, int y0, int x1, int y1) {
+        CheckFixturePoint(window,x0,y0);
+        CheckFixturePoint(window,x1,y1);
+        if (!SetCursorPos(x0,y0)) throw new InvalidOperationException("Unable to point to the file.");
+        CheckFixturePoint(window,x0,y0);
+        mouse_event(2,0,0,0,UIntPtr.Zero);
+        try {
+            System.Threading.Thread.Sleep(150);
+            for (int i=1; i<=22; i++) {
+                int x=x0+(x1-x0)*i/22, y=y0+(y1-y0)*i/22;
+                CheckFixturePoint(window,x,y);
+                uint ax=(uint)Math.Round((x-GetSystemMetrics(76))*65535.0/(GetSystemMetrics(78)-1));
+                uint ay=(uint)Math.Round((y-GetSystemMetrics(77))*65535.0/(GetSystemMetrics(79)-1));
+                mouse_event(0xC001,ax,ay,0,UIntPtr.Zero);
+                System.Threading.Thread.Sleep(24);
+            }
+            System.Threading.Thread.Sleep(190);
+        } finally {
+            mouse_event(4,0,0,0,UIntPtr.Zero);
+        }
+    }
     public static void ClickDefault(IntPtr dialog,IntPtr button) {
         if (GetForegroundWindow()!=dialog || GetParent(button)!=dialog ||
             !IsWindowVisible(button) || !IsWindowEnabled(button) || !GetWindowRect(button,out Rect r))
@@ -251,190 +277,178 @@ function Image([string]$Name,[IntPtr]$Handle) {
     } catch { Write-Host 'Screenshot unavailable in the desktop session.' }
 }
 
-function Read-Canvas {
-    Get-Content -LiteralPath $boardPath -Raw | ConvertFrom-Json
-}
 function Digest([string]$Path) {
     (Get-FileHash -LiteralPath $Path).Hash.ToLowerInvariant()
 }
-function Node($Data,[string]$Id) {
-    $found=@($Data.nodes | Where-Object { $_.id -ceq $Id })
-    if ($found.Count -ne 1) { throw "Expected one Canvas node $Id." }
-    $found[0]
+function Canvas-Read([string]$File) {
+    Get-Content -LiteralPath (Join-Path $vault $File) -Raw | ConvertFrom-Json -AsHashtable
 }
-function Zoom-Canvas([IntPtr]$Hwnd,[string]$Name) {
-    $r=[ExactPicker]::Bounds($Hwnd)
-    [ExactPicker]::ClickFixture($Hwnd,($r[0]+[int]($r[2]*0.60)),($r[1]+[int]($r[3]*0.52)),$false)
-    [Windows.Forms.SendKeys]::SendWait('+1')
-    Start-Sleep -Milliseconds 950
-    Image $Name $Hwnd
+function RectCenter($Element) {
+    $q=$Element.Current.BoundingRectangle
+    if($q.IsEmpty -or $q.Width -lt 1 -or $q.Height -lt 1) { throw 'No visible bounds for the requested control.' }
+    @([int]($q.Left+$q.Width/2),[int]($q.Top+$q.Height/2))
 }
-function Media-Pixels([string]$Name) {
-    $path=Join-Path $env:OBSIDIAN_RECEIPTS $Name
-    if (!(Test-Path -LiteralPath $path -PathType Leaf)) { return @{image=0;background=0} }
-    $bmp=[Drawing.Bitmap]::new($path)
-    try {
-        $image=0
-        $background=0
-        for($y=132;$y -lt ($bmp.Height-45);$y+=4) {
-            for($x=[int]($bmp.Width*0.27);$x -lt ($bmp.Width-45);$x+=4) {
-                $p=$bmp.GetPixel($x,$y)
-                if ($p.G -ge 144 -and $p.G -ge ($p.R+78) -and $p.G -ge ($p.B+34)) { $image++ }
-                if ($p.B -ge 132 -and $p.R -ge 114 -and $p.B -ge ($p.G+63) -and $p.R -ge ($p.G+55) -and
-                    [Math]::Abs([int]$p.B-[int]$p.R) -lt 55) { $background++ }
+function Find-Visible([string]$Pattern,[int]$Seconds,[scriptblock]$Scope) {
+    $end=[DateTime]::UtcNow.AddSeconds($Seconds)
+    do {
+        try {
+            $elements=@(DesktopNodes | Where-Object { $_.Current.Name -cmatch $Pattern -and (&$Scope $_) })
+            if($elements.Count) {
+                # Chromium often exposes the same label twice with identical bounds.
+                $coords=@($elements | ForEach-Object { (RectCenter $_) -join ',' } | Sort-Object -Unique)
+                if($coords.Count -eq 1) { return $elements[0] }
             }
-        }
-        return @{image=$image;background=$background}
-    } finally { $bmp.Dispose() }
-}
-function Edge-Witness($First,$After) {
-    $hits=@($After.edges | Where-Object { $_.id -ceq $First.id })
-    if($hits.Count -ne 1) { throw "Missing exact edge $($First.id)." }
-    $actual=$hits[0]
-    foreach($field in 'id','fromNode','fromSide','toNode','toSide') {
-        if($First.$field -cne $actual.$field) { throw "Edge $($First.id) changed $field." }
-    }
-    $expectedLabel = if($First.id -ceq $editedEdgeId){$newLabel}else{$First.label}
-    if($expectedLabel -cne $actual.label) { throw "Edge $($First.id) changed its expected label." }
-    if($First.color -ine $actual.color) { throw "Edge $($First.id) changed color." }
-    $from=if([string]::IsNullOrEmpty($actual.fromEnd)){'none'}else{$actual.fromEnd}
-    $to=if([string]::IsNullOrEmpty($actual.toEnd)){'arrow'}else{$actual.toEnd}
-    if($First.fromEnd -cne $from -or $First.toEnd -cne $to) { throw "Edge $($First.id) changed direction." }
-    [ordered]@{
-        id=$actual.id; fromNode=$actual.fromNode; fromSide=$actual.fromSide; fromEnd=$from
-        toNode=$actual.toNode; toSide=$actual.toSide; toEnd=$to; color=$actual.color; label=$actual.label
-        serializedFromEnd=$actual.fromEnd; serializedToEnd=$actual.toEnd
-    }
-}
-
-$source=Read-Canvas
-$editedEdgeId='2234567890abcde3'
-$oldLabel='無箭頭參照'
-$newLabel='無箭頭參照｜已核對'
-$media=@('媒體/場景-青.png','媒體/底圖-紫.png')
-$assets=[ordered]@{}
-foreach ($name in '白板','媒體','evidence') {
-    $null=New-Item -ItemType Directory -Path (Join-Path $env:OBSIDIAN_RECEIPTS $name)
-}
-Copy-Item -LiteralPath $boardPath -Destination (Join-Path $env:OBSIDIAN_RECEIPTS 'evidence/Board-before.canvas')
-foreach($name in $media) {
-    $assets[$name]=Digest (Join-Path $vault $name)
-    Copy-Item -LiteralPath (Join-Path $vault $name) -Destination (Join-Path $env:OBSIDIAN_RECEIPTS $name)
-}
-$result=[ordered]@{
-    version=$info.FileVersion; installer_sha256=$expected; canvas=$relativeCanvas; before_sha256=(Digest $boardPath)
-    media_sha256=$assets; reopened=$false; pass=$false
-}
-try {
-    OpenFixture $relativeCanvas
-    $app=FixtureWindow 'Board'
-    "Observed native nested Canvas tab: $($app.MainWindowTitle)"
-    $hwnd=$app.MainWindowHandle
-    [void][ExactPicker]::ShowWindow($hwnd,3)
-    Start-Sleep -Milliseconds 850
-    Zoom-Canvas $hwnd 'evidence/Canvas-opened.png'
-
-    $r=[ExactPicker]::Bounds($hwnd)
-    # The existing edge chip was seen near this position in the opened fixture.
-    # Prove the actual label editor before committing any desktop edit.
-    $x=$r[0]+[int]($r[2]*0.744)
-    $y=$r[1]+[int]($r[3]*0.718)
-    $foundEdit=$false
-    foreach($offset in 0,-5,6) {
-        Set-Clipboard -Value ([guid]::NewGuid().ToString('N'))
-        [ExactPicker]::ClickFixture($hwnd,$x,($y+$offset),$true)
-        Start-Sleep -Milliseconds 350
-        if ([ExactPicker]::GetForegroundWindow() -ne $hwnd) { throw 'The Canvas label edit lost foreground.' }
-        [Windows.Forms.SendKeys]::SendWait('^a')
-        [Windows.Forms.SendKeys]::SendWait('^c')
+        } catch { }
         Start-Sleep -Milliseconds 230
-        if(([string](Get-Clipboard -Raw)).Trim() -ceq $oldLabel) { $foundEdit=$true;break }
+    } while([DateTime]::UtcNow -lt $end)
+    return $null
+}
+function Zoom([IntPtr]$Handle) {
+    $r=[ExactPicker]::Bounds($Handle)
+    [ExactPicker]::ClickFixture($Handle,($r[0]+[int]($r[2]*0.63)),($r[1]+[int]($r[3]*0.62)),$false)
+    [Windows.Forms.SendKeys]::SendWait('+1')
+    Start-Sleep -Milliseconds 850
+}
+function Create-Real-Cards([IntPtr]$Handle) {
+    $r=[ExactPicker]::Bounds($Handle)
+    $source=Find-Visible '^Shipping(?:\.base)?$' 5 {
+        param($n)
+        $b=$n.Current.BoundingRectangle
+        return !$b.IsEmpty -and $b.Left -ge $r[0] -and $b.Right -lt ($r[0]+$r[2]*0.29) -and $b.Top -gt ($r[1]+68)
+    }
+    if($source) { $pos=@(RectCenter $source) }
+    else {
+        # Fresh default file explorer has four alphabetically ordered root files.
+        $pos=@(($r[0]+[int]($r[2]*0.090)),($r[1]+[int]($r[3]*0.253)))
+    }
+    $count=0
+    foreach($target in @(@(0.40,0.26),@(0.78,0.61))) {
+        [ExactPicker]::DragFile($Handle,$pos[0],$pos[1],($r[0]+[int]($r[2]*$target[0])),($r[1]+[int]($r[3]*$target[1])))
+        $count++
+        $end=[DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $data=Canvas-Read 'PinNative.canvas'
+            if(@($data.nodes).Count -ge $count) { break }
+            Start-Sleep -Milliseconds 260
+        } while([DateTime]::UtcNow -lt $end)
+        if(@($data.nodes).Count -ne $count -or @($data.nodes|Where-Object {$_.type -cne 'file' -or $_.file -cne 'Shipping.base'}).Count) {
+            throw "Native explorer drag did not create Shipping.base card $count."
+        }
+    }
+    return $true
+}
+function Read-PinChange($Before,$After,[string]$View) {
+    $hit=@()
+    foreach($entry in $After.nodes) {
+        $old=@($Before.nodes | Where-Object { $_.id -ceq $entry.id })
+        if($old.Count -ne 1) { throw 'A source card disappeared.' }
+        foreach($k in $entry.Keys | Where-Object {$_ -notin 'x','y','width','height'}) {
+            $a=ConvertTo-Json -InputObject $entry[$k] -Depth 8 -Compress
+            $b=ConvertTo-Json -InputObject $old[0][$k] -Depth 8 -Compress
+            if($a -cne $b) { $hit+=@{id=$entry.id;key=$k;value=$entry[$k];selected_view=$View} }
+        }
+    }
+    if($hit.Count -eq 1){return $hit[0]}
+    return $null
+}
+function Pin-View([string]$File,[IntPtr]$Hwnd,[string]$View,$Positions) {
+    $before=Canvas-Read $File
+    $r=[ExactPicker]::Bounds($Hwnd)
+    $context=$null
+    foreach($pos in $Positions) {
+        [ExactPicker]::RightClick($Hwnd,($r[0]+[int]($r[2]*$pos[0])),($r[1]+[int]($r[3]*$pos[1])))
+        Start-Sleep -Milliseconds 220
+        $context=Find-Visible '^Pin view(?:…|\.{3})?$' 2 {param($n) $true}
+        if($context){break}
+        Image "evidence/menu-$View.png" $Hwnd
         [Windows.Forms.SendKeys]::SendWait('{ESC}')
     }
-    if(!$foundEdit) {
-        Image 'evidence/Canvas-unconfirmed-edge-label.png' $hwnd
-        throw 'The existing edge label did not open as an editable control.'
+    if(!$context) { throw "The direct Canvas context menu did not expose Pin view for $View." }
+    Image "evidence/menu-$View.png" $Hwnd
+    $p=@(RectCenter $context)
+    [ExactPicker]::ClickFixture($Hwnd,$p[0],$p[1],$false)
+    $option=Find-Visible ('^'+[regex]::Escape($View)+'$') 4 {param($n) $true}
+    if(!$option) {
+        Image "evidence/pin-menu-$View.png" $Hwnd
+        throw "The native Pin view chooser did not expose $View."
     }
-    "Native exact edge label editor exposed $oldLabel."
-    Set-Clipboard -Value $newLabel
-    [Windows.Forms.SendKeys]::SendWait('^v')
-    [Windows.Forms.SendKeys]::SendWait('{ESC}')
-    [ExactPicker]::ClickFixture($hwnd,($r[0]+[int]($r[2]*0.58)),($r[1]+[int]($r[3]*0.24)),$false)
-    $deadline=[DateTime]::UtcNow.AddSeconds(9)
-    $edited=$false
+    Image "evidence/pin-menu-$View.png" $Hwnd
+    $p=@(RectCenter $option)
+    [ExactPicker]::ClickFixture($Hwnd,$p[0],$p[1],$false)
+    $end=[DateTime]::UtcNow.AddSeconds(7)
     do {
-        try { $saved=Read-Canvas } catch { $saved=$null }
-        if($saved) {
-            $labels=@($saved.edges | Where-Object { $_.id -ceq $editedEdgeId -and $_.label -ceq $newLabel })
-            if(@($saved.edges).Count -eq 3 -and $labels.Count -eq 1) { $edited=$true;break }
-        }
-        Start-Sleep -Milliseconds 230
-    } while([DateTime]::UtcNow -lt $deadline)
-    if(!$edited) { throw 'The exact edge edit did not reach the Canvas file.' }
-    $savedHash=Digest $boardPath
-    if($savedHash -ceq $result.before_sha256) { throw 'A native file write was not observed.' }
-    $result['saved_sha256']=$savedHash
-    $result['edited_edge']=[ordered]@{id=$editedEdgeId;before=$oldLabel;after=$newLabel}
-    Copy-Item -LiteralPath $boardPath -Destination (Join-Path $env:OBSIDIAN_RECEIPTS $relativeCanvas)
-    "Native edit saved edge $editedEdgeId label $newLabel. Canvas SHA-256 $savedHash."
+        $after=Canvas-Read $File
+        $hit=Read-PinChange $before $after $View
+        if($hit) { "Native Pin view $View saved." | Write-Host;return $hit }
+        Start-Sleep -Milliseconds 260
+    } while([DateTime]::UtcNow -lt $end)
+    Copy-Item -LiteralPath (Join-Path $vault $File) -Destination (Join-Path $env:OBSIDIAN_RECEIPTS "evidence/After-$View.canvas")
+    throw "The original .canvas file has no unique changed per-card value after selecting $View."
+}
 
-    if(!$app.CloseMainWindow() -or !$app.WaitForExit(9000)) { throw 'Obsidian did not exit after the normal window close.' }
-    OpenFixture $relativeCanvas
-    $fresh=FixtureWindow 'Board'
-    if($app.Id -eq $fresh.Id) { throw 'The reopen did not create a new Obsidian process.' }
-    [void][ExactPicker]::ShowWindow($fresh.MainWindowHandle,3)
-    Start-Sleep -Milliseconds 850
-    Zoom-Canvas $fresh.MainWindowHandle 'evidence/Canvas-reopened.png'
-    $after=Read-Canvas
-    if((Digest $boardPath) -cne $savedHash -or @($after.nodes).Count -ne 4 -or @($after.edges).Count -ne 3) {
-        throw 'The Canvas or its inventory changed on reopen.'
+$null=New-Item -ItemType Directory -Path (Join-Path $env:OBSIDIAN_RECEIPTS 'evidence')
+$report=[ordered]@{version=$info.FileVersion;installer_sha256=$expected;native_created=$false;reopened=$false;pass=$false}
+foreach($name in 'Shipping.base','Alpha-616.md','Bravo-926.md','Default-307.md'){
+    Copy-Item -LiteralPath (Join-Path $vault $name) -Destination (Join-Path $env:OBSIDIAN_RECEIPTS $name)
+}
+try {
+    $file='PinNative.canvas'
+    OpenFixture $file
+    $app=FixtureWindow 'PinNative'
+    $h=$app.MainWindowHandle
+    [void][ExactPicker]::ShowWindow($h,3)
+    Start-Sleep -Milliseconds 800
+    Image 'evidence/Canvas-before-create.png' $h
+    try {
+        $report.native_created=Create-Real-Cards $h
+        Write-Host 'Both file nodes were created by direct native explorer drag.'
+    } catch {
+        $report['create_blocker']=$_.Exception.Message
+        $file='PinSeeded.canvas'
+        OpenFixture $file
+        $app=FixtureWindow 'PinSeeded'
+        $h=$app.MainWindowHandle
     }
-    $result['reopened']=$true
-    foreach($originalNode in $source.nodes) {
-        $observedNode=Node $after $originalNode.id
-        foreach($part in 'x','y','width','text') {
-            if($observedNode.$part -cne $originalNode.$part) { throw "Canvas node $($originalNode.id) changed $part unexpectedly." }
-        }
-        $expectedHeight=$originalNode.height
-        if($originalNode.id -ceq '1234567890abcde2') {
-            # In the prior actual save, Obsidian used the real 192-by-128 PNG ratio.
-            $png=[Drawing.Bitmap]::new((Join-Path $vault $media[0]))
-            try { $expectedHeight=[int]($observedNode.width * $png.Height / $png.Width) } finally { $png.Dispose() }
-            $result['image_geometry']=[ordered]@{id=$originalNode.id;width=$observedNode.width
-                input_height=$originalNode.height;saved_height=$observedNode.height;height_at_source_image_ratio=$expectedHeight}
-        }
-        if($observedNode.height -ne $expectedHeight) { throw "Canvas node $($originalNode.id) changed to an unexpected height." }
+    $report['canvas']=$file
+    Copy-Item -LiteralPath (Join-Path $vault $file) -Destination (Join-Path $env:OBSIDIAN_RECEIPTS 'evidence/Before-pin.canvas')
+    Zoom $h
+    Image 'evidence/Before-pins.png' $h
+
+    if($report.native_created){
+        $a=@(@(0.43,0.36),@(0.47,0.42),@(0.48,0.47),@(0.44,0.33))
+        $b=@(@(0.77,0.61),@(0.80,0.65),@(0.79,0.57),@(0.82,0.71))
+    } else {
+        $a=@(@(0.43,0.43),@(0.46,0.42),@(0.43,0.55),@(0.42,0.41))
+        $b=@(@(0.83,0.43),@(0.81,0.42),@(0.83,0.55),@(0.80,0.41))
     }
-    $picture=Node $after '1234567890abcde2'
-    $group=Node $after '1234567890abcde1'
-    if($picture.type -cne 'file' -or $picture.file -cne $media[0] -or $group.type -cne 'group' -or
-        $group.label -cne '研究群組' -or $group.background -cne $media[1] -or $group.backgroundStyle -cne 'cover') {
-        throw 'The original Chinese asset paths or group metadata changed.'
+    $first=Pin-View $file $h 'Pin_A_601' $a
+    $second=Pin-View $file $h 'Pin_B_904' $b
+    if($first.id -ceq $second.id -or $first.key -cne $second.key) { throw 'The pins did not persist on separate identities.' }
+    $report['pin_A']=$first
+    $report['pin_B']=$second
+    $after=Canvas-Read $file
+    if(@($after.nodes).Count -ne 2 -or @($after.nodes|Where-Object {$_.file -cne 'Shipping.base'}).Count) {
+        throw 'Both independently pinned cards no longer share the original .base file.'
     }
-    $result['file']=[ordered]@{id=$picture.id;path=$picture.file}
-    $result['group']=[ordered]@{id=$group.id;label=$group.label;background=$group.background;style=$group.backgroundStyle}
-    foreach($name in $media) {
-        if((Digest (Join-Path $vault $name)) -cne $assets[$name]) { throw "The source image changed: $name" }
-    }
-    $result['edges']=@(foreach($edge in $source.edges) { Edge-Witness $edge $after })
-    $result['pixels_before']=Media-Pixels 'evidence/Canvas-opened.png'
-    $result['pixels_reopened']=Media-Pixels 'evidence/Canvas-reopened.png'
-    if($result.pixels_before.image -lt 30 -or $result.pixels_before.background -lt 30 -or
-        $result.pixels_reopened.image -lt 30 -or $result.pixels_reopened.background -lt 30) {
-        throw 'Both distinctive source colors were not established in the opened and reopened native Canvas.'
-    }
-    $result['pass']=$true
-    'PASS Official Obsidian Canvas retained the native edge edit, original media/group paths and all three attributed edges across a new process.'
+    $path=Join-Path $vault $file
+    $saved=Digest $path
+    Copy-Item -LiteralPath $path -Destination (Join-Path $env:OBSIDIAN_RECEIPTS $file)
+    $report['canvas_sha256']=$saved
+    Image 'evidence/After-pins.png' $h
+    if(!$app.CloseMainWindow() -or !$app.WaitForExit(9000)){throw 'Obsidian did not close its process normally.'}
+    OpenFixture $file
+    $fresh=FixtureWindow ([IO.Path]::GetFileNameWithoutExtension($file))
+    if($fresh.Id -eq $app.Id -or (Digest $path) -cne $saved){throw 'The saved pin result did not survive a new process.'}
+    $report.reopened=$true
+    Zoom $fresh.MainWindowHandle
+    Image 'evidence/Reopened-pins.png' $fresh.MainWindowHandle
+    $report.pass=$true
+    "PASS actual Pin view selection saved two different named views to nodes $($first.id) and $($second.id), field $($first.key)."
 } catch {
-    $result['blocked']=$_.Exception.Message
+    $report['blocker']=$_.Exception.Message
     throw
 } finally {
-    Record 'result.json' ($result | ConvertTo-Json -Depth 10)
-    $manifest=@(
-        foreach($name in (@($relativeCanvas)+$media+'result.json')) {
-            $p=Join-Path $env:OBSIDIAN_RECEIPTS $name
-            if(Test-Path -LiteralPath $p -PathType Leaf) { "$(Digest $p)  $name" }
-        }
-    )
-    Record 'SHA256SUMS.txt' (($manifest -join [char]10)+[char]10)
+    Record 'result.json' ($report | ConvertTo-Json -Depth 8)
+    $list=@(Get-ChildItem -LiteralPath $env:OBSIDIAN_RECEIPTS -File | Sort-Object Name | ForEach-Object { "$(Digest $_.FullName)  $($_.Name)" })
+    Record 'SHA256SUMS.txt' (($list -join [char]10)+[char]10)
 }

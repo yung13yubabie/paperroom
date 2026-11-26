@@ -1,7 +1,7 @@
-name: Verify official Obsidian Canvas media round trip
+name: Verify independent official Obsidian Canvas Bases pins
 on:
   push:
-    branches: ['dev/qa/phase22-obsidian-media-canvas-20261126']
+    branches: ['dev/qa/phase24-obsidian-base-pin-20261126']
 permissions:
   contents: read
 jobs:
@@ -14,7 +14,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Edit a native Canvas edge and reopen its media fixture
+      - name: Pin distinct named Base views on two actual Canvas cards
         shell: pwsh
         env:
           OBSIDIAN_RECEIPTS: ${{ runner.temp }}/obsidian-synthetic-receipts
@@ -23,7 +23,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: obsidian-1.15.1-canvas-media-roundtrip
+          name: obsidian-1.15.1-independent-base-pins
           path: ${{ runner.temp }}/obsidian-synthetic-receipts
           if-no-files-found: warn
           retention-days: 14

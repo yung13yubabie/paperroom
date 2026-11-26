@@ -87,6 +87,7 @@ using System;
 using System.Runtime.InteropServices;
 public static class ExactPicker {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, int id);
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left,Top,Right,Bottom; }
     [StructLayout(LayoutKind.Sequential)] struct Point { public int X,Y; }
@@ -223,8 +224,22 @@ do {
     if (!$item) { Start-Sleep -Milliseconds 250 }
 } while (!$item -and [datetime]::UtcNow -lt $deadline)
 if (!$item) { throw 'The exact test folder was not exposed as a selectable filesystem item.' }
-$item.Select()
-if (!$item.Current.IsSelected -or [ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'The synthetic folder selection did not stick.' }
+$selected=$false
+for ($try=0;$try -lt 16;$try++) {
+    if ([ExactPicker]::GetForegroundWindow() -ne $handle) {
+        [void][ExactPicker]::SetForegroundWindow($handle)
+    }
+    if ([ExactPicker]::GetForegroundWindow() -eq $handle) {
+        if (!$item.Current.IsSelected) { $item.Select() }
+        Start-Sleep -Milliseconds 200
+        if ($item.Current.IsSelected -and [ExactPicker]::GetForegroundWindow() -eq $handle) {
+            $selected=$true
+            break
+        }
+    }
+    Start-Sleep -Milliseconds 250
+}
+if (!$selected) { throw 'The exact synthetic folder never stayed selected in the native picker.' }
 "Selected the exact synthetic folder item through the native filesystem chooser."
 $confirm=[ExactPicker]::GetDlgItem($handle,1)
 if ($confirm -eq [IntPtr]::Zero) { throw 'The selected folder has no native confirm button.' }

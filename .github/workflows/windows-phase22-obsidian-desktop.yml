@@ -9,8 +9,6 @@ jobs:
     if: github.repository == 'yung13yubabie/paperroom'
     runs-on: windows-2022
     timeout-minutes: 9
-    env:
-      OBSIDIAN_RECEIPTS: ${{ runner.temp }}/obsidian-synthetic-receipts
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -18,12 +16,14 @@ jobs:
           persist-credentials: false
       - name: Read two Bases and edit and reopen a synthetic Canvas
         shell: pwsh
+        env:
+          OBSIDIAN_RECEIPTS: ${{ runner.temp }}/obsidian-synthetic-receipts
         run: pwsh -STA -NoProfile -File ./scripts/windows-phase22-obsidian-desktop.ps1
       - name: Preserve only synthetic desktop receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obsidian-1.15.1-synthetic-runtime
-          path: ${{ env.OBSIDIAN_RECEIPTS }}
+          path: ${{ runner.temp }}/obsidian-synthetic-receipts
           if-no-files-found: warn
           retention-days: 14

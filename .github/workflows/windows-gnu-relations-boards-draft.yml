@@ -1,4 +1,4 @@
-name: Replay typed-relation and official Vault flows on the exact draft EXE
+name: Replay official Obsidian Files-sidebar move on the exact draft EXE
 on:
   push:
     branches: ['dev/linked-collection-board-20261126']
@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flow: [relation-board, vault-conflict]
+        flow: [vault-conflict]
     runs-on: windows-2022
     timeout-minutes: 25
     defaults:

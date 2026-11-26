@@ -94,8 +94,64 @@ public static class ExactPicker {
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr window);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flag);
+    public static int[] Bounds(IntPtr window) {
+        if (GetForegroundWindow()!=window || !GetWindowRect(window, out Rect r) ||
+            r.Right-r.Left < 500 || r.Bottom-r.Top < 340)
+            throw new InvalidOperationException("The fixture window is not usable.");
+        return new int[]{r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top};
+    }
+    public static void ClickFixture(IntPtr window, int x, int y, bool twice) {
+        Point p=new Point{X=x,Y=y};
+        if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(p),2)!=window ||
+            !SetCursorPos(x,y) || GetAncestor(WindowFromPoint(p),2)!=window ||
+            GetForegroundWindow()!=window)
+            throw new InvalidOperationException("The fixture point is not exposed.");
+        mouse_event(2,0,0,0,UIntPtr.Zero);
+        mouse_event(4,0,0,0,UIntPtr.Zero);
+        if (twice) {
+            System.Threading.Thread.Sleep(90);
+            if (GetAncestor(WindowFromPoint(p),2)!=window || GetForegroundWindow()!=window)
+                throw new InvalidOperationException("The fixture point is no longer exposed.");
+            mouse_event(2,0,0,0,UIntPtr.Zero);
+            mouse_event(4,0,0,0,UIntPtr.Zero);
+        }
+    }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags,uint x,uint y,uint wheel,UIntPtr extra);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint wheel, UIntPtr extra);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int which);
+    static void CheckFixturePoint(IntPtr window, int x, int y) {
+        if (GetForegroundWindow()!=window || GetAncestor(WindowFromPoint(new Point{X=x,Y=y}),2)!=window)
+            throw new InvalidOperationException("Input point was not on the identified Vault window.");
+    }
+    public static void RightClick(IntPtr window,int x,int y) {
+        CheckFixturePoint(window,x,y);
+        if (!SetCursorPos(x,y)) throw new InvalidOperationException("Unable to point to the Canvas card.");
+        CheckFixturePoint(window,x,y);
+        mouse_event(8,0,0,0,UIntPtr.Zero);
+        mouse_event(16,0,0,0,UIntPtr.Zero);
+    }
+    public static void DragFile(IntPtr window, int x0, int y0, int x1, int y1) {
+        CheckFixturePoint(window,x0,y0);
+        CheckFixturePoint(window,x1,y1);
+        if (!SetCursorPos(x0,y0)) throw new InvalidOperationException("Unable to point to the file.");
+        CheckFixturePoint(window,x0,y0);
+        mouse_event(2,0,0,0,UIntPtr.Zero);
+        try {
+            System.Threading.Thread.Sleep(150);
+            for (int i=1; i<=22; i++) {
+                int x=x0+(x1-x0)*i/22, y=y0+(y1-y0)*i/22;
+                CheckFixturePoint(window,x,y);
+                uint ax=(uint)Math.Round((x-GetSystemMetrics(76))*65535.0/(GetSystemMetrics(78)-1));
+                uint ay=(uint)Math.Round((y-GetSystemMetrics(77))*65535.0/(GetSystemMetrics(79)-1));
+                mouse_event(0xC001,ax,ay,0,UIntPtr.Zero);
+                System.Threading.Thread.Sleep(24);
+            }
+            System.Threading.Thread.Sleep(190);
+        } finally {
+            mouse_event(4,0,0,0,UIntPtr.Zero);
+        }
+    }
     public static void ClickDefault(IntPtr dialog,IntPtr button) {
         if (GetForegroundWindow()!=dialog || GetParent(button)!=dialog ||
             !IsWindowVisible(button) || !IsWindowEnabled(button) || !GetWindowRect(button,out Rect r))
@@ -187,54 +243,68 @@ $vendor = WaitFor 'native Obsidian has the exact fixture tab in foreground' {
         [IntPtr]$_.Current.NativeWindowHandle -eq $handle -and $_.Current.Name -like 'Flip - VaultScopeA - Obsidian 1.15.1*' }) | Select-Object -First 1
 }
 $window = [IntPtr]$vendor.Current.NativeWindowHandle
-function ExactForegroundKeys([string]$keys) {
-    if ([ExactPicker]::GetForegroundWindow() -ne $window) { throw 'The verified vendor window lost focus.' }
-    [Windows.Forms.SendKeys]::SendWait($keys)
-}
-$focusedBefore = [Windows.Automation.AutomationElement]::FocusedElement
-$beforeId = if ($focusedBefore) { $focusedBefore.GetRuntimeId() -join ',' } else { '' }
-function Find-NewVendorInput([string]$Prior) {
-    $focus=[Windows.Automation.AutomationElement]::FocusedElement
-    if ($focus -and $focus.Current.ProcessId -eq $vendor.Current.ProcessId -and
-        $focus.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -and
-        ($focus.GetRuntimeId() -join ',') -cne $Prior -and
-        [ExactPicker]::GetForegroundWindow() -eq $window) { $focus }
-}
-ExactForegroundKeys '^p'
-$commandInput=WaitFor 'the command palette owns a newly focused text input' { Find-NewVendorInput $beforeId }
-$commandId=$commandInput.GetRuntimeId() -join ','
-ExactForegroundKeys 'move current file'
-$null = WaitFor 'native command palette shows the Move current file command' {
-    param($nodes)
-    @($nodes | Where-Object {
-        $_.Current.Name -match '(?i)\bmove\s+(the\s+)?current\s+file\s+to\s+another\s+folder\b' -and
-        $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
-    }).Count -gt 0
-}
-ExactForegroundKeys '{ENTER}'
-$moveInput=WaitFor 'the native Move dialog owns its own focused text input' { Find-NewVendorInput $commandId }
-$moveBounds=$moveInput.Current.BoundingRectangle
-$folder = ($To -split '/')[0]
-ExactForegroundKeys $folder
-$null = WaitFor 'destination folder visible in vendor dialog' {
-    param($nodes)
-    @($nodes | Where-Object {
+$bounds=[ExactPicker]::Bounds($window)
+$sourceFolder=($From -split '/')[0]
+$targetFolder=($To -split '/')[0]
+$sourceEnd=if ($sourceFolder -ceq 'Active') { 'Archive' } else { 'PinNative' }
+
+function Find-ExplorerLabel($nodes,[string]$name,[int]$top=-1,[int]$bottom=[int]::MaxValue) {
+    $visible=@($nodes | Where-Object {
         $box=$_.Current.BoundingRectangle
-        $_.Current.Name -ceq $folder -and $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit' -and
-        !$box.IsEmpty -and $box.Top -ge ($moveBounds.Bottom-3) -and
-        $box.Top -le ($moveBounds.Bottom+160) -and $box.Right -gt $moveBounds.Left -and $box.Left -lt $moveBounds.Right
-    }).Count -gt 0
+        $_.Current.Name -ceq $name -and $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Text' -and
+        !$box.IsEmpty -and $box.Left -ge $bounds[0] -and $box.Right -lt ($bounds[0]+[int]($bounds[2]*0.30)) -and
+        $box.Top -gt $top -and $box.Bottom -lt $bottom
+    })
+    $ordered=@($visible | Sort-Object { $_.Current.BoundingRectangle.Left })
+    if ($ordered.Count -eq 1 -or ($ordered.Count -gt 1 -and
+        $ordered[0].Current.BoundingRectangle.Left -lt $ordered[1].Current.BoundingRectangle.Left)) {
+        $ordered[0]
+    }
 }
-ExactForegroundKeys '{ENTER}'
+function ExplorerCenter($node) {
+    $box=$node.Current.BoundingRectangle
+    @([int]($box.Left+$box.Width/2),[int]($box.Top+$box.Height/2))
+}
+$sourceLabel=WaitFor 'source folder visible in the real Files sidebar' {
+    param($nodes)
+    Find-ExplorerLabel $nodes $sourceFolder
+}
+$nextLabel=WaitFor 'next root-level folder or file constrains the source subtree' {
+    param($nodes)
+    Find-ExplorerLabel $nodes $sourceEnd
+}
+$top=[int]$sourceLabel.Current.BoundingRectangle.Bottom
+$bottom=[int]$nextLabel.Current.BoundingRectangle.Top
+$file=Find-ExplorerLabel @(DesktopNodes) 'Flip' $top $bottom
+if (!$file) {
+    $at=@(ExplorerCenter $sourceLabel)
+    [ExactPicker]::ClickFixture($window,$at[0],$at[1],$false)
+    $file=WaitFor 'exact Flip file visible inside the verified source subtree' {
+        param($nodes)
+        $fromLabel=Find-ExplorerLabel $nodes $sourceFolder
+        $fromEnd=Find-ExplorerLabel $nodes $sourceEnd
+        if ($fromLabel -and $fromEnd) {
+            Find-ExplorerLabel $nodes 'Flip' ([int]$fromLabel.Current.BoundingRectangle.Bottom-1) ([int]$fromEnd.Current.BoundingRectangle.Top+1)
+        }
+    }
+}
+$target=WaitFor 'exact destination folder visible in the same Files sidebar' {
+    param($nodes)
+    Find-ExplorerLabel $nodes $targetFolder
+}
+$start=@(ExplorerCenter $file)
+$end=@(ExplorerCenter $target)
+[ExactPicker]::DragFile($window,$start[0],$start[1],$end[0],$end[1])
 $null = WaitFor 'vendor physically moved the original Markdown bytes' {
     param($nodes)
     if (Test-Path -LiteralPath $fromFile) { return $false }
     if (!(Test-Path -LiteralPath $toFile -PathType Leaf)) { return $false }
     (Get-FileHash -LiteralPath $toFile -Algorithm SHA256).Hash -ceq $before
 }
-Write-Host "Official Obsidian 1.15.1 command moved $From to $To. SHA-256 $before. Installer SHA-256 $expected."
+Write-Host "Official Obsidian 1.15.1 Files sidebar moved $From to $To. SHA-256 $before. Installer SHA-256 $expected."
 $vendorProcess=Get-Process -Id $vendor.Current.ProcessId
 if ($vendorProcess.Path -cne $exe -or !$vendorProcess.CloseMainWindow() -or !$vendorProcess.WaitForExit(20000)) {
     throw 'The isolated verified vendor GUI did not close.'
 }
+
 

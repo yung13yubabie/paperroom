@@ -128,24 +128,34 @@ public static class ExactPicker {
 $handle=[IntPtr]$picker.Current.NativeWindowHandle
 $edit[0].SetFocus()
 if ([ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'The synthetic picker is not foreground.' }
-Set-Clipboard -Value $vault
-[Windows.Forms.SendKeys]::SendWait('^a')
+# Navigate to the fixture's parent with the address bar, then select the real folder item.
+Set-Clipboard -Value $run
+[Windows.Forms.SendKeys]::SendWait('%d')
 [Windows.Forms.SendKeys]::SendWait('^v')
-$deadline=[datetime]::UtcNow.AddSeconds(6)
-while ($value.Current.Value -cne $vault -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 150 }
-if ($value.Current.Value -cne $vault -or [ExactPicker]::GetForegroundWindow() -ne $handle) {
-    throw 'The real folder field did not receive the exact synthetic path.'
-}
-"Verified physical path entry for the isolated test Vault."
 [Windows.Forms.SendKeys]::SendWait('{ENTER}')
-Start-Sleep -Milliseconds 1000
-if ([ExactPicker]::GetForegroundWindow() -eq $handle) {
-    $visible=@($picker.FindAll($tree,$truth) | Where-Object { !$_.Current.IsOffscreen })
-    $pathShown=@($visible | Where-Object { $_.Current.Name -match '\bPaperroomFixture\b' }).Count -gt 0
-    $confirm=[ExactPicker]::GetDlgItem($handle,1)
-    if (!$pathShown -or $confirm -eq [IntPtr]::Zero) { throw 'The navigated folder was not confirmed inside the original picker.' }
-    [ExactPicker]::ClickDefault($handle,$confirm)
-}
+$item=$null
+$deadline=[datetime]::UtcNow.AddSeconds(12)
+do {
+    if ([ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'Expected the same native picker after address entry.' }
+    $items=@($picker.FindAll($tree,$truth) | Where-Object {
+        !$_.Current.IsOffscreen -and $_.Current.Name -ceq 'PaperroomFixture' -and $_.Current.ControlType.ProgrammaticName -ne 'ControlType.Edit'
+    })
+    foreach ($element in $items) {
+        $selection=$null
+        if ($element.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selection)) {
+            $item=$selection
+            break
+        }
+    }
+    if (!$item) { Start-Sleep -Milliseconds 250 }
+} while (!$item -and [datetime]::UtcNow -lt $deadline)
+if (!$item) { throw 'The exact test folder was not exposed as a selectable filesystem item.' }
+$item.Select()
+if (!$item.Current.IsSelected -or [ExactPicker]::GetForegroundWindow() -ne $handle) { throw 'The synthetic folder selection did not stick.' }
+"Selected the exact synthetic folder item through the native filesystem chooser."
+$confirm=[ExactPicker]::GetDlgItem($handle,1)
+if ($confirm -eq [IntPtr]::Zero) { throw 'The selected folder has no native confirm button.' }
+[ExactPicker]::ClickDefault($handle,$confirm)
 $null=WaitFor 'synthetic vault and running app version' {
     param($nodes)
     @($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' -and $_.Current.Name -match 'PaperroomFixture' -and $_.Current.Name -match '1\.15\.1(?![\d.])' }).Count -gt 0

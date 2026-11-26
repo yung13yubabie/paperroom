@@ -207,8 +207,14 @@ pub(crate) fn restore_workspace(source:&Path,parent:&Path,name:&str,live_db:&Pat
         if fs::read_dir(&stage)?.count()!=2 || fs::read_dir(&data)?.count()!=1 {
             return Err("建立期間資料夾內容已變更，已停止另開工作區。".into());
         }
+        // The no-write/no-delete-share directory handles also block Windows
+        // from renaming the staged directory. Finish all reads and checks before
+        // closing them. The same-parent move still refuses an existing target.
         #[cfg(windows)]
-        { drop(_data_guards);drop(_stage_guards); }
+        drop((
+            _data_guards, _stage_guards, _parent_guards, _source_path_guards,
+            _source_guards, _exe_guards, db_file, _app_file,
+        ));
         publish_folder(&stage, &destination)
             .map_err(|error| format!("無法完成新的工作區資料夾：{error}"))?;
         Ok(())

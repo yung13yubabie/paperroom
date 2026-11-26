@@ -127,9 +127,20 @@ function Confirm-RestoreRefusal([string]$Text) {
     }
     Finish-Revision $errorWindow 1
 }
+function Get-LiveWorkspaceFileHash([string]$Path) {
+    # SQLite's active Windows handle requires sharing reads and writes. This
+    # stream has read-only access and comparisons happen between UI actions.
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$share)
+    try {
+        $digest = [Security.Cryptography.SHA256]::Create()
+        try { [Convert]::ToHexString($digest.ComputeHash($stream)) }
+        finally { $digest.Dispose() }
+    } finally { $stream.Dispose() }
+}
 function Confirm-RestoreSource([string]$Witness,[string]$DbHash,[string]$BackupHash) {
     if ((Read-WorkspaceRestoreWitness $restoreSourceDb 'baseline') -cne $Witness -or
-        (Get-FileHash -LiteralPath $restoreSourceDb -Algorithm SHA256).Hash -cne $DbHash -or
+        (Get-LiveWorkspaceFileHash $restoreSourceDb) -cne $DbHash -or
         (Get-FileHash -LiteralPath $restoreBackup -Algorithm SHA256).Hash -cne $BackupHash) {
         throw 'The live original workspace or its backup changed during portable restore.'
     }
@@ -189,7 +200,7 @@ $null = Wait-For 'source note view after creating the collection' {
 Native-File 4 '備份工作區…' $restoreBackup '工作區備份已完成'
 $sourceWitness = Read-WorkspaceRestoreWitness $restoreSourceDb 'baseline'
 if ((Read-WorkspaceRestoreWitness $restoreBackup 'baseline') -cne $sourceWitness) { throw 'The source backup differs logically from the live workspace.' }
-$sourceHash = (Get-FileHash -LiteralPath $restoreSourceDb -Algorithm SHA256).Hash
+$sourceHash = (Get-LiveWorkspaceFileHash $restoreSourceDb)
 $backupHash = (Get-FileHash -LiteralPath $restoreBackup -Algorithm SHA256).Hash
 
 $sourceProcess = $process

@@ -62,6 +62,8 @@ function WaitFor($stage,[scriptblock]$check) {
         if ($result) { Write-Host "Passed $stage"; return $result }
         Start-Sleep -Milliseconds 500
     } while ([datetime]::UtcNow -lt $end)
+    @($nodes | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Window' }) |
+        ForEach-Object { Write-Host ("Observed signed desktop window: " + $_.Current.Name) }
     throw "Blocked at $stage. No matching visible UI in the verified Obsidian process."
 }
 function Exact($nodes,$name,$kind) {
@@ -103,8 +105,8 @@ if ($choose.Count -eq 1) {
     Button $choose[0]
 } else {
     $default = @($picker.FindAll($tree,$truth) | Where-Object {
-        !$_.Current.IsOffscreen -and $_.Current.IsEnabled -and $_.Current.AutomationId -eq '1'
-        -and $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button'
+        !$_.Current.IsOffscreen -and $_.Current.IsEnabled -and $_.Current.AutomationId -eq '1' -and
+        $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button'
     })
     if ($default.Count -eq 1) {
         Button $default[0]

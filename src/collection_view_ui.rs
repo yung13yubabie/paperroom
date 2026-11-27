@@ -149,6 +149,12 @@ impl App {
     }
 
     pub(super) unsafe fn open_collection_layout(&mut self,id:i64,title:String,saved_view:Option<CollectionView>) -> Result<()> {
+        let view=self.build_collection_layout(id,title,saved_view)?;
+        unsafe {self.activate_workspace(WorkspaceView::Kanban(view));}
+        Ok(())
+    }
+
+    pub(super) fn build_collection_layout(&self,id:i64,title:String,saved_view:Option<CollectionView>) -> Result<Kanban> {
         let timeline = if let Some(view) = saved_view.as_ref().filter(|view| view.presentation.timeline_mode) {
             let month = view.presentation.calendar_month.ok_or("時間軸的月份有誤。")?;
             Some((month, self.notebook.timeline_collection_rows(id, view, month)?))
@@ -165,24 +171,18 @@ impl App {
             let month = view.presentation.calendar_month.unwrap_or_else(current_month);
             Some((month,self.notebook.calendar_collection_rows(id,view,month)?))
         } else { None };
-        let lanes = if timeline.is_some() || week.is_some() || calendar.is_some() {
-            Vec::new()
-        } else { self.notebook.presented_collection_lanes(id, saved_view.as_ref())? };
+        let (lanes,display)=if timeline.is_some() || week.is_some() || calendar.is_some() {
+            (Vec::new(),None)
+        } else if let Some(view)=saved_view.as_ref().filter(|v|v.layout==CollectionLayout::Table){
+            self.notebook.collection_lanes_and_display(id,view)?
+        } else {(self.notebook.presented_collection_lanes(id,saved_view.as_ref())?,None)};
         let (column,row) = match &self.extras.workspace {
             Some(WorkspaceView::Kanban(old)) if old.id == id && old.saved_view == saved_view => (old.column,old.row),
             _ => (0,0),
         };
         let column = column.min(lanes.len().saturating_sub(1));
-        let display_columns = if saved_view.as_ref().is_some_and(|view| view.layout == CollectionLayout::Table)
-            && timeline.is_none() && week.is_none() && calendar.is_none()
-        {
-            self.notebook.collection_display_columns(id)?.map(|keys| {
-                keys.into_iter().map(|key| {
-                    let values = self.notebook.collection_property_values(id, &key)?;
-                    Ok(DisplayProperty { key, values })
-                }).collect::<Result<Vec<_>>>()
-            }).transpose()?
-        } else { None };
+        let display_columns=display.map(|columns|columns.into_iter()
+            .map(|(key,values)|DisplayProperty{key,values}).collect());
         let checkbox = if display_columns.is_none() && let Some(filter) = saved_view.as_ref()
             .filter(|view| view.layout == CollectionLayout::Table && view.presentation.group_key.is_none()
                 && !view.presentation.list_mode && view.presentation.calendar_key.is_none())
@@ -200,8 +200,7 @@ impl App {
         let group_folds = saved_view.as_ref().map(|view| self.notebook.collection_group_folds(view)).transpose()?.flatten();
         let mut view = Kanban { id,title,saved_view,column,row,checkbox,display_columns,calendar,week,timeline,timeline_drag:None,lanes,group_folds };
         view.row = row.min(view.max_scroll_row());
-        unsafe { self.activate_workspace(WorkspaceView::Kanban(view)); }
-        Ok(())
+        Ok(view)
     }
 
     pub(super) unsafe fn collection_view_menu(&mut self,id:i64,title:String) -> Result<()> {
@@ -1789,3 +1788,6 @@ fn current_month() -> Month {
 
 
 fn current_day() -> Result<CalendarDay> { CalendarDay::local_today() }
+
+#[path = "collection_bulk_edit_ui.rs"]
+mod bulk_edit_ui;

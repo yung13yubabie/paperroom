@@ -70,7 +70,7 @@ impl App {
                     let kind = if action == 1 { ShapeKind::Rectangle } else { ShapeKind::Ellipse };
                     let title = format!("新增{}",shape_label(kind));
                     let rect = ShapeRect {
-                        x:32,y:(self.extras.scroll+48).clamp(0,50000),width:160,height:96,
+                        x:(self.extras.board_scroll_x+32).clamp(0,10000),y:(self.extras.scroll+48).clamp(0,50000),width:160,height:96,
                     };
                     if let Some(rect) = self.prompt_shape_rect(&title,rect)? {
                         self.notebook.create_board_shape(board,kind,rect)?;
@@ -123,7 +123,7 @@ impl App {
 
     fn board_shape_pixel_rect(&self, shape: Shape, area: RECT) -> ShapeRect {
         ShapeRect {
-            x: area.left + self.scaled(shape.rect.x),
+            x: self.board_screen_x(area, shape.rect.x),
             y: area.top + self.scaled(shape.rect.y - self.extras.scroll),
             width: self.scaled(shape.rect.width),
             height: self.scaled(shape.rect.height),
@@ -167,7 +167,7 @@ impl App {
             if GetCapture() == self.hwnd {
                 self.extras.board_shape_drag = Some(BoardShapeDrag {
                     board: self.board_id(), shape, pointer: (x, y), dpi: self.dpi,
-                    max_x: width.saturating_sub(24), preview: shape.rect,
+                    max_x: (self.extras.board_scroll_x + width.saturating_sub(24)).min(10000), preview: shape.rect,
                 });
             }
         }

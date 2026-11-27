@@ -181,6 +181,202 @@ mod tests {
     }
 
     #[test]
+    fn source_index_follows_exact_rows_across_scopes_and_revalidates_stale_memberships()->Result<()> {
+        use super::super::collection_views::CollectionLayout;
+        let dir=super::super::tests::data_dir();
+        let zip=dir.join("source.zip");
+        fs::write(&zip,archive(&[
+            ("data.csv",b"Name,Status\nsame,ready"),("A/same.md",b"# same\n\nA unique [asset](image.txt)"),
+            ("B/same.md",b"# same\n\nB unique"),("A/image.txt",b"unchanged bytes")])?)?;
+        let file=dir.join("work.sqlite3");
+        let mut db=Notebook::open(&file,false)?;
+        let root=import(&mut db,&zip)?;
+        let csv=db.rows(View::All,"")?.into_iter().find(|r|r.title.ends_with("data.csv")).unwrap();
+        let (col,_)=db.create_collection_from_notion_csv(csv.id,db.list_attachments(csv.id)?[0].id,"Primary")?;
+        let row=db.collection_rows(col)?[0].0.id;
+        let details=db.note(row)?.unwrap();db.save(row,details.version,"same","unique row body")?;
+        let other=db.create_collection("Second")?;
+        db.add_to_collection(other,row,"todo")?;
+        let saved=db.create_collection_view(other,"Only done",CollectionLayout::Table,"done","")?;
+        let a=note_at(&db,root,"A/same.md")?;let b=note_at(&db,root,"B/same.md")?;
+        let page=db.notion_source_identity(a)?.unwrap();
+        let file_id=db.list_attachments(a)?[0].id;
+        let batch=db.notion_source_batches()?.remove(0);
+        let pages=db.notion_source_pages(&batch,row)?;
+        let target=pages.iter().find(|p|p.id==a).unwrap();
+        let token=db.notion_row_token(row)?.unwrap();
+        db.bind_notion_source(row,&token,&batch,target,None)?;
+        let decoy=db.add(None,"same","wrong row")?;
+        db.add_to_collection(col,decoy,"ready")?;
+        db.set_relation(decoy,"Other",a,true)?;
+        let (hits,more,conflicts)=db.notion_membership_page(&page,0)?;
+        assert_eq!((hits.len(),more,conflicts),(2,false,0));
+        assert_eq!(hits.iter().map(|h|h.collection).collect::<Vec<_>>(),[col,other]);
+        let first=&hits[0];let second=&hits[1];
+        assert_eq!(db.note_from_source_membership(&page,second)?.body,"unique row body");
+        db.move_collection_note(other,row,"todo","ready")?;
+        assert!(db.note_from_source_membership(&page,second).is_err());
+        assert_eq!(db.note_from_source_membership(&page,first)?.row.id,row);
+        db.trash(row)?;
+        assert!(db.notion_membership_page(&page,0)?.0.is_empty());
+        db.restore(row)?;
+        db.set_relation(row,SOURCE_RELATION,b,true)?;
+        let (hits,_,conflicts)=db.notion_membership_page(&page,0)?;
+        assert!(hits.is_empty()); assert_eq!(conflicts,1);
+        assert!(db.note_from_source_membership(&page,first).is_err());
+        db.set_relation(row,SOURCE_RELATION,b,false)?;
+        let n=db.note(row)?.unwrap();db.save(row,n.version,"renamed",&n.body)?;
+        assert!(db.note_from_source_membership(&page,first).is_err());
+        let n=db.note(a)?.unwrap();db.save(a,n.version,"renamed source",&n.body)?;
+        assert_eq!(db.notion_membership_page(&page,0)?.0[0].title,"renamed");
+        db.trash(a)?;assert!(db.notion_membership_page(&page,0).is_err());db.restore(a)?;
+        for i in 0..40 {
+            let extra=db.add(None,&format!("extra {i:02}"),"fixture")?;
+            db.add_to_collection(other,extra,"ready")?;db.set_relation(extra,SOURCE_RELATION,a,true)?;
+        }
+        let (first_page,more,_)=db.notion_membership_page(&page,0)?;
+        let (last_page,last_more,_)=db.notion_membership_page(&page,40)?;
+        assert_eq!((first_page.len(),more,last_page.len(),last_more),(40,true,2,false));
+        drop(db);
+        let db=Notebook::open(&file,false)?;
+        let backup=dir.join("backup.sqlite3");db.backup(&backup)?;drop(db);
+        let copy=dir.join("restored.sqlite3");fs::copy(backup,&copy)?;
+        let db=Notebook::open(&copy,false)?;
+        assert_eq!(db.note_from_source_membership(&page,&first_page[0])?.body,"unique row body");
+        assert!(db.collection_views(other)?.contains(&saved));
+        assert!(db.filtered_collection_rows(other,Some(&saved))?.is_empty());
+        let asset=dir.join("restored.txt");db.save_attachment_copy(file_id,&asset)?;
+        assert_eq!(fs::read(asset)?,b"unchanged bytes");
+        let old=db.bound_notion_source(row)?.unwrap();
+        db.bind_notion_source(row,&token,&batch,pages.iter().find(|p|p.id==b).unwrap(),Some(&old))?;
+        assert!(db.note_from_source_membership(&page,&first_page[0]).is_err());
+        let replacement=db.notion_source_identity(b)?.unwrap();
+        assert_eq!(db.notion_membership_page(&replacement,0)?.0.len(),2);
+        drop(db);fs::remove_dir_all(dir)?;Ok(())
+    }
+
+    #[test]
+    fn chosen_csv_row_source_survives_reopen_backup_and_keeps_exact_attachment() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let zip = dir.join("notion.zip");
+        let original = archive(&[
+            ("data.csv", "Name,Status\n鏡頭,ready".as_bytes()),
+            ("甲/鏡頭.md", "# 鏡頭\n\n甲正文 [圖](圖.txt)".as_bytes()),
+            ("乙/鏡頭.md", "# 鏡頭\n\n乙正文 [圖](圖.txt)".as_bytes()),
+            ("甲/圖.txt", b"decoy"), ("乙/圖.txt", b"selected image"),
+        ])?;
+        fs::write(&zip,&original)?;
+        let path = dir.join("workspace.sqlite3");
+        let mut db = Notebook::open(&path,false)?;
+        let first = import(&mut db,&zip)?;
+        let csv = db.rows(View::All,"")?.into_iter().find(|r| r.title.ends_with("data.csv")).unwrap();
+        let attachment = db.list_attachments(csv.id)?[0].id;
+        let (collection,_) = db.create_collection_from_notion_csv(csv.id,attachment,"集合")?;
+        let row = db.collection_rows(collection)?[0].0.id;
+        let fields = db.properties(row)?;
+        let second = import(&mut db,&zip)?;
+        let batches = db.notion_source_batches()?;
+        let batch = batches.iter().find(|b| b.id == first).unwrap();
+        let pages = db.notion_source_pages(batch,row)?;
+        let page = pages.iter().find(|p| p.path=="乙/鏡頭.md").unwrap();
+        let token = db.notion_row_token(row)?.unwrap();
+        assert!(db.bind_notion_source(row,&token,batches.iter().find(|b| b.id==second).unwrap(),page,None).is_err());
+        db.trash(page.id)?;
+        assert!(db.bind_notion_source(row,&token,batch,page,None).is_err());
+        db.restore(page.id)?;
+        assert!(db.bind_notion_source(row,"stale",batch,page,None).is_err());
+        db.bind_notion_source(row,&token,batch,page,None)?;
+        assert!(db.bind_notion_source(row,&token,batch,&pages[0],None).is_err());
+        drop(db);
+        let db = Notebook::open(&path,false)?;
+        let backup = dir.join("backup.sqlite3");
+        db.backup(&backup)?;
+        drop(db);
+        let isolated = dir.join("isolated.sqlite3");
+        fs::copy(backup,&isolated)?;
+        let db = Notebook::open(&isolated,false)?;
+        let origin = db.named_relation_origin(row)?;
+        let direction = super::super::named_relation_navigation::Direction::Outgoing;
+        let (hits,_) = db.named_relation_page(&origin,direction,0)?;
+        assert_eq!(hits.len(),1);
+        let note = db.note_from_named_relation(&origin,direction,&hits[0])?;
+        assert_eq!(note.row.id,page.id);
+        assert!(note.body.contains("乙正文"));
+        let copy = dir.join("materialized.txt");
+        db.save_attachment_copy(db.list_attachments(note.row.id)?[0].id,&copy)?;
+        assert_eq!(fs::read(copy)?,b"selected image");
+        assert_eq!(db.properties(row)?,fields);
+        assert_eq!(fs::read(zip)?,original);
+        drop(db);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn replaces_confirmed_source_only_and_rolls_back_failed_insert() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let zip = dir.join("notion.zip");
+        fs::write(&zip,archive(&[
+            ("old/shot.md", b"# Shot\n\nold [asset](ref.txt)"),
+            ("new/shot.md", b"# Shot\n\nnew [asset](ref.txt)"),
+            ("old/ref.txt", b"old bytes"), ("new/ref.txt", b"new bytes"),
+        ])?)?;
+        let path = dir.join("workspace.sqlite3");
+        let mut db = Notebook::open(&path,false)?;
+        import(&mut db,&zip)?;
+        let row = db.add(None,"Shot","standalone row")?;
+        let collection = db.create_collection("shots")?;
+        db.add_to_collection(collection,row,"ready")?;
+        let token = db.notion_row_token(row)?.unwrap();
+        let batch = db.notion_source_batches()?.remove(0);
+        let pages = db.notion_source_pages(&batch,row)?;
+        let (old,new) = (&pages[1],&pages[0]);
+        assert_eq!((&*old.path,&*new.path),("old/shot.md","new/shot.md"));
+        db.bind_notion_source(row,&token,&batch,old,None)?;
+        let previous = db.bound_notion_source(row)?.unwrap();
+        let other = db.add(None,"independent","unrelated")?;
+        let insert = "INSERT INTO note_relations(source_id,name,target_id) VALUES(?1,?2,?3)";
+        db.connection.execute(insert,params![row,"Other",other])?;
+        db.connection.execute(insert,params![row,SOURCE_RELATION,other])?;
+        assert!(db.bind_notion_source(row,&token,&batch,new,Some(&previous)).is_err());
+        db.connection.execute("DELETE FROM note_relations WHERE source_id=?1 AND name=?2 AND target_id=?3",
+            params![row,SOURCE_RELATION,other])?;
+        db.trash(new.id)?;
+        assert!(db.bind_notion_source(row,&token,&batch,new,Some(&previous)).is_err());
+        db.restore(new.id)?;
+        // SQLite rejects the new edge after the old edge has been removed inside the same transaction.
+        db.connection.execute_batch("CREATE TEMP TRIGGER fail_edge BEFORE INSERT ON note_relations
+            BEGIN SELECT RAISE(ABORT,'test write failure'); END;")?;
+        assert!(db.bind_notion_source(row,&token,&batch,new,Some(&previous)).is_err());
+        assert_eq!(db.bound_notion_source(row)?.as_ref(),Some(&previous));
+        db.connection.execute_batch("DROP TRIGGER fail_edge;")?;
+        db.bind_notion_source(row,&token,&batch,new,Some(&previous))?;
+        assert!(db.bind_notion_source(row,&token,&batch,old,Some(&previous)).is_err());
+        drop(db);
+        let db = Notebook::open(&path,false)?;
+        assert!(db.bound_notion_source(row)?.unwrap().matches(new));
+        let backup = dir.join("backup.sqlite3");
+        db.backup(&backup)?;
+        drop(db);
+        let isolated = dir.join("isolated.sqlite3");
+        fs::copy(backup,&isolated)?;
+        let db = Notebook::open(&isolated,false)?;
+        assert!(db.bound_notion_source(row)?.unwrap().matches(new));
+        assert_eq!(db.note(row)?.unwrap().body,"standalone row");
+        let kept: i64 = db.connection.query_row(
+            "SELECT target_id FROM note_relations WHERE source_id=? AND name='Other'",[row],|r|r.get(0))?;
+        assert_eq!(kept,other);
+        for (page,bytes) in [(old,b"old bytes"),(new,b"new bytes")] {
+            let copy = dir.join(format!("{}.txt",page.id));
+            db.save_attachment_copy(db.list_attachments(page.id)?[0].id,&copy)?;
+            assert_eq!(fs::read(copy)?,bytes);
+        }
+        drop(db);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn v30_upgrade_leaves_old_notes_unmapped_and_duplicate_archive_fails_before_import() -> Result<()> {
         let dir = super::super::tests::data_dir();
         let path = dir.join("legacy.sqlite3");
@@ -206,3 +402,127 @@ mod tests {
         Ok(())
     }
 }
+
+pub(crate) struct SourceBatch {
+    pub id: i64,
+    pub title: String,
+    token: String,
+}
+
+pub(crate) struct SourcePage {
+    pub id: i64,
+    part: String,
+    path: String,
+    token: String,
+}
+
+impl SourcePage {
+    pub(crate) fn label(&self) -> String {
+        let location = if self.part.is_empty() {
+            format!("外層 ZIP／{}", self.path)
+        } else {
+            format!("內嵌 ZIP／{}!/{}", self.part, self.path)
+        };
+        format!("{location}　[#{}]", self.id)
+    }
+}
+
+const SOURCE_RELATION: &str = "Notion Markdown 來源";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BoundNotionSource {
+    id: i64,
+    token: String,
+    label: String,
+}
+
+impl BoundNotionSource {
+    pub(crate) fn label(&self) -> &str { &self.label }
+    pub(crate) fn matches(&self, page: &SourcePage) -> bool {
+        self.id == page.id && self.token == page.token
+    }
+}
+
+impl super::Notebook {
+    pub(crate) fn notion_row_token(&self, id: i64) -> Result<Option<String>> {
+        Ok(self.connection.query_row(
+            "SELECT i.token FROM note_link_identities i JOIN notes n ON n.id=i.note_id
+             WHERE n.id=? AND n.trash_root IS NULL AND EXISTS
+                (SELECT 1 FROM collection_notes c WHERE c.note_id=n.id)",
+            [id], |r| r.get(0),
+        ).optional()?)
+    }
+
+    pub(crate) fn notion_source_batches(&self) -> Result<Vec<SourceBatch>> {
+        let mut q = self.connection.prepare(
+            "SELECT n.id,n.title,i.token FROM notes n JOIN note_link_identities i ON i.note_id=n.id
+             WHERE n.trash_root IS NULL AND n.id IN
+                (SELECT p.import_root FROM notion_page_paths p JOIN notes t ON t.id=p.note_id WHERE t.trash_root IS NULL)
+             ORDER BY n.title,n.id")?;
+        Ok(q.query_map([], |r| Ok(SourceBatch { id:r.get(0)?, title:r.get(1)?, token:r.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn notion_source_pages(&self, batch: &SourceBatch, row: i64) -> Result<Vec<SourcePage>> {
+        let mut q = self.connection.prepare(
+            "SELECT p.note_id,p.archive_part,p.relative_path,i.token FROM notion_page_paths p
+             JOIN notes n ON n.id=p.note_id JOIN note_link_identities i ON i.note_id=n.id
+             JOIN notes root ON root.id=p.import_root JOIN note_link_identities ri ON ri.note_id=root.id
+             WHERE root.id=?1 AND ri.token=?2 AND p.note_id<>?3 AND root.trash_root IS NULL AND n.trash_root IS NULL
+             ORDER BY p.archive_part,p.relative_path,p.note_id")?;
+        Ok(q.query_map(params![batch.id,batch.token,row], |r| Ok(SourcePage {
+            id:r.get(0)?, part:r.get(1)?, path:r.get(2)?, token:r.get(3)?,
+        }))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // A user may also create edges with this name in the general relation editor.
+    // Never silently replace a non-import target or choose between multiple edges.
+    pub(crate) fn bound_notion_source(&self, row: i64) -> Result<Option<BoundNotionSource>> {
+        let mut query = self.connection.prepare(
+            "SELECT r.target_id,i.token,p.import_root,p.archive_part,p.relative_path,n.trash_root
+             FROM note_relations r JOIN notes n ON n.id=r.target_id
+             LEFT JOIN note_link_identities i ON i.note_id=n.id
+             LEFT JOIN notion_page_paths p ON p.note_id=n.id
+             WHERE r.source_id=?1 AND r.name=?2 ORDER BY r.target_id LIMIT 2")?;
+        let mut edges = query.query(params![row,SOURCE_RELATION])?;
+        let Some(edge) = edges.next()? else { return Ok(None); };
+        let root: i64 = edge.get::<_,Option<i64>>(2)?.ok_or("現有同名關聯指向非 Notion 來源頁，請使用集合的關聯管理。")?;
+        let page = SourcePage {
+            id: edge.get(0)?, token: edge.get(1)?, part: edge.get(3)?, path: edge.get(4)?,
+        };
+        let trash = if edge.get::<_,Option<i64>>(5)?.is_some() { "（垃圾桶）" } else { "" };
+        let label = format!("批次 [#{root}] {}{trash}",page.label());
+        if edges.next()?.is_some() { return Err("有多個同名來源關聯，請使用集合的關聯管理確認。".into()); }
+        Ok(Some(BoundNotionSource { id:page.id,token:page.token,label }))
+    }
+
+    pub(crate) fn bind_notion_source(&self, row: i64, token: &str, batch: &SourceBatch,
+        page: &SourcePage, expected: Option<&BoundNotionSource>) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        if self.notion_row_token(row)?.as_deref() != Some(token) {
+            return Err("集合資料列已變更，請重新選取。".into());
+        }
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM notion_page_paths p
+             JOIN notes n ON n.id=p.note_id JOIN note_link_identities i ON i.note_id=n.id
+             JOIN notes root ON root.id=p.import_root JOIN note_link_identities ri ON ri.note_id=root.id
+             WHERE root.id=?1 AND ri.token=?2 AND n.id=?3 AND i.token=?4 AND p.archive_part=?5 AND p.relative_path=?6
+             AND root.trash_root IS NULL AND n.trash_root IS NULL AND n.id<>?7)",
+            params![batch.id,batch.token,page.id,page.token,page.part,page.path,row], |r| r.get(0))?;
+        if !current { return Err("來源頁的位置或身分已變更，請重新選取。".into()); }
+        if self.bound_notion_source(row)?.as_ref() != expected {
+            return Err("目前的來源關聯已變更，請重新選取。".into());
+        }
+        if let Some(old) = expected {
+            if old.matches(page) { return Err("已經連結到這個 Notion Markdown 來源頁。".into()); }
+            super::collections::write_relation(&tx,row,SOURCE_RELATION,old.id,false)?;
+        }
+        super::collections::write_relation(&tx,row,SOURCE_RELATION,page.id,true)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+#[path = "notion_source_memberships.rs"]
+mod memberships;
+pub(crate) use memberships::PageIdentity;

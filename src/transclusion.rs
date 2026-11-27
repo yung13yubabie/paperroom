@@ -1,4 +1,4 @@
-use super::note_links::{NATIVE_NOTE_PREFIX, native_note_target};
+use super::note_links::{NATIVE_NOTE_PREFIX, is_heptabase_root, native_note_target};
 use super::vault_search::frontmatter;
 use super::{Notebook, Result};
 use crate::markdown::block_anchors::{BlockLookup, resolve_block};
@@ -62,11 +62,7 @@ fn destination_parts(destination: &str) -> (&str, Option<&str>) {
 /// New transclusions require an identity token even though older note links
 /// accept bare numeric IDs. A number alone may name another workspace's note.
 pub(crate) fn native_embed_target(db: &Connection, path: &str) -> Result<Option<i64>> {
-    let token_present = path.strip_prefix(NATIVE_NOTE_PREFIX).is_some_and(|suffix| suffix.contains(':'));
-    if token_present {
-        return native_note_target(db, path);
-    }
-    Ok(None)
+    native_note_target(db, None, path)
 }
 
 pub(super) fn resolve_embed_target(
@@ -227,6 +223,7 @@ impl Projection<'_> {
             return resolve_embed_target(self.db, host, None, destination);
         }
         let Some((root, source)) = &note.location else { return Ok(None); };
+        if is_heptabase_root(self.db, *root)? { return Ok(None); }
         if let std::collections::hash_map::Entry::Vacant(entry) = self.vaults.entry(*root) {
             let mut query = self.db.prepare(
                 "SELECT note_id,relative_path FROM vault_paths WHERE import_root=?1",

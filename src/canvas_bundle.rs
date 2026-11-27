@@ -12,7 +12,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 #[path = "canvas_bundle_local.rs"]
 mod local;
 #[cfg(any(windows, test))]
-pub(crate) use local::LocalCanvasBundle;
+pub(crate) use local::{LocalCanvasBundle,read_base_card_file};
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE canvas_bundles(
@@ -89,6 +89,38 @@ fn portable(path: &str) -> bool {
             && !matches!(port, Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
             && !part.chars().any(|c| c.is_control() || r#"<>:"\|?*"#.contains(c))
     })
+}
+
+pub(crate) fn node_asset_reference(node: &serde_json::Value) -> Option<&str> {
+    match node["type"].as_str() {
+        Some("file") => node["file"].as_str(),
+        Some("group") => node["background"].as_str(),
+        _ => None,
+    }
+}
+
+pub(crate) fn companion_image_paths(doc:&canvas::Document) -> impl Iterator<Item=&str> {
+    doc.json()["nodes"].as_array().into_iter().flatten()
+        .filter_map(node_asset_reference).filter(|path| portable(path) && path.rsplit_once('.').is_some_and(|(_,ext)|
+        ["png","jpg","jpeg"].iter().any(|kind| ext.eq_ignore_ascii_case(kind))))
+}
+
+pub(super) fn attach_companion_images(db:&rusqlite::Connection,id:i64,member:&str,doc:&canvas::Document,images:&BTreeMap<String,Vec<u8>>) -> Result<(usize,usize)> {
+    let paths = companion_image_paths(doc).collect::<BTreeSet<_>>();
+    if paths.is_empty() { return Ok((0,0)); }
+    let filename = member.rsplit('/').next().ok_or("找不到畫布檔名。")?;
+    let kept = paths.iter().filter(|path| !path.split('/').next().is_some_and(|part|part.to_lowercase()==filename.to_lowercase()))
+        .filter_map(|path|images.get(*path).map(|bytes|(*path,bytes))).collect::<BTreeMap<_,_>>();
+    let needed = kept.values().map(|bytes| bytes.len() as i64).sum::<i64>();
+    let used = db.query_row("SELECT coalesce(sum(length(bytes)),0) FROM canvas_bundle_assets",[],|row|row.get::<_,i64>(0))?;
+    if needed > TOTAL_ASSETS.saturating_sub(used) {return Err("已達工作區 Canvas 附件儲存上限。".into());}
+    // The handoff uses ZIP-root references. Publish the drawing at that root
+    // so the standard bundle resolver has no parent-folder search alternatives.
+    db.execute("INSERT INTO canvas_bundles(canvas_id,canvas_path,inventory) VALUES(?1,?2,?3)",
+        params![id,filename,serde_json::to_string(&kept.keys().collect::<Vec<_>>())?])?;
+    let mut insert = db.prepare_cached("INSERT INTO canvas_bundle_assets(canvas_id,path,bytes) VALUES(?1,?2,?3)")?;
+    for (path,bytes) in &kept { insert.execute(params![id,path,bytes])?; }
+    Ok((kept.len(),paths.len()-kept.len()))
 }
 
 fn canvas_name(path: &str) -> bool {
@@ -327,7 +359,13 @@ impl Notebook {
         let Some((path, raw, inventory)) = self.canvas_bundle_source(id)? else { return Ok(None) };
         let names = self.canvas_bundle_paths(id)?;
         let inventory: BTreeSet<String> = serde_json::from_str(&inventory)?;
-        let mut report = report(&canvas::parse_bundle(raw)?, &path, &inventory);
+        let doc = canvas::parse_bundle(raw)?;
+        let mut report = report(&doc, &path, &inventory);
+        if self.is_companion_canvas(id)? {
+            // Markdown nodes in a companion have their own source-note bindings.
+            report.references.retain(|path,_| path.rsplit_once('.').is_some_and(|(_,ext)|
+                ["png","jpg","jpeg"].iter().any(|kind| ext.eq_ignore_ascii_case(kind))));
+        }
         for state in report.references.values_mut() {
             if matches!(state, CanvasAssetState::Stored(name) if !names.contains(name)) {
                 *state = CanvasAssetState::Missing;
@@ -354,11 +392,35 @@ impl Notebook {
         }))
     }
 
-    pub(crate) fn save_canvas_bundle_asset(&self, id: i64, member: &str, output: &Path) -> Result<()> {
+    fn canvas_bundle_asset_bytes(&self, id: i64, member: &str) -> Result<Vec<u8>> {
         if !portable(member) { return Err("Canvas 附件路徑無效。".into()); }
-        let bytes: Vec<u8> = self.connection.query_row(
+        self.connection.query_row(
             "SELECT bytes FROM canvas_bundle_assets WHERE canvas_id=?1 AND path=?2", params![id, member],
-            |r| r.get(0)).optional()?.ok_or("找不到封裝中的 Canvas 附件。")?;
+            |r| r.get(0)).optional()?.ok_or_else(|| "找不到封裝中的 Canvas 附件。".into())
+    }
+
+    pub(crate) fn save_canvas_bundle_asset(&self, id: i64, member: &str, output: &Path) -> Result<()> {
+        let bytes = self.canvas_bundle_asset_bytes(id, member)?;
+        publish_new(output, |file, _| { file.write_all(&bytes)?; Ok(()) })
+    }
+
+    pub(crate) fn save_canvas_node_asset(
+        &self, id: i64, expected: &canvas::Document, node_id: &str, member: &str, output: &Path,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
+        let current = self.read_canvas(id)?;
+        if current.as_str() != expected.as_str() {
+            return Err("畫布已變更，請重新開啟畫布並選取節點。".into());
+        }
+        let reference = current.json()["nodes"].as_array().into_iter().flatten()
+            .find(|node| node["id"].as_str() == Some(node_id)).and_then(node_asset_reference)
+            .ok_or("此節點沒有可另存的附件或背景圖片。")?;
+        let report = self.canvas_bundle_report(id)?.ok_or("這份 Canvas 沒有封裝附件。")?;
+        if !matches!(report.references.get(reference), Some(CanvasAssetState::Stored(path)) if path == member) {
+            return Err("此節點的封裝附件已變更或無法辨識。".into());
+        }
+        let bytes = self.canvas_bundle_asset_bytes(id, member)?;
+        tx.commit()?;
         publish_new(output, |file, _| { file.write_all(&bytes)?; Ok(()) })
     }
 
@@ -428,17 +490,22 @@ mod tests {
             let source = dir.join("vault.zip");
             let pack = json!({"nodes":[
                 {"id":"exact","type":"file","x":0,"y":0,"width":100,"height":80,
-                 "file":"甲/鏡頭.md","subpath":"#答案"},
+                 "file":"甲/鏡頭.md","subpath":"#答案","unknown":{"preserve":true}},
+                {"id":"wrong-note","type":"file","x":0,"y":120,"width":100,"height":80,"file":"乙/鏡頭.md","subpath":"#答案"},
+                {"id":"base-pin","type":"file","x":0,"y":220,"width":100,"height":80,"file":"進度.base","subpath":"#答案"},
                 {"id":"basename-only","type":"file","x":120,"y":0,"width":90,"height":80,"file":"鏡頭.md"}
             ]});
             let content = "# 答案\n甲組筆記。\n";
+            let original=serde_json::to_string_pretty(&pack)?;
+            let physical=dir.join("原件.canvas");fs::write(&physical,&original)?;
             let mut zip = ZipWriter::new(File::create_new(&source)?);
-            for (name, bytes) in [("研究/圖.canvas", pack.to_string().into_bytes()),
+            for (name, bytes) in [("研究/圖.canvas", fs::read(&physical)?),
                 ("甲/鏡頭.md", content.as_bytes().to_vec()), ("乙/鏡頭.md", b"separate sibling".to_vec())] {
                 zip.start_file(name, SimpleFileOptions::default())?;
                 zip.write_all(&bytes)?;
             }
             zip.finish()?;
+            let zip_bytes=fs::read(&source)?;
             let bundle = db.import_canvas_bundle(&source)?.id;
             assert!(db.resolve_canvas_file_link(bundle, None, "exact")?.note_id.is_none());
             let page = |folder: &str, body: &str| ImportedPage {
@@ -452,12 +519,49 @@ mod tests {
             let exact = db.resolve_canvas_file_link(bundle, scope, "exact")?;
             assert_eq!(exact.subpath.as_deref(), Some("#答案"));
             assert_eq!(db.note(exact.note_id.unwrap())?.unwrap().body, content);
+            let target=exact.note_id.unwrap();
+            let body=db.note(target)?.unwrap().body;
+            assert!(matches!(crate::markdown::resolve_heading(&body,exact.subpath.as_deref().unwrap(),crate::markdown::AnchorSyntax::Wiki),crate::markdown::HeadingLookup::Found{..}));
+            let selected=db.vault_heading_choices(target)?;
+            let plan=db.preview_heading_rename(&selected,"答案","解答")?;
+            assert!(plan.summary().contains(&format!("[#{bundle}]　節點：exact")));
+            let original_working=db.read_canvas(bundle)?.as_str().to_owned();
+            let collision_doc=crate::canvas::parse(r##"{"nodes":[{"id":"future","type":"file","file":"甲/鏡頭.md","subpath":"#解答","x":0,"y":0,"width":40,"height":40}]}"##.into())?;
+            let collision=db.save_canvas("collision",&collision_doc)?;
+            db.set_canvas_vault(collision,Some(a))?;
+            assert!(db.preview_heading_rename(&selected,"答案","解答").is_err());
+            assert!(db.apply_heading_rename(&plan).is_err());
+            assert_eq!(db.note(target)?.unwrap().body,body);
+            db.set_canvas_vault(collision,None)?;
+            db.connection.execute_batch(&format!("CREATE TEMP TRIGGER interrupt_heading_canvas BEFORE UPDATE OF source ON saved_canvases WHEN OLD.id={bundle}
+                BEGIN SELECT RAISE(ABORT,'test write failure'); END;"))?;
+            assert!(db.apply_heading_rename(&plan).is_err());
+            assert_eq!(db.note(target)?.unwrap().body,body);
+            assert_eq!(db.read_canvas(bundle)?.as_str(),original_working);
+            db.connection.execute_batch("DROP TRIGGER interrupt_heading_canvas")?;
+            db.apply_heading_rename(&plan)?;
+            let link=db.resolve_canvas_file_link(bundle,scope,"exact")?;
+            assert_eq!(link.note_id,Some(target));
+            assert_eq!(link.subpath.as_deref(),Some("#解答"));
+            let updated=db.note(target)?.unwrap().body;
+            assert!(matches!(crate::markdown::resolve_heading(&updated,link.subpath.as_deref().unwrap(),crate::markdown::AnchorSyntax::Wiki),crate::markdown::HeadingLookup::Found{..}));
+            let mut revised=pack.clone();revised["nodes"][0]["subpath"]=json!("#解答");
+            assert_eq!(db.read_canvas(bundle)?.json(),&revised);
+            assert_eq!(fs::read(&physical)?,original.as_bytes());
+            assert_eq!(fs::read(&source)?,zip_bytes);
+            let backup=dir.join("isolated.sqlite3");
+            db.backup(&backup)?;
+            let reopened=Notebook::open(&backup,false)?;
+            assert_eq!(reopened.resolve_canvas_file_link(bundle,scope,"exact")?.subpath,Some("#解答".into()));
+            assert_eq!(reopened.undo_canvas_edit(bundle,&reopened.read_canvas(bundle)?)?.unwrap().as_str(),original_working);
+            drop(reopened);
+
             assert!(links.iter().find(|link| link.node_id == "basename-only").unwrap().note_id.is_none());
             db.compare_set_canvas_vault(bundle, Some(a), Some(b))?;
             assert!(db.resolve_canvas_file_link(bundle, Some(a), "exact").is_err());
             db.compare_set_canvas_vault(bundle, Some(b), None)?;
             assert!(db.resolve_canvas_file_link(bundle, None, "exact")?.note_id.is_none());
-            assert_eq!(db.read_canvas(bundle)?.json(), &pack);
+            assert_eq!(db.read_canvas(bundle)?.json(), &revised);
             Ok(())
         })();
         let _ = fs::remove_dir_all(dir);
@@ -520,6 +624,79 @@ mod tests {
             Ok(())
         })();
         let _ = fs::remove_dir_all(dir);
+        result
+    }
+
+    #[test]
+    fn companion_node_exports_exact_file_and_group_images_without_mutating_the_workspace() -> Result<()> {
+        use crate::store::canvas_edit::CanvasEdit;
+        let root = super::super::tests::data_dir();
+        let result = (|| -> Result<()> {
+            let input = root.join("來源.zip");
+            let backup = root.join("備份.sqlite3");
+            let workspace = root.join("工作區.sqlite3");
+            let drawing = json!({"nodes":[
+                {"id":"frame","type":"file","file":"甲/截圖.png","x":10,"y":10,"width":300,"height":200},
+                {"id":"group","type":"group","label":"原組","background":"乙/截圖.png","backgroundStyle":"cover",
+                 "x":-50,"y":-50,"width":700,"height":400},
+                {"id":"missing","type":"file","file":"缺件/截圖.png","x":350,"y":10,"width":100,"height":80}
+            ],"edges":[]}).to_string();
+            let png = |rgb| -> Result<Vec<u8>> {
+                let mut output = std::io::Cursor::new(Vec::new());
+                ::image::RgbImage::from_pixel(2, 2, ::image::Rgb(rgb))
+                    .write_to(&mut output, ::image::ImageFormat::Png)?;
+                Ok(output.into_inner())
+            };
+            let frame = png([200, 10, 50])?;
+            let background = png([20, 30, 240])?;
+            let decoy = png([0, 0, 0])?;
+            let mut zip = ZipWriter::new(File::create_new(&input)?);
+            for (name, bytes) in [("All-Data.json", b"synthetic marker".as_slice()), ("筆記.md", b"note"),
+                ("Boards/板.canvas", drawing.as_bytes()), ("甲/截圖.png", frame.as_slice()),
+                ("乙/截圖.png", background.as_slice()), ("Boards/甲/截圖.png", decoy.as_slice())] {
+                zip.start_file(name, SimpleFileOptions::default())?;
+                zip.write_all(bytes)?;
+            }
+            zip.finish()?;
+            let original = fs::read(&input)?;
+            let (mut import, media) = crate::archive::archive_with_media(&input)?;
+            let handoff = import.take_heptabase_handoff().ok_or("找不到測試用伴隨圖。")?;
+            let mut db = Notebook::open(&workspace, false)?;
+            db.import_heptabase_handoff("合成來源", import.pages, media, handoff)?;
+            let (id, _) = db.saved_canvases()?.into_iter().next().ok_or("測試畫布未保存。")?;
+            let expected = db.read_canvas(id)?;
+            assert_eq!(expected.as_str(), drawing);
+            db.backup(&backup)?;
+            drop(db);
+
+            for (i, path) in [&workspace, &backup].into_iter().enumerate() {
+                let db = Notebook::open(path, false)?;
+                let file = root.join(format!("另存畫面-{i}.png"));
+                let group = root.join(format!("另存背景-{i}.png"));
+                let refused = root.join(format!("應拒絕-{i}.png"));
+                db.save_canvas_node_asset(id, &expected, "frame", "甲/截圖.png", &file)?;
+                db.save_canvas_node_asset(id, &expected, "group", "乙/截圖.png", &group)?;
+                assert_eq!(fs::read(&file)?, frame);
+                assert_eq!(fs::read(&group)?, background);
+                assert!(db.save_canvas_node_asset(id, &expected, "group", "乙/截圖.png", &file).is_err());
+                assert_eq!(fs::read(&file)?, frame);
+                assert!(db.save_canvas_node_asset(id, &expected, "frame", "乙/截圖.png", &refused).is_err());
+                assert!(db.save_canvas_node_asset(id, &expected, "missing", "甲/截圖.png", &refused).is_err());
+                assert!(!refused.exists());
+                assert_eq!(db.read_canvas(id)?.as_str(), expected.as_str());
+
+                let changed = db.edit_canvas(id, &expected, CanvasEdit::Content {
+                    id: "frame", value: "乙/截圖.png",
+                })?;
+                assert!(db.save_canvas_node_asset(id, &expected, "frame", "甲/截圖.png", &refused).is_err());
+                assert!(!refused.exists());
+                db.save_canvas_node_asset(id, &changed, "frame", "乙/截圖.png", &refused)?;
+                assert_eq!(fs::read(&refused)?, background);
+            }
+            assert_eq!(fs::read(&input)?, original);
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&root);
         result
     }
 

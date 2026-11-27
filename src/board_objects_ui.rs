@@ -151,6 +151,35 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn copy_selected_layout_menu(&mut self) -> Result<()> {
+        unsafe {
+            let source=self.board_id();
+            let positions=self.board_selection_snapshot();
+            if positions.is_empty() {
+                label(self.widgets.status,"按住 Ctrl 點選要複製配置的卡片。");
+                return Ok(());
+            }
+            let selection=self.notebook.plan_selection_child(source,&positions)?;
+            let boards=self.notebook.list_boards()?.into_iter().filter(|b|b.id!=source).collect::<Vec<_>>();
+            if boards.is_empty() { label(self.widgets.status,"請先建立另一張目的白板。"); return Ok(()); }
+            let Some(index)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,boards.len(),
+                |i|format!("[#{}]　{}",boards[i].id,boards[i].title)) else {return Ok(())};
+            let target=&boards[index];
+            let plan=self.notebook.plan_copy_layout(selection,target)?;
+            let Some(delta)=crate::dialog::prompt(self.hwnd,"跨白板複製配置","輸入水平、垂直位移（dx,dy，可為負數）","0,0",32)?
+                else {return Ok(())};
+            let (dx,dy)=delta.split_once(',').ok_or("請用逗號分隔兩個整數。")?;
+            let dx=dx.trim().parse::<i32>().map_err(|_|"水平位移須為整數。")?;
+            let dy=dy.trim().parse::<i32>().map_err(|_|"垂直位移須為整數。")?;
+            let message_text=format!("將 {} 張卡片放到「{}」並位移（{dx}, {dy}）？兩張白板共用原筆記，分區與連線可分別編輯。",positions.len(),target.title);
+            if message(self.hwnd,"確認複製白板配置",&message_text,MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES {
+                self.notebook.copy_layout(&plan,dx,dy)?;
+                label(self.widgets.status,&format!("已將 {} 張卡片與配置複製到「{}」，原白板已保留。",positions.len(),target.title));
+            }
+            Ok(())
+        }
+    }
+
     pub(super) unsafe fn move_selected_board_cards_menu(&mut self) -> Result<()> {
         unsafe {
             let source = self.board_id();
@@ -330,6 +359,9 @@ impl App {
             if let Some(group) = action.checked_sub(1).and_then(|index| groups.get(index)) {
                 let key = (board, group.id);
                 if self.extras.collapsed_board_groups.insert(key) {
+                    if self.focused_native_card().is_some_and(|note| group.members.contains(&note)) {
+                        self.extras.native_board_focus = None;
+                    }
                     for note in &group.members {
                         self.extras.board_selected.remove(&BoardItem::Card(*note));
                     }
@@ -347,7 +379,8 @@ impl App {
 
     pub(super) unsafe fn paint_board_item_frame(&self, dc: HDC, rect: RECT, item: BoardItem) {
         unsafe {
-            let selected = self.extras.board_selected.contains(&item);
+            let selected = self.extras.board_selected.contains(&item)
+                || matches!(item, BoardItem::Card(id) if self.focused_native_card() == Some(id));
             let brush = CreateSolidBrush(if selected { TEAL } else { LINE });
             if !brush.is_null() {
                 FrameRect(dc, &rect, brush);
@@ -384,7 +417,7 @@ impl App {
                             };
                             entry.x + width
                         }).max().unwrap_or(0);
-                        let max_dx = (visible_width - edge).min(10000 - right).max(0);
+                        let max_dx = (self.extras.board_scroll_x + visible_width - edge).min(10000 - right).max(0);
                         let bottom = drag.expected.iter().map(|entry| entry.y).max().unwrap_or(0);
                         drag.delta = (((x - drag.start.0) * 96 / dpi).clamp(-min_x, max_dx),
                             ((y - drag.start.1) * 96 / dpi).clamp(-min_y, 50000 - bottom));
@@ -417,8 +450,10 @@ impl App {
             {
                 return false;
             }
-            let hit = self.board_object_at(area, x, y).map(|object| BoardItem::Object(object.id))
-                .or_else(|| self.card_at(x, y).map(BoardItem::Card));
+            let card = self.card_at(x, y);
+            let hit = card.filter(|id| self.focused_native_card() == Some(*id)).map(BoardItem::Card)
+                .or_else(|| self.board_object_at(area, x, y).map(|object| BoardItem::Object(object.id)))
+                .or_else(|| card.map(BoardItem::Card));
             const MOUSE_CONTROL: WPARAM = 0x0008; // MK_CONTROL in Win32 key-state flags.
             if wp & MOUSE_CONTROL != 0 {
                 if let Some(item) = hit
@@ -543,8 +578,9 @@ impl App {
             let board=self.board_id();
             let anchor=self.widgets.links;
             match popup(self.hwnd,anchor,None,&[(1,"新增子白板…"),(2,"開啟子白板…"),
-                (3,"返回上層白板"),(4,"變更目前白板的上層…"),(5,"新增文字方塊…"),(6,"編輯文字方塊…"),
-                (7,"移除文字方塊…"),(8,"白板路徑…"),(9,"復原最近移除的文字方塊…")]) {
+                (3,"返回上層並定位子白板卡片"),(4,"變更目前白板的上層…"),(5,"新增文字方塊…"),(6,"編輯文字方塊…"),
+                (7,"移除文字方塊…"),(8,"白板路徑…"),(9,"復原最近移除的文字方塊…"),(10,"將選取的卡片收進新子白板…"),
+                (11,"將子白板卡片展回上層…")]) {
                 1=>{
                     if let Some(title)=crate::dialog::prompt(self.hwnd,"新增子白板","白板名稱","",MAX_TITLE_CHARS)? {
                         let child=self.notebook.new_child_board(board,&title)?;
@@ -571,10 +607,7 @@ impl App {
                     }
                 }
                 3=>{
-                    if let Some(parent)=self.notebook.parent_board(board)?{
-                        let target=self.notebook.list_boards()?.into_iter().find(|b|b.id==parent).ok_or("找不到上層白板。")?;
-                        self.select_board(target.id,target.title)?;
-                    }else{label(self.widgets.status,"目前已在最上層。");}
+                    self.return_to_parent_board_tile(board)?;
                 }
                 4=>{
                     if board==DEFAULT_BOARD_ID{return Err("預設白板位於最上層。".into());}
@@ -619,6 +652,25 @@ impl App {
                         self.select_board(parent.id, parent.title.clone())?;
                     }
                 }
+                11 => {
+                    let plan = self.notebook.plan_child_unfold(board)?;
+                    let question = format!("將 {} 張卡片依目前座標展回上層？完整分區與連線會一起搬移。子白板及其文字和分支會保留，入口若與卡片重疊會移到空位。",plan.count());
+                    if message(self.hwnd,"確認展回上層",&question,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)!=IDYES { return Ok(()); }
+                    self.notebook.unfold_child(&plan)?;
+                    self.return_to_parent_board_tile(board)?;
+                    label(self.widgets.status,&format!("已展回 {} 張卡片，並定位原子白板入口。",plan.count()));
+                }
+                10 => {
+                    let selected=self.board_selection_snapshot();
+                    if selected.is_empty(){label(self.widgets.status,"請按住 Ctrl 點選要收進子白板的卡片。");return Ok(());}
+                    let plan=self.notebook.plan_selection_child(board,&selected)?;
+                    let Some(title)=crate::dialog::prompt(self.hwnd,"將卡片收進新子白板","新子白板名稱","",MAX_TITLE_CHARS)? else{return Ok(());};
+                    let question=format!("將 {} 張卡片及其連線與完整分區搬到「{}」？原白板會在空位放置子白板入口。",selected.len(),title.trim());
+                    if message(self.hwnd,"確認收進子白板",&question,MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2)!=IDYES{return Ok(());}
+                    let child=self.notebook.commit_selection_child(&plan,&title)?;
+                    self.return_to_parent_board_tile(child)?;
+                    label(self.widgets.status,&format!("已將 {} 張卡片收進「{}」，並定位子白板入口。",selected.len(),title.trim()));
+                }
                 9 => {
                     let Some(removed) = self.notebook.latest_removed_board_text(board)? else {
                         label(self.widgets.status, "目前白板沒有可復原的文字方塊。");
@@ -659,9 +711,53 @@ impl App {
         }
     }
 
+    pub(super) unsafe fn create_child_board_from_card_ui(
+        &mut self, note: i64, expected: (i32, i32),
+    ) -> Result<()> {
+        unsafe {
+            let Some(title) = crate::dialog::prompt(
+                self.hwnd, "從此卡建立子白板",
+                "白板名稱。子白板會放入同一張筆記卡，原白板的位置保留。", "", MAX_TITLE_CHARS,
+            )? else { return Ok(()); };
+            let child = self.notebook.new_child_board_from_card(self.board_id(), note, expected, &title)?;
+            self.select_board(child, title.trim().to_owned())?;
+            self.extras.board_selected.insert(BoardItem::Card(note));
+            self.present();
+            label(self.widgets.status, "已建立子白板並放入同一張筆記卡。原卡片位置仍保留。");
+            Ok(())
+        }
+    }
+
+    unsafe fn return_to_parent_board_tile(&mut self, child: i64) -> Result<()> {
+        use crate::store::native_board_locations::reveal_offset;
+        unsafe {
+            let Some((parent, tile)) = self.notebook.parent_board_tile(child)? else {
+                label(self.widgets.status, "目前已在最上層。");
+                return Ok(());
+            };
+            self.select_board(parent.id, parent.title)?;
+            let object = self.extras.objects.iter().find(|object| object.id == tile && object.child == Some(child))
+                .ok_or("子白板已移動，請重新開啟白板。")?;
+            let (x, y) = (object.x, object.y);
+            let area = self.board_area();
+            let width = (area.right - area.left).max(0) * 96 / self.dpi as i32;
+            let height = (area.bottom - area.top).max(0) * 96 / self.dpi as i32;
+            self.extras.board_scroll_x = reveal_offset(x, ImageSize::CARD.width, width);
+            self.extras.scroll = reveal_offset(y, ImageSize::CARD.height, height).min(self.board_scroll_end());
+            self.extras.board_selected.insert(BoardItem::Object(tile));
+            self.refresh_board_image_cache();
+            self.present();
+            label(self.widgets.status, "已定位上層的子白板卡片。");
+            Ok(())
+        }
+    }
+
     unsafe fn open_board_object(&mut self,object:&Object)->Result<()> {
         unsafe {
-            if let Some(id)=object.child {self.select_board(id,object.text.clone())?;}
+            if let Some(id) = object.child {
+                let child = self.notebook.child_board_from_tile(self.board_id(), object.id, id)?;
+                self.select_board(child.id, child.title)?;
+            }
             else if let Some(text)=crate::dialog::prompt_multiline(self.hwnd,"編輯文字方塊","白板文字",&object.text,TEXT_LIMIT)? {
                 self.notebook.edit_board_text(self.board_id(),object,&text)?;
                 self.refresh_board()?;
@@ -671,7 +767,7 @@ impl App {
     }
 
     fn object_rect(&self,area:RECT,object:&Object)->RECT {
-        let left=area.left+self.scaled(object.x);
+        let left=self.board_screen_x(area, object.x);
         let top=area.top+self.scaled(object.y-self.extras.scroll);
         RECT{left,top,right:left+self.scaled(232),bottom:top+self.scaled(114)}
     }
@@ -712,8 +808,9 @@ impl App {
                 match msg {
                     WM_MOUSEMOVE=>{
                         let dpi=self.dpi as i32;
-                        let max_x=((area.right-area.left)*96/dpi-232).clamp(0,10000);
-                        let left=((x-area.left-dx)*96/dpi).clamp(0,max_x);
+                        let scroll_x = self.extras.board_scroll_x;
+                        let max_x=(scroll_x+(area.right-area.left)*96/dpi-232).clamp(0,10000);
+                        let left=((x-area.left-dx)*96/dpi+scroll_x).clamp(0,max_x);
                         let top=((y-area.top-dy)*96/dpi+self.extras.scroll).clamp(0,50000);
                         if let Some(o)=self.extras.objects.iter_mut().find(|o|o.id==id){o.x=left;o.y=top;}
                         InvalidateRect(self.hwnd,&area,1);
@@ -761,6 +858,14 @@ impl App {
                         self.mind_node_menu(&node, Some(point))
                     } else {
                         self.edit_mind_node_ui(&node)
+                    }
+                } else if msg == WM_RBUTTONUP && o.child.is_some() {
+                    let mut point = POINT { x, y };
+                    ClientToScreen(self.hwnd, &mut point);
+                    if popup(self.hwnd, self.widgets.links, Some(point), &[(1, "開啟子白板")]) == 1 {
+                        self.open_board_object(&o)
+                    } else {
+                        Ok(())
                     }
                 } else if msg == WM_RBUTTONUP && o.child.is_none() {
                     let mut point = POINT { x, y };

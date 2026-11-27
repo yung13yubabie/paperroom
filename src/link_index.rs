@@ -1,5 +1,5 @@
 use super::super::{Notebook, Note, Result, Row, read_row};
-use super::{NATIVE_NOTE_PREFIX, mapped_link_target, native_note_target};
+use super::{NATIVE_NOTE_PREFIX, is_heptabase_root, mapped_link_target, native_note_target};
 use crate::markdown::{self, AnchorSyntax};
 use crate::store::transclusion::{embed_references, resolve_embed_target};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -95,7 +95,9 @@ impl Notebook {
                 }
             }
         }
-        let indexes: HashMap<_, _> = vaults.iter().map(|(root, files)| (*root, crate::vault::NoteLinkPaths::new(files))).collect();
+        let indexes = vaults.iter().map(|(&root, files)| {
+            Ok((root, (crate::vault::NoteLinkPaths::new(files), is_heptabase_root(&tx, root)?)))
+        }).collect::<Result<HashMap<_, _>>>()?;
         let mut edges=BTreeSet::new();
         let mut consumed=0usize;
         {
@@ -127,10 +129,11 @@ impl Notebook {
                     let key = reference.destination.as_str();
                     let path = key.split_once('#').map_or(key, |(path, _)| path);
                     if path.starts_with(NATIVE_NOTE_PREFIX) {
-                        return native_note_target(&tx, path);
+                        return native_note_target(&tx, Some(id), path);
                     }
                     Ok(if let Some((root, source)) = location {
-                        mapped_link_target(&indexes[root], source, parts.as_deref().unwrap_or_default(),
+                        let (index, exact_only) = &indexes[root];
+                        mapped_link_target(index, *exact_only, source, parts.as_deref().unwrap_or_default(),
                             reference.syntax, key, path)
                     } else if reference.syntax == AnchorSyntax::Wiki {
                         key.strip_prefix('#').and_then(|s|s.parse().ok())
@@ -140,8 +143,10 @@ impl Notebook {
                         None
                     })
                 });
-                let vault = location.as_ref().map(|(root, path)|
-                    (path.as_str(), &indexes[root].wiki));
+                let vault = location.as_ref().and_then(|(root, path)| {
+                    let (index, exact_only) = &indexes[root];
+                    (!exact_only).then_some((path.as_str(), &index.wiki))
+                });
                 let embeds = embed_references(body).map(|reference|
                     resolve_embed_target(&tx, id, vault, &reference.destination));
                 for target in direct.chain(embeds) {
@@ -181,12 +186,15 @@ mod tests {
     fn workspace_path_is_directed_vault_isolated_and_snapshot_refreshes() -> Result<()> {
         let mut db=Notebook::open(Path::new(":memory:"),false)?;
         let outside=db.add(None,"同名","")?;
+        let token: String = db.connection.query_row(
+            "SELECT token FROM note_link_identities WHERE note_id=?1", [outside], |row| row.get(0),
+        )?;
         let make=|folder:&str,title:&str,body:&str| ImportedPage {
             title:title.into(),body:body.into(),parts:vec![folder.into(),format!("{title}.md")],
         };
         let root=db.import_vault("圖測試",vec![
             make("A","入口","[[../B/同名#段落|前往]] [[同名]] `[[./同名]]`"),
-            make("A","同名",""), make("B","同名",&format!("[[paperroom:note:{outside}|外部]]")),
+            make("A","同名",""), make("B","同名",&crate::store::note_links::note_link_markup(outside, &token, "外部")),
         ])?;
         let local=db.link_index(Scope::Vault(root),None)?;
         let id=|path:&str|local.nodes.values().find(|node|
@@ -212,6 +220,39 @@ mod tests {
             VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<?1
         ) INSERT INTO notes(title) SELECT printf('合成頁%d',n) FROM seq", [MAX_GRAPH_NODES as i64+1])?;
         assert!(db.link_index(Scope::Workspace,None).err().unwrap().to_string().contains("5,000"));
+        Ok(())
+    }
+
+    #[test]
+    fn heptabase_menu_graph_audit_and_embeds_share_exact_source_policy() -> Result<()> {
+        let mut db = Notebook::open(Path::new(":memory:"), false)?;
+        let page = |name: &str, body: &str| ImportedPage {
+            title: name.rsplit('/').next().unwrap().into(),
+            parts: name.split('/').map(str::to_owned).collect(), body: body.into(),
+        };
+        let body = "[正確](../乙/同名.md#^take) [省略副檔](../乙/同名#^take) [缺少同層](根稿.md#^only) [[根稿#^only|舊式名稱]]
+
+![[根稿]]";
+        let root = db.import_vault("合成來源", vec![
+            page("甲/本文.md", body), page("乙/同名.md", "選區 ^take"),
+            page("甲/同名.md", "同名另一篇"), page("根稿.md", "僅在根目錄的內容 ^only"),
+        ])?;
+        let id = |path: &str| db.connection.query_row(
+            "SELECT note_id FROM vault_paths WHERE import_root=?1 AND relative_path=?2",
+            (root, path), |row| row.get::<_, i64>(0));
+        let host = id("甲/本文.md")?;
+        let target = id("乙/同名.md")?;
+        let other = id("根稿.md")?;
+        let source = db.note(host)?.unwrap();
+        assert!(db.vault_note_links(&source)?.iter().any(|link| link.note_id == other));
+        assert!(db.project_embeds(host, body)?.contains("僅在根目錄的內容"));
+        db.connection.execute("INSERT INTO heptabase_import_roots(import_root) VALUES(?1)", [root])?;
+        let links = db.vault_note_links(&source)?;
+        assert_eq!(links.iter().map(|link| (link.note_id, link.label.as_str())).collect::<Vec<_>>(), [(target,"正確")]);
+        assert_eq!(db.related(&source)?.0.iter().map(|row| row.id).collect::<Vec<_>>(), [target]);
+        assert!(db.vault_incoming_block_report(target)?.contains("有 1 個明確指向"));
+        assert!(db.vault_incoming_block_report(other)?.contains("有 0 個明確指向"));
+        assert!(!db.project_embeds(host, body)?.contains("僅在根目錄的內容"));
         Ok(())
     }
 

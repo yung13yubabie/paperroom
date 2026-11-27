@@ -40,6 +40,10 @@ impl App {
                 return;
             };
             let area = self.board_area();
+            let width = (area.right - area.left) * 96 / self.dpi as i32;
+            if object.x < self.extras.board_scroll_x || object.x + 232 > self.extras.board_scroll_x + width {
+                self.extras.board_scroll_x = (object.x - 8).max(0);
+            }
             let height = (area.bottom - area.top) * 96 / self.dpi as i32;
             if object.y < self.extras.scroll || object.y + 114 > self.extras.scroll + height {
                 self.extras.scroll = (object.y - 8).max(0);
@@ -151,7 +155,7 @@ impl App {
             if pen.is_null() { return; }
             let previous = SelectObject(dc, pen);
             let points: HashMap<_, _> = self.extras.objects.iter().map(|object| (
-                object.id, (area.left + self.scaled(object.x + 116),
+                object.id, (self.board_screen_x(area, object.x + 116),
                     area.top + self.scaled(object.y - self.extras.scroll + 57)),
             )).collect();
             for node in &self.extras.mind_map_nodes {

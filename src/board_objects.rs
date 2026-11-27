@@ -105,6 +105,22 @@ pub(super) fn position(db:&Connection,board:i64,preferred:Option<(i32,i32)>)->Re
     slot.ok_or_else(||"白板格位已滿，請先調整物件位置。".into())
 }
 
+fn create_child_board(db: &Connection, parent_board: i64, title: &str) -> Result<i64> {
+    if board_depth(db, parent_board, None)? >= MAX_DEPTH {
+        return Err("白板階層最多 16 層。".into());
+    }
+    let (x, y) = position(db, parent_board, None)?;
+    let child = super::boards::create_board_on(db, title)?;
+    db.execute(
+        "INSERT INTO board_objects(board_id,child_id,x,y) VALUES(?1,?2,?3,?4)",
+        params![parent_board, child, x, y],
+    )?;
+    Ok(child)
+}
+
+#[path="board_selection_child.rs"]
+mod selection_child;
+
 fn valid_text(text:&str)->Result<()> {
     if text.trim().is_empty() || text.contains('\0') || text.chars().count()>TEXT_LIMIT {
         return Err("文字方塊須有內容，最多 4,096 字。".into());
@@ -198,18 +214,50 @@ impl Notebook {
         }
         Ok(path)
     }
-    pub(crate) fn new_child_board(&mut self,board:i64,title:&str)->Result<i64> {
-        let title=title.trim();
-        if title.is_empty() || title.chars().count()>MAX_TITLE_CHARS || title.contains('\0'){return Err("請輸入有效的白板名稱。".into());}
-        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if board_depth(&tx,board,None)? >=MAX_DEPTH{return Err("白板階層最多 16 層。".into());}
-        let (x,y)=position(&tx,board,None)?;
-        tx.execute("INSERT INTO boards(title) VALUES(?1)",[title])?;
-        let child=tx.last_insert_rowid();
-        tx.execute("INSERT INTO board_objects(board_id,child_id,x,y) VALUES(?1,?2,?3,?4)",params![board,child,x,y])?;
+    pub(crate) fn new_child_board(&mut self, board: i64, title: &str) -> Result<i64> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let child = create_child_board(&tx, board, title)?;
         tx.commit()?;
         Ok(child)
     }
+
+    pub(crate) fn new_child_board_from_card(
+        &mut self, board: i64, note: i64, expected: (i32, i32), title: &str,
+    ) -> Result<i64> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_cards c JOIN notes n ON n.id=c.note_id
+             WHERE c.board_id=?1 AND c.note_id=?2 AND c.x=?3 AND c.y=?4 AND n.trash_root IS NULL)",
+            params![board, note, expected.0, expected.1], |row| row.get(0),
+        )?;
+        if !active {
+            return Err("來源卡片或位置已變更。請重新開啟白板並選取卡片。".into());
+        }
+        let child = create_child_board(&tx, board, title)?;
+        super::boards::place_card_on(&tx, child, note)?;
+        tx.commit()?;
+        Ok(child)
+    }
+
+    /// Find the current parent by the child relationship, even after reopening.
+    pub(crate) fn parent_board_tile(&self, child: i64) -> Result<Option<(Board, i64)>> {
+        Ok(self.connection.query_row(
+            "SELECT p.id,p.title,o.id FROM board_objects o JOIN boards p ON p.id=o.board_id
+             WHERE o.child_id=?1", [child], |row| {
+                Ok((Board { id: row.get(0)?, title: row.get(1)? }, row.get(2)?))
+            },
+        ).optional()?)
+    }
+
+    pub(crate) fn child_board_from_tile(&self, parent: i64, tile: i64, child: i64) -> Result<Board> {
+        self.connection.query_row(
+            "SELECT b.id,b.title FROM board_objects o JOIN boards b ON b.id=o.child_id
+             WHERE o.board_id=?1 AND o.id=?2 AND o.child_id=?3",
+            params![parent, tile, child],
+            |row| Ok(Board { id: row.get(0)?, title: row.get(1)? }),
+        ).optional()?.ok_or_else(|| "子白板已移動，請重新開啟白板。".into())
+    }
+
     pub(crate) fn reparent_board(&mut self,board:i64,expected:Option<i64>,to:Option<i64>)->Result<()> {
         if board==DEFAULT_BOARD_ID{return Err("預設白板必須位於最上層。".into());}
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -309,6 +357,82 @@ impl Notebook {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn card_creates_child_with_shared_note_and_parent_tile_survives_restore() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let result = (|| -> Result<()> {
+            let live = dir.join("工作區.sqlite3");
+            let backup = dir.join("備份.sqlite3");
+            let restored = dir.join("隔離.sqlite3");
+            let mut db = Notebook::open(&live, false)?;
+            let parent = db.new_child_board(DEFAULT_BOARD_ID, "分鏡")?;
+            let other = db.create_board("參考")?;
+            let note = db.add(None, "鏡頭", "來源正文")?;
+            let decoy = db.add(None, "鏡頭", "同名但不同正文")?;
+            db.add_card_on(parent, note)?;
+            db.add_card_on(other, note)?;
+            db.add_card_on(parent, decoy)?;
+            db.move_card_on(parent, note, 4210, 5010)?;
+            let expected = (4210, 5010);
+
+            let titles_before = db.list_boards()?.len();
+            assert!(db.new_child_board_from_card(parent, note, (0, 0), "位置已變").is_err());
+            db.trash(note)?;
+            assert!(db.new_child_board_from_card(parent, note, expected, "垃圾桶").is_err());
+            db.restore(note)?;
+            assert!(db.new_child_board_from_card(parent, note, expected, "參考").is_err());
+            db.connection.execute_batch(
+                "CREATE TEMP TRIGGER reject_child_placement BEFORE INSERT ON board_cards
+                 BEGIN SELECT RAISE(ABORT,'fixture refuses the late placement'); END;",
+            )?;
+            let error = db.new_child_board_from_card(parent, note, expected, "晚期失敗").unwrap_err();
+            assert!(error.to_string().contains("fixture refuses the late placement"));
+            assert_eq!(db.list_boards()?.len(), titles_before);
+            assert!(db.objects_on(parent)?.is_empty());
+            db.connection.execute_batch("DROP TRIGGER reject_child_placement;")?;
+
+            let child = db.new_child_board_from_card(parent, note, expected, "近景")?;
+            let (found, tile) = db.parent_board_tile(child)?.unwrap();
+            assert_eq!(found.id, parent);
+            assert_eq!(db.child_board_from_tile(parent, tile, child)?.id, child);
+            assert_eq!(db.cards_on(child)?.into_iter().map(|card| card.id).collect::<Vec<_>>(), [note]);
+            assert!(!db.cards_on(child)?.iter().any(|card| card.id == decoy));
+            assert_eq!(db.cards_on(parent)?.into_iter().find(|card| card.id == note).map(|card| (card.x, card.y)), Some(expected));
+            assert_eq!(db.cards_on(other)?[0].id, note);
+            assert_eq!(db.board_path(child)?.into_iter().map(|board| board.id).collect::<Vec<_>>(),
+                [DEFAULT_BOARD_ID, parent, child]);
+            let grandchild = db.new_child_board(child, "更近")?;
+            assert_eq!(db.parent_board_tile(grandchild)?.unwrap().0.id, child);
+            let mut object = db.objects_on(parent)?.into_iter().find(|object| object.id == tile).unwrap();
+            object.x = 4900;
+            object.y = 7300;
+            db.move_board_object(parent, &object)?;
+            let saved = db.note(note)?.unwrap();
+            db.save(note, saved.version, "主鏡頭", "編輯後全板同一正文")?;
+            db.backup(&backup)?;
+            drop(db);
+
+            std::fs::copy(&backup, &restored)?;
+            for path in [&live, &restored] {
+                let mut db = Notebook::open(path, false)?;
+                let (found, current_tile) = db.parent_board_tile(child)?.unwrap();
+                assert_eq!((found.id, current_tile), (parent, tile));
+                assert_eq!(db.objects_on(parent)?.into_iter().find(|object| object.id == tile)
+                    .map(|object| (object.x, object.y)), Some((4900, 7300)));
+                assert_eq!(db.cards_on(child)?[0].id, note);
+                assert_eq!(db.note(note)?.unwrap().body, "編輯後全板同一正文");
+                db.reparent_board(child, Some(parent), Some(other))?;
+                assert!(db.child_board_from_tile(parent, tile, child).is_err());
+                assert_eq!(db.parent_board_tile(child)?.unwrap().0.id, other);
+                assert_eq!(db.cards_on(child)?[0].id, note);
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
     use super::*;
 
     #[test]

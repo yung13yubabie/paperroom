@@ -92,7 +92,9 @@ build() (
     cd "$work/$label/src"
     export CARGO_TARGET_DIR="$work/$label/out"
     cargo "+$rust_toolchain" rustc --offline --locked --release --target "$target" --bin paperroom \
-        -- -C link-arg=-Wl,--no-insert-timestamp -C link-arg=-static-libgcc -C link-arg=-Wl,-Map,final.map
+        --message-format=json-render-diagnostics \
+        -- -C link-arg=-Wl,--no-insert-timestamp -C link-arg=-static-libgcc -C link-arg=-Wl,-Map,final.map \
+        > "$work/$label/cargo-artifacts.jsonl"
     mv -- final.map "$work/$label/final.map"
 )
 build proof_a > "$work/proof_a/build.log" 2>&1 &

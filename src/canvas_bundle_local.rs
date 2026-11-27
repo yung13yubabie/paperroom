@@ -145,6 +145,17 @@ fn absolute_without_parent(path: &Path) -> bool {
     path.is_absolute() && !path.components().any(|part| part == Component::ParentDir)
 }
 
+pub(crate) fn read_base_card_file(root:&Path, relative:&str) -> Result<Vec<u8>> {
+    if !absolute_without_parent(root) || !portable(relative) || !relative.rsplit_once('.').is_some_and(|(_,e)| e.eq_ignore_ascii_case("base")) {
+        return Err("需要本機 Vault 及完整的 Bases 相對路徑。".into());
+    }
+    let dirs=checked_parents(root)?;
+    let handle=dirs.last().ok_or("無法開啟 Vault。")?;
+    let (file,_parents)=DirectoryScan::new().open_exact(root,handle,relative)?
+        .map_err(|_|"無法在指定 Vault 找到唯一且安全的同路徑 Bases 檔案。")?;
+    read_at_most(file,super::super::obsidian_base::MAX_BYTES,"Bases 原檔超過上限。")
+}
+
 fn root_canvas_name(path: &str, assets: &BTreeMap<String, Vec<u8>>) -> Result<String> {
     let occupied: BTreeSet<_> = assets.keys().filter_map(|name| name.split('/').next())
         .map(str::to_lowercase).collect();

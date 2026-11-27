@@ -183,9 +183,12 @@ def inspect(database):
         assert con.execute("pragma integrity_check").fetchall() == [("ok",)]
         assert con.execute("pragma foreign_key_check").fetchall() == []
         version = con.execute("pragma user_version").fetchone()[0]
-        if version == 35:
+        if version == 44:
             assert con.execute("SELECT count(*) FROM collection_field_rules").fetchone() == (0,)
             assert con.execute("SELECT count(*) FROM notion_page_paths").fetchone() == (0,)
+            assert con.execute("SELECT count(*) FROM relation_fields").fetchone() == (0,)
+            assert con.execute("SELECT count(*) FROM relation_field_values").fetchone() == (0,)
+            assert con.execute("SELECT count(*) FROM obsidian_base_descending_groups").fetchone() == (0,)
         notes = con.execute("select id,parent,title,body,pinned,trash_root,version from notes order by id").fetchall()
         cards = con.execute("select note_id,x,y from board_cards order by note_id").fetchall()
         return version, notes, cards
@@ -259,14 +262,14 @@ function Test-PublishedWorkspaceUpgrade($Root, $Baseline, $Candidate) {
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         Set-UpgradeTitle $process $newTitle
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 35 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 44 $newTitle $oldDb
         $process = Start-Notebook (Join-Path $upgrade 'bin') (Join-Path $upgrade 'local') (Join-Path $upgrade 'temp') $false
         if ((Read-Control $process.MainWindowHandle 103) -cne $newTitle) { throw 'Candidate did not retain the upgraded note on reopen.' }
         Close-Notebook $process
-        Assert-UpgradeDatabase $newDb 35 $newTitle $oldDb
+        Assert-UpgradeDatabase $newDb 44 $newTitle $oldDb
         Assert-UpgradeDatabase $oldDb 2 $oldTitle
         if ((Get-FileHash -LiteralPath $oldDb).Hash -cne $originalHash) { throw 'Published original database bytes changed.' }
-        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 35 → native UI save/reopen, integrity, and original byte preservation passed.'
+        Write-Host 'Pinned v0.1.1 native UI → schema 2 → migration of exact copy → schema 44 → native UI save/reopen, integrity, and original byte preservation passed.'
     } finally {
         if ($process -and !$process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }
@@ -329,6 +332,45 @@ try {
             $bad.Dispose()
         }
     }
+    # A normal local folder alias keeps the portable selection and stores the
+    # resolved database in the selected target, with no default fallback.
+    $aliasRoot = Join-Path $base 'resolved-portable'
+    $aliasBin = Join-Path $aliasRoot 'bin'
+    $aliasLocal = Join-Path $aliasRoot 'local'
+    $aliasTemp = Join-Path $aliasRoot 'temp'
+    $aliasTarget = Join-Path $aliasRoot '實際儲存'
+    $aliasMarker = Join-Path $aliasBin 'paperroom-data'
+    foreach ($dir in $aliasBin,$aliasLocal,$aliasTemp,$aliasTarget) {
+        [void][IO.Directory]::CreateDirectory($dir)
+    }
+    Copy-Item -LiteralPath $Exe -Destination $aliasBin
+    [void](New-Item -Type Junction -Path $aliasMarker -Target $aliasTarget)
+    $aliasProcess = $null
+    $aliasDb = Join-Path $aliasTarget 'notes.sqlite3'
+    $aliasTitle = '本機可攜資料夾已解析'
+    try {
+        $aliasProcess = Start-Notebook $aliasBin $aliasLocal $aliasTemp $false
+        if (!(Test-Path -LiteralPath $aliasDb -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $aliasLocal 'Paperroom'))) {
+            throw 'Resolved local folder did not contain the selected portable database.'
+        }
+        Set-UpgradeTitle $aliasProcess $aliasTitle
+        Close-Notebook $aliasProcess
+        Assert-UpgradeDatabase $aliasDb 44 $aliasTitle
+        $aliasProcess = Start-Notebook $aliasBin $aliasLocal $aliasTemp $false
+        if ((Read-Control $aliasProcess.MainWindowHandle 103) -cne $aliasTitle) {
+            throw 'The resolved portable folder did not retain the note on reopen.'
+        }
+        Close-Notebook $aliasProcess
+        Write-Host 'PASS: local portable folder alias resolved to its local target, saved and reopened with no default workspace.'
+    } finally {
+        if ($aliasProcess -and !$aliasProcess.HasExited) {
+            $aliasProcess.Kill()
+            $aliasProcess.WaitForExit()
+        }
+        [IO.Directory]::Delete($aliasMarker)
+    }
+
     if ($UpgradeBaseline) { Test-PublishedWorkspaceUpgrade $base $UpgradeBaseline $Exe }
     foreach ($mode in 'default','portable','portable-marker') {
         $root = Join-Path $base $mode

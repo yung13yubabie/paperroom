@@ -28,12 +28,16 @@ mod note_tools_ui;
 mod duplicate_note_ui;
 #[path = "note_history_ui.rs"]
 mod note_history_ui;
+#[path = "named_relation_navigation_ui.rs"]
+mod named_relation_navigation_ui;
 #[path = "note_highlight_ui.rs"]
 mod note_highlight_ui;
 #[path = "board_objects_ui.rs"]
 mod board_objects_ui;
 #[path = "board_image_ui.rs"]
 mod board_image_ui;
+#[path = "native_board_location_ui.rs"]
+mod native_board_location_ui;
 #[path = "board_shape_input.rs"]
 mod board_shape_input;
 #[path = "board_shape_tag_ui.rs"]
@@ -146,6 +150,7 @@ struct App {
     widgets: Widgets,
     notebook: Notebook,
     data_dir: PathBuf,
+    portable_workspace: bool,
     current: Option<Note>,
     tree_items: HashMap<i64, HTREEITEM>,
     editing: bool,
@@ -157,6 +162,15 @@ struct App {
     fonts: Vec<HFONT>,
     brushes: [HBRUSH; 2],
     extras: Extras,
+}
+
+#[derive(Clone, Copy)]
+struct CardDrag {
+    board: i64,
+    note: i64,
+    origin: (i32, i32),
+    pointer: (i32, i32),
+    scroll: (i32, i32),
 }
 
 #[derive(Default)]
@@ -179,8 +193,10 @@ struct Extras {
     block_returns: Vec<navigation_ui::BlockReturn>,
     workspace: Option<WorkspaceView>,
     board_selection: Option<(i64, String)>,
-    dragging: Option<(i64, i32, i32)>,
+    dragging: Option<CardDrag>,
     scroll: i32,
+    board_scroll_x: i32,
+    native_board_focus: Option<crate::store::native_board_locations::NativeBoardLocation>,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -267,8 +283,12 @@ fn workspace_directory(exe: &std::path::Path, portable: bool, local: Option<Path
         Ok(metadata) if metadata.is_dir() => return Ok(adjacent),
         Ok(_) => return Err("程式旁的 paperroom-data 必須是資料夾。紙間沒有切換到其他資料位置。".into()),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        Err(_) if portable => return Ok(adjacent),
-        Err(_) => {}
+        Err(_) => match std::fs::symlink_metadata(&adjacent) {
+            Ok(_) => return Err("程式旁的 paperroom-data 無法開啟。紙間沒有切換到其他資料位置。".into()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) if portable => return Ok(adjacent),
+            Err(_) => {}
+        },
     }
     let local = local.filter(|path| path.is_absolute())
         .ok_or("LOCALAPPDATA 必須是完整的 Windows 資料夾路徑。請修正後再啟動，或明確選用 --portable。")?;
@@ -280,18 +300,87 @@ fn check_workspace_volume(path: &Path, drive_type: impl FnOnce(&Path) -> u32) ->
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return Err("工作區需要完整的 Windows 路徑。".into());
     };
-    let remote = match prefix.kind() {
-        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+    match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => {}
         Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
             let root = PathBuf::from(format!("{}:\\", char::from(letter)));
-            drive_type(&root) == 4 // Win32 DRIVE_REMOTE
+            if is_local_workspace_drive(drive_type(&root)) {
+                return Ok(());
+            }
         }
         _ => return Err("工作區需要本機磁碟路徑。".into()),
-    };
-    if remote {
-        return Err("工作區使用 SQLite WAL，需要本機磁碟。請將工作區移至本機後再開啟。".into());
     }
-    Ok(())
+    Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into())
+}
+
+fn is_local_workspace_drive(drive_type: u32) -> bool {
+    // Win32 DRIVE_REMOVABLE, DRIVE_FIXED, and DRIVE_RAMDISK.
+    matches!(drive_type, 2 | 3 | 6)
+}
+
+fn native_drive_type(root: &Path) -> u32 {
+    unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr()) }
+}
+
+fn resolved_workspace_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    check_workspace_volume(&resolved, native_drive_type)?;
+    if !std::fs::metadata(&resolved)?.is_dir() {
+        return Err("工作區位置必須是資料夾。".into());
+    }
+    // A mounted volume can have a different type from the drive-letter root.
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    let mut volume = vec![0_u16; 32_768];
+    if unsafe { GetVolumePathNameW(wide_path(&resolved).as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !is_local_workspace_drive(unsafe { GetDriveTypeW(volume.as_ptr()) }) {
+        return Err("工作區使用 SQLite WAL，需要可辨識的本機磁碟。請將工作區移至本機後再開啟。".into());
+    }
+    Ok(resolved)
+}
+
+fn prepare_workspace_directory(path: &Path) -> Result<PathBuf> {
+    use std::io::ErrorKind;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    check_workspace_volume(path, native_drive_type)?;
+    // Resolve the nearest existing directory before creating anything. Walk
+    // missing components on the checked path, verifying each actual target.
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    let mut directory = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break resolved_workspace_directory(ancestor)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                missing.push(ancestor.file_name().ok_or("找不到工作區路徑。")?);
+                ancestor = ancestor.parent().ok_or("找不到工作區的上層資料夾。")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    for name in missing.into_iter().rev() {
+        let child = directory.join(crate::output::windows_output_name(name)?);
+        match std::fs::create_dir(&child) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = resolved_workspace_directory(&child)?;
+    }
+
+    // SQLite must open ordinary files beside each other in the resolved
+    // directory. Never follow an existing redirect for an individual file.
+    for name in ["notes.sqlite3", "notes.sqlite3-wal", "notes.sqlite3-shm", "notes.sqlite3-journal"] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Ok(entry) if entry.is_file() && entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(format!("工作區的 {name} 必須是本機資料夾內的一般檔案。").into()),
+        }
+    }
+    Ok(directory)
 }
 
 fn init_tree_control() -> Result<()> {
@@ -359,9 +448,8 @@ unsafe fn start() -> Result<()> {
             std::env::args_os().skip(1).any(|arg| arg == "--portable"),
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         )?;
-        check_workspace_volume(&dir, |root| {
-            windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_path(root).as_ptr())
-        })?;
+        check_workspace_volume(&dir, native_drive_type)?;
+        let portable_workspace = dir.ends_with("paperroom-data");
         let module = GetModuleHandleW(null());
         if LoadLibraryExW(
             wide("Msftedit.dll").as_ptr(),
@@ -406,13 +494,14 @@ unsafe fn start() -> Result<()> {
         }
         let widgets = Widgets::create(hwnd, module)?;
         // Native editor initialization must succeed before writing workspace state.
-        std::fs::create_dir_all(&dir)?;
+        let dir = prepare_workspace_directory(&dir)?;
         let notebook = Notebook::open(&dir.join("notes.sqlite3"), true)?;
         let app = Box::new(RefCell::new(App {
             hwnd,
             widgets,
             notebook,
             data_dir: dir,
+            portable_workspace,
             current: None,
             tree_items: HashMap::new(),
             editing: false,
@@ -761,7 +850,7 @@ impl App {
             InvalidateRect(tree, null(), 1);
             let hint = if !query.trim().is_empty() {
                 format!("{} 筆搜尋結果", rows.len())
-            } else if self.data_dir.ends_with("paperroom-data") {
+            } else if self.portable_workspace {
                 "●　可攜工作區".to_owned()
             } else {
                 "●　本機工作區".to_owned()
@@ -805,18 +894,22 @@ impl App {
                 return;
             }
             match self.notebook.note(id) {
-                Ok(note) => {
-                    self.cancel_workspace_drag();
-                    self.current = note;
-                    self.extras.board = false;
-                    self.extras.workspace = None;
-                    self.dirty = false;
-                    self.failed = false;
-                    self.present();
-                    self.select_tree();
-                }
+                Ok(note) => self.set_current_note(note),
                 Err(error) => self.show_error(error),
             }
+        }
+    }
+
+    unsafe fn set_current_note(&mut self, note: Option<Note>) {
+        unsafe {
+            self.cancel_workspace_drag();
+            self.current = note;
+            self.extras.board = false;
+            self.extras.workspace = None;
+            self.dirty = false;
+            self.failed = false;
+            self.present();
+            self.select_tree();
         }
     }
 
@@ -1143,6 +1236,7 @@ impl App {
                 (2, "匯入 Notion Markdown ZIP…"),
                 (3, "匯出目前筆記為 Markdown…"),
                 (4, "備份工作區…"),
+                (43, "從備份另開可攜工作區…"),
                 (5, "開啟資料所在資料夾"),
                 (6, "匯入 Obsidian Markdown 資料夾…"),
                 (7, "開啟今日筆記"),
@@ -1174,13 +1268,26 @@ impl App {
                 (30, "匯出工作區 HTML ZIP…"),
                 (31, "匯入 JSON Canvas ZIP…"),
                 (32, "預覽 Notion ZIP 關聯（唯讀）…"),
+                (40, "匯入 Obsidian Bases 檢視…"),
+                (41, "匯入隨 Vault 來源變動的 Bases…"),
+                (42, "從同一 Vault 加入新 Markdown…"),
             ];
             let action = popup(self.hwnd, self.widgets.files, None, &items);
+            if action == 43 {
+                if let Err(error) = self.restore_workspace_ui() {
+                    self.show_error(error);
+                }
+                return;
+            }
             if action == 33 {
                 let notices = crate::about_notices::body();
                 if let Err(error) = crate::dialog::show_text(self.hwnd, "第三方補充通知", &notices) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if matches!(action,41|42) && (self.dirty || self.failed) {
+                self.show_error("請先儲存或處理目前編輯中的筆記，再核對 Vault 來源。".into());
                 return;
             }
             if action == 32 {
@@ -1239,6 +1346,36 @@ impl App {
                     29 => return app.export_zotero_csl_ui(),
                     31 => return app.import_canvas_bundle_ui(),
                     35 => return app.workspace_search_ui(),
+                    42 => return app.add_verified_vault_source(),
+                    40 | 41 => {
+                        let source = app.current.as_ref().ok_or("先開啟已匯入的 Vault 筆記。")?;
+                        let root = app.notebook.graph_vault(source.row.id)?
+                            .ok_or("先開啟要套用這份 Bases 的已匯入 Vault 筆記。")?;
+                        let scope = app.notebook.note(root)?.ok_or("來源 Vault 不存在。")?;
+                        if let Some(path) = file_dialog(app.hwnd, "Obsidian Bases\0*.base\0\0", "base", None)? {
+                            let filename = path.file_name().and_then(|value| value.to_str())
+                                .ok_or("無法讀取 Bases 檔名。")?;
+                            let raw = archive::read_bounded(
+                                std::fs::File::open(&path)?, crate::store::obsidian_base::MAX_BYTES as u64,
+                            )?;
+                            let parsed = crate::store::obsidian_base::parse(&raw)?;
+                            let mut prompt = format!("從已匯入的「{}」（#{}）建立 {} 個集合？紙間會使用目前的來源筆記，並保存 .base 原檔。", scope.row.title, root, parsed.views.len());
+                            if action==41 {prompt.push_str("\r\n新來源、改名與搬移會依最新配對路徑重新入選。");}
+                            if message(app.hwnd, "匯入 Bases 檢視", &prompt, MB_YESNO | MB_DEFBUTTON2) != IDYES {
+                                return Ok(());
+                            }
+                            let dynamic = parsed.has_dynamic_rules();
+                            let mode=if action==41{4}else if parsed.has_live_status(){
+                                let mut options=vec![(1,"固定快照"),(2,if parsed.types.is_empty(){"連結工作區 status（可編輯）"}else{"連結工作區欄位（可編輯）"})];
+                                if dynamic{options.push((3,"動態篩選與排序（連結來源）"));}
+                                popup(app.hwnd,app.widgets.files,None,&options)
+                            }else{1};
+                            if !matches!(mode,1..=4){return Ok(());}
+                            let (receipt,views)=if mode==4{app.notebook.import_vault_scope_base(root,filename,raw)?}else{app.notebook.import_obsidian_base_options(root,filename,raw,mode!=1,mode==3)?};
+                            app.open_import(receipt, &format!("已匯入 {} 個 Bases 檢視。", views.len()));
+                        }
+                        return Ok(());
+                    }
                     30 => {
                         if let Some(path) = file_dialog(app.hwnd, "HTML ZIP\0*.zip\0\0", "zip", Some("paperroom-html.zip"))? {
                             let report = app.notebook.export_html_workspace(&path)?;
@@ -1279,6 +1416,15 @@ impl App {
                             let mut report = media.report(imported.pages.len(), imported.skipped);
                             report.push_str("\r\n\r\n");
                             report.push_str(&csv.report());
+                            if let Some(plan) = &csv.typed_relations {
+                                let question = format!("依紙間交接檔建立 {} 條具名關聯？只會連到本次新匯入的筆記。資料由交接檔提供，並非 Notion 認證。", plan.count());
+                                if message(app.hwnd, "匯入具名關聯", &question, MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES {
+                                    return Ok(());
+                                }
+                                report.push_str(&format!("\r\n\r\n依紙間交接檔建立 {} 條具名關聯。", plan.count()));
+                            } else if imported.has_mcp_transfer_manifest {
+                                report.push_str("\r\n\r\n此 ZIP 帶紙間 MCP 文字交接標記。本次只匯入所選頁面的文字，交接收據留在原 ZIP；此標記不是原廠匯出證明。");
+                            }
                             report.push_str("\r\n\r\n同批同一 ZIP 部件中可唯一比對的相對頁面連結，會出現在「筆記連結」選單。原始 Markdown 不變。片段只認唯一的字面標題。外部連結、附件路徑及未能確認的頁面連結保留原樣。");
                             let status = format!(
                                 "已匯入 {} 篇 Markdown、{} 筆附件關聯及 {} 份原始 CSV。",
@@ -1292,7 +1438,7 @@ impl App {
                             crate::dialog::show_text(app.hwnd, "匯入報告", &report)?;
                         }
                         "zip" => {
-                            let (imported, media) = archive::archive_with_media(&path)?;
+                            let (mut imported, media) = archive::archive_with_media(&path)?;
                             if let Some(notice) = imported.markdown_zip_import_notice()
                                 && message(
                                     app.hwnd, "Markdown ZIP 匯入範圍", notice,
@@ -1301,12 +1447,30 @@ impl App {
                             {
                                 return Ok(());
                             }
-                            let report = media.report(imported.pages.len(), imported.skipped);
-                            let status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", imported.pages.len(), media.count());
+                            let mut report = media.report(imported.pages.len(), imported.skipped);
+                            let mut status = format!("已匯入 {} 篇 Markdown 與 {} 筆附件關聯。", imported.pages.len(), media.count());
                             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Markdown ZIP");
-                            let id = app.notebook.import_markdown_with_media(
-                                &format!("匯入：{name}"), imported.pages, media,
-                            )?;
+                            let folder = format!("匯入：{name}");
+                            let id = if let Some(handoff) = imported.take_heptabase_handoff() {
+                                let (id, drawings) = app.notebook.import_heptabase_handoff(
+                                    &folder, imported.pages, media, handoff,
+                                )?;
+                                let counts = format!("已建立 {} 張原生白板、保存 {} 份可編輯 Canvas，已讀取的圖檔中有 {} 份未匯入。", drawings.boards, drawings.canvases, drawings.skipped);
+                                status.push_str(&counts);
+                                report.push_str("\r\n\r\n");
+                                report.push_str(&counts);
+                                if drawings.canvases > 0 {
+                                    report.push_str("請從「檔案 → 開啟已匯入的 Canvas」開啟。可從圖內開啟原始節點對應的同包筆記。沒有對應的檔案節點仍會保留。");
+                                }
+                                report.push_str("All-Data.json 的原廠白板與中繼資料沒有還原，請保留原 ZIP。");
+                                for warning in drawings.details {
+                                    report.push_str("\r\n");
+                                    report.push_str(&warning);
+                                }
+                                id
+                            } else {
+                                app.notebook.import_markdown_with_media(&folder, imported.pages, media)?
+                            };
                             app.open_import(id, &status);
                             crate::dialog::show_text(app.hwnd, "匯入報告", &report)?;
                         }
@@ -1435,6 +1599,24 @@ impl App {
         }
     }
 
+    unsafe fn rename_vault_heading(&mut self,source:i64)->Result<()> {
+        unsafe {
+            let selection=self.notebook.vault_heading_choices(source)?;
+            let headings=&selection.titles;
+            if headings.is_empty(){return Err("沒有可重新命名的唯一純文字 ATX 小節。".into());}
+            let Some(i)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,headings.len(),
+                |i|headings[i].as_str()) else {return Ok(())};
+            let old=&headings[i];
+            let Some(new)=crate::dialog::prompt(self.hwnd,"重新命名 Vault 小節","新小節名稱",old,180)? else {return Ok(())};
+            let plan=self.notebook.preview_heading_rename(&selection,old,&new)?;
+            if crate::dialog::preview_decision(self.hwnd,"確認重新命名小節",&plan.summary(),"重新命名","取消")? {
+                self.notebook.apply_heading_rename(&plan)?;
+                self.open_import(source,"已重新命名 Vault 小節並更新引用。");
+            }
+            Ok(())
+        }
+    }
+
     unsafe fn open_import(&mut self, id: i64, info: &str) {
         unsafe {
             self.view = View::All;
@@ -1474,6 +1656,7 @@ impl App {
             if is_excerpt { items.push((23, "復原已移除的 PDF 標註…")); }
             items.push((24, "複製筆記與內容…"));
             items.push((27, "查看此筆記的 Canvas 位置…"));
+            items.push((28, "另存歷史版本附件…"));
             if self.editing && self.editor_ready && !self.extras.board {
                 items.extend([
                     (25, "切換選取文字的螢光標記"),
@@ -1487,6 +1670,11 @@ impl App {
                 if let Err(error) = self.edit_note_highlights(id, action == 26) {
                     self.show_error(error);
                 }
+                return;
+            }
+            if action == 28 {
+                // Export reads only saved history. Do not flush a live editor draft.
+                if let Err(error) = self.export_history_attachment_ui(id) { self.show_error(error); }
                 return;
             }
             if action == 22 {
@@ -1526,7 +1714,7 @@ impl App {
                     21 => app.note_word_count_ui()?,
                     23 => app.restore_pdf_excerpt_ui(id)?,
                     24 => app.duplicate_note_ui(id)?,
-                    27 => app.show_note_canvas_locations(id)?,
+                    27 => app.show_note_canvas_locations(id, app.widgets.more)?,
                     _ => {}
                 }
                 Ok(())
@@ -1875,13 +2063,17 @@ unsafe fn file_dialog_in(
 }
 
 unsafe fn folder_dialog(owner: HWND) -> Result<Option<PathBuf>> {
+    unsafe { folder_dialog_with_title(owner, "選擇要匯入的 Obsidian Vault 資料夾") }
+}
+
+unsafe fn folder_dialog_with_title(owner: HWND, instruction: &str) -> Result<Option<PathBuf>> {
     unsafe {
         use std::os::windows::ffi::OsStringExt;
         let status = CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
         if status < 0 {
             return Err(format!("無法開啟資料夾選擇器（{status:#x}）。").into());
         }
-        let title = wide("選擇要匯入的 Obsidian Vault 資料夾");
+        let title = wide(instruction);
         let mut display = [0u16; 260];
         let options = BROWSEINFOW {
             hwndOwner: owner,
@@ -1913,6 +2105,24 @@ unsafe fn folder_dialog(owner: HWND) -> Result<Option<PathBuf>> {
 }
 
 impl App {
+    unsafe fn open_vault_backlink_position(&mut self,target:i64)->Result<()> {
+        unsafe {
+            let hits=self.notebook.vault_backlink_positions(target)?;
+            if hits.is_empty(){label(self.widgets.status,"這篇筆記沒有可定位的 Vault 反向連結。");return Ok(())}
+            let Some(i)=navigation_ui::choose_navigation_page(self.hwnd,self.widgets.links,hits.len(),|i|hits[i].label.as_str()) else{return Ok(())};
+            let hit=&hits[i];
+            let note=self.notebook.recheck_vault_backlink(hit)?;
+            let cursor=crate::store::navigation::editor_source_selection(&note.body,hit.range.clone()).ok_or("找不到反向連結的原文。")?;
+            self.view=View::All;
+            self.editing=false;
+            label(self.widgets.search,"");
+            self.set_current_note(Some(note));
+            self.rebuild();
+            if self.focus_source_selection(cursor.start,cursor.end)? {label(self.widgets.status,"已定位 Vault 反向連結原文。")}
+            Ok(())
+        }
+    }
+
     unsafe fn links_menu(&mut self) {
         use crate::markdown::AnchorSyntax;
         unsafe {
@@ -1957,6 +2167,24 @@ impl App {
                 }
                 let graph = related.len() + 2;
                 labels.push((graph, "開啟筆記關聯圖…".to_owned()));
+                let named = (graph + 1).max(60001);
+                let canvas = named + 1;
+                let native_board = named + 2;
+                labels.insert(1, (named, "具名關聯的來源與目標…".to_owned()));
+                labels.insert(2, (canvas, "查看此筆記的 Canvas 位置…".to_owned()));
+                labels.insert(3, (native_board, "查看此筆記的原生白板位置…".to_owned()));
+                let rename_heading = named + 4;
+                let backlink_positions = named + 5;
+                if app.notebook.graph_vault(source)?.is_some() {
+                    if app.notebook.supports_vault_backlink_positions(source)? {
+                        labels.insert(4,(backlink_positions,"查看 Vault 反向連結原文位置…".to_owned()));
+                    }
+                    labels.insert(4,(rename_heading,"重新命名 Vault 小節…".to_owned()));
+                }
+                let notion_source = named + 3;
+                if app.notebook.notion_row_token(source)?.is_some() {
+                    labels.insert(4, (notion_source, "連結已匯入的 Notion 來源頁…".to_owned()));
+                }
                 let items = labels
                     .iter()
                     .map(|(id, label)| (*id, label.as_str()))
@@ -1967,6 +2195,12 @@ impl App {
                         app.insert_note_link()?;
                     }
                     index if index == graph => app.open_note_graph(source)?,
+                    index if index == named => app.show_named_relation_navigation(source)?,
+                    index if index == canvas => app.show_note_canvas_locations(source, app.widgets.links)?,
+                    index if index == backlink_positions => app.open_vault_backlink_position(source)?,
+                    index if index == rename_heading => app.rename_vault_heading(source)?,
+                    index if index == notion_source => app.bind_notion_source_page(source)?,
+                    index if index == native_board => app.show_native_board_locations(source)?,
                     index => {
                         if let Some((id, _, heading, syntax)) = related.get(index - 2) {
                             app.open_anchored_link(*id, heading.as_deref(), *syntax)?;
@@ -2003,6 +2237,7 @@ impl App {
                 (23, "對齊或等距排列…"), (24, "復原最近一次排列"),
                 (25, "新增心智圖根節點…"), (26, "心智圖節點…"),
                 (27, "白板形狀…"), (28, "白板標籤…"),
+                (29,"將選取的卡片與配置複製到另一張白板…"),
             ]) {
                 1 => {
                     let notes = self.notebook.rows(View::All, "")?;
@@ -2046,6 +2281,7 @@ impl App {
                 11 => self.add_existing_pdf_excerpt_ui()?,
                 12 => self.board_selection_menu()?,
                 13 => self.collapse_board_group_menu()?,
+                29 => self.copy_selected_layout_menu()?,
                 14 => self.reuse_selected_board_cards_menu()?,
                 15 => self.move_selected_board_cards_menu()?,
                 16 => self.arm_board_drop_target()?,
@@ -2105,7 +2341,10 @@ impl App {
             }
             self.extras.board_drop_target = None;
             self.extras.board_selected.clear();
+            self.extras.native_board_focus = None;
             self.extras.scroll = 0;
+            self.extras.board_scroll_x = 0;
+            self.refresh_board_image_cache();
             self.present();
             Ok(())
         }
@@ -2130,6 +2369,10 @@ impl App {
                 .filter(|card| !self.board_card_collapsed(card.id)).map(|card| BoardItem::Card(card.id))
                 .chain(self.extras.objects.iter().map(|object| BoardItem::Object(object.id))).collect();
             self.extras.board_selected.retain(|item| visible.contains(item));
+            if self.focused_native_card().is_some_and(|note| !visible.contains(&BoardItem::Card(note))) {
+                self.extras.native_board_focus = None;
+            }
+            self.extras.board_scroll_x = self.extras.board_scroll_x.min(self.board_scroll_end_x());
             let end = self.board_scroll_end();
             self.extras.scroll = self.extras.scroll.clamp(0, end);
             self.refresh_board_image_cache();
@@ -2145,6 +2388,16 @@ impl App {
             .max().unwrap_or(0)
     }
 
+    fn board_scroll_end_x(&self) -> i32 {
+        let area = unsafe { self.board_area() };
+        let width = (area.right - area.left).max(0) * 96 / self.dpi as i32;
+        let bound = |x, size| crate::store::native_board_locations::pan_limit(x, size, width);
+        self.extras.cards.iter().map(|card| bound(card.x, card.size().width))
+            .chain(self.extras.objects.iter().map(|object| bound(object.x, 232)))
+            .chain(self.extras.board_shapes.iter().map(|shape| bound(shape.rect.x, shape.rect.width)))
+            .max().unwrap_or(0)
+    }
+
     unsafe fn board_toggle(&mut self) {
         unsafe {
             self.mutate(|app| {
@@ -2155,6 +2408,7 @@ impl App {
                 app.extras.workspace = None;
                 app.extras.board = !app.extras.board;
                 app.extras.board_selected.clear();
+                app.extras.native_board_focus = None;
                 if app.extras.board {
                     app.refresh_board()?;
                 }
@@ -2186,13 +2440,13 @@ impl App {
             if x < area.left || y < area.top || x >= area.right || y >= area.bottom {
                 return None;
             }
-            self.extras
-                .cards
-                .iter()
-                .rev()
+            let focus = self.focused_native_card();
+            let cards = self.extras.cards.iter().rev();
+            cards.clone().filter(|card| Some(card.id) == focus)
+                .chain(cards.filter(|card| Some(card.id) != focus))
                 .filter(|card| !self.board_card_collapsed(card.id))
                 .find(|card| {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     (left..left + self.scaled(size.width)).contains(&x)
@@ -2200,6 +2454,21 @@ impl App {
                 })
                 .map(|card| card.id)
         }
+    }
+
+    fn card_drag_position(&self, drag: CardDrag, x: i32, y: i32, area: RECT) -> Option<(i32, i32)> {
+        if self.board_id() != drag.board { return None; }
+        let card = self.extras.cards.iter().find(|card| card.id == drag.note)?;
+        if (x, y) == drag.pointer { return Some(drag.origin); }
+        let dpi = self.dpi as i32;
+        let scroll_x = self.extras.board_scroll_x;
+        let max_x = (scroll_x + (area.right - area.left) * 96 / dpi - card.size().width).clamp(0, 10000);
+        let dx = (x - drag.pointer.0) * 96 / dpi + scroll_x - drag.scroll.0;
+        let dy = (y - drag.pointer.1) * 96 / dpi + self.extras.scroll - drag.scroll.1;
+        Some((
+            if dx == 0 { drag.origin.0 } else { (drag.origin.0 + dx).clamp(0, max_x) },
+            (drag.origin.1 + dy).clamp(0, 50000),
+        ))
     }
 
     unsafe fn board_input(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) {
@@ -2219,7 +2488,11 @@ impl App {
             if self.board_batch_input(msg, wp, x, y) {
                 return;
             }
-            if self.board_object_input(msg, x, y) {
+            let hit_focused = self.focused_native_card().is_some_and(|id| self.card_at(x, y) == Some(id));
+            if !(hit_focused && self.extras.object_drag.is_none()
+                && matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONUP))
+                && self.board_object_input(msg, x, y)
+            {
                 return;
             }
             match msg {
@@ -2227,44 +2500,44 @@ impl App {
                     if let Some(id) = self.card_at(x, y)
                         && let Some(card) = self.extras.cards.iter().find(|c| c.id == id)
                     {
-                        let area = self.board_area();
-                        self.extras.dragging = Some((
-                            id,
-                            x - area.left - self.scaled(card.x),
-                            y - area.top - self.scaled(card.y - self.extras.scroll),
-                        ));
+                        self.extras.dragging = Some(CardDrag {
+                            board: self.board_id(),
+                            note: id,
+                            origin: (card.x, card.y),
+                            pointer: (x, y),
+                            scroll: (self.extras.board_scroll_x, self.extras.scroll),
+                        });
                         SetCapture(self.hwnd);
                     } else if let Some(shape) = self.board_shape_at(x, y) {
                         self.begin_board_shape_drag(shape, x, y);
                     }
                 }
                 WM_MOUSEMOVE => {
-                    if let Some((id, dx, dy)) = self.extras.dragging {
+                    if let Some(drag) = self.extras.dragging {
                         let area = self.board_area();
-                        let dpi = self.dpi as i32;
-                        let width = self.extras.cards.iter().find(|card| card.id == id)
-                            .map_or(232, |card| card.size().width);
-                        let max_x = (area.right - area.left) * 96 / dpi - width;
-                        let new_x = ((x - area.left - dx) * 96 / dpi).clamp(0, max_x.max(0));
-                        let new_y =
-                            ((y - area.top - dy) * 96 / dpi + self.extras.scroll).clamp(0, 50000);
-                        if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == id) {
-                            card.x = new_x;
-                            card.y = new_y;
+                        if let Some(position) = self.card_drag_position(drag, x, y, area)
+                            && let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note)
+                        {
+                            (card.x, card.y) = position;
                             InvalidateRect(self.hwnd, &area, 1);
                         }
                     }
                 }
                 WM_LBUTTONUP => {
-                    if let Some((id, _, _)) = self.extras.dragging.take() {
+                    if let Some(drag) = self.extras.dragging.take() {
                         ReleaseCapture();
-                        if let Some(card) = self.extras.cards.iter().find(|c| c.id == id) {
-                            if let Err(error) = self.notebook.move_card_on(self.board_id(), id, card.x, card.y) {
+                        let area = self.board_area();
+                        if let Some(position) = self.card_drag_position(drag, x, y, area) {
+                            if let Err(error) = self.notebook.finish_card_drag(drag.board, drag.note, drag.origin, position) {
                                 let _ = self.refresh_board();
+                                InvalidateRect(self.hwnd, &area, 1);
                                 self.show_error(error);
                             } else {
+                                if let Some(card) = self.extras.cards.iter_mut().find(|c| c.id == drag.note) {
+                                    (card.x, card.y) = position;
+                                }
                                 self.refresh_board_image_cache();
-                                InvalidateRect(self.hwnd, null(), 1);
+                                InvalidateRect(self.hwnd, &area, 1);
                             }
                         }
                     }
@@ -2276,7 +2549,17 @@ impl App {
                 }
                 WM_LBUTTONDBLCLK => {
                     if let Some(id) = self.card_at(x, y) {
-                        self.select(id);
+                        if hit_focused {
+                            self.mutate(|app| {
+                                let location = app.extras.native_board_focus.as_ref().ok_or("白板位置已變更。")?;
+                                let note = app.notebook.note_at_native_board_location(location)?;
+                                app.extras.native_board_focus = None;
+                                app.set_current_note(Some(note));
+                                Ok(())
+                            });
+                        } else {
+                            self.select(id);
+                        }
                     }
                 }
                 WM_RBUTTONUP => {
@@ -2300,8 +2583,13 @@ impl App {
                     let area = self.board_area();
                     if cursor.x >= area.left && cursor.x < area.right {
                         let delta = (wp >> 16) as u16 as i16 as i32;
-                        let max = self.board_scroll_end();
-                        self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        if wp & 0x0004 != 0 { // MK_SHIFT
+                            let max = self.board_scroll_end_x();
+                            self.extras.board_scroll_x = (self.extras.board_scroll_x - delta).clamp(0, max);
+                        } else {
+                            let max = self.board_scroll_end();
+                            self.extras.scroll = (self.extras.scroll - delta).clamp(0, max);
+                        }
                         self.refresh_board_image_cache();
                         InvalidateRect(self.hwnd, &area, 1);
                     }
@@ -2323,7 +2611,23 @@ impl App {
             if self.extras.cards.iter().any(|card| card.id == id && card.image.is_some()) {
                 items.push((6, "調整圖片卡大小…"));
             }
+            let card_position = self.extras.cards.iter().find(|card| card.id == id)
+                .map(|card| (card.x, card.y));
+            if card_position.is_some() {
+                items.push((7, "從此卡建立子白板…"));
+            }
+            let origin = self.notebook.native_card_origin(board,id)?;
+            items.push((8,"查看這張卡片的其他白板位置…"));
+            items.push((9,"定位連線另一端…"));
+            items.push((10,"在集合中定位這張卡片…"));
             let action = popup(self.hwnd, null_mut(), Some(point), &items);
+            if action == 10 { return self.show_card_collections(&origin); }
+            if action == 8 { return self.show_other_card_locations(origin); }
+            if action == 7 {
+                return self.create_child_board_from_card_ui(
+                    id, card_position.ok_or("找不到來源卡片。")?,
+                );
+            }
             if action == 6 {
                 return self.resize_board_image_ui(id);
             }
@@ -2348,31 +2652,7 @@ impl App {
                 }
                 return self.refresh_board();
             }
-            if !matches!(action, 2 | 3) {
-                return Ok(());
-            }
-            let is_connected = |other| self.extras.edges.iter().any(|edge| {
-                (edge.from == id && edge.to == other) || (edge.to == id && edge.from == other)
-            });
-            let candidates = self.extras.cards.iter().filter(|card| {
-                card.id != id && is_connected(card.id) == (action == 3)
-            }).collect::<Vec<_>>();
-            if candidates.is_empty() {
-                label(self.widgets.status, "沒有符合的連線卡片。");
-                return Ok(());
-            }
-            let choices = candidates.iter().enumerate()
-                .map(|(index, card)| (index + 1, card.title.as_str()))
-                .collect::<Vec<_>>();
-            let action_id = popup(self.hwnd, null_mut(), Some(point), &choices);
-            if let Some(card) = action_id.checked_sub(1).and_then(|index| candidates.get(index)) {
-                if action == 2 {
-                    self.notebook.add_edge_on(board, id, card.id)?;
-                } else {
-                    self.notebook.remove_edge_on(board, id, card.id)?;
-                }
-                self.refresh_board()?;
-            }
+            if matches!(action,2|3|9) { return self.card_edge_menu(origin,action); }
             Ok(())
         }
     }
@@ -2452,7 +2732,7 @@ impl App {
             for group in &self.extras.groups {
                 let mut bounds = None::<RECT>;
                 for card in self.extras.cards.iter().filter(|card| group.members.contains(&card.id)) {
-                    let left = area.left + self.scaled(card.x);
+                    let left = self.board_screen_x(area, card.x);
                     let top = area.top + self.scaled(card.y - self.extras.scroll);
                     let size = card.size();
                     let rect = RECT { left, top, right: left + self.scaled(size.width), bottom: top + self.scaled(size.height) };
@@ -2496,7 +2776,7 @@ impl App {
                     let prior = SelectObject(dc, pen);
                     let centers = self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)).map(|card| {
                         let size = card.size();
-                        (card.id, (area.left + self.scaled(card.x + size.width / 2),
+                        (card.id, (self.board_screen_x(area, card.x + size.width / 2),
                                    area.top + self.scaled(card.y - self.extras.scroll + size.height / 2)))
                     }).collect::<HashMap<_, _>>();
                     for edge in &self.extras.edges {
@@ -2512,55 +2792,67 @@ impl App {
                 }
             }
             self.paint_mind_map_edges(dc, area);
-            for card in self.extras.cards.iter().filter(|card| !self.board_card_collapsed(card.id)) {
-                let left = area.left + self.scaled(card.x);
-                let top = area.top + self.scaled(card.y - self.extras.scroll);
-                let size = card.size();
-                let rect = RECT {
-                    left,
-                    top,
-                    right: left + self.scaled(size.width),
-                    bottom: top + self.scaled(size.height),
-                };
-                if rect.bottom <= area.top || rect.top >= area.bottom {
-                    continue;
-                }
-                fill(dc, &rect, PAPER);
-                if self.paint_board_image(dc, rect, card) {
-                    self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                    continue;
-                }
-                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
-                let mut title = RECT {
-                    left: left + self.scaled(13),
-                    top: top + self.scaled(10),
-                    right: rect.right - self.scaled(12),
-                    bottom: top + self.scaled(37),
-                };
-                draw_text(
-                    dc,
-                    self.fonts[0],
-                    TEAL,
-                    &card.title,
-                    &mut title,
-                    DT_SINGLELINE | DT_END_ELLIPSIS,
-                );
-                let mut excerpt = RECT {
-                    top: top + self.scaled(40),
-                    bottom: rect.bottom - self.scaled(10),
-                    ..title
-                };
-                draw_text(
-                    dc,
-                    self.fonts[3],
-                    SOFT,
-                    &card.excerpt,
-                    &mut excerpt,
-                    DT_WORDBREAK | DT_END_ELLIPSIS,
-                );
+            let focus = self.focused_native_card();
+            for card in self.extras.cards.iter().filter(|card| Some(card.id) != focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
             }
             self.paint_board_objects(dc, area);
+            if let Some(card) = self.extras.cards.iter().find(|card| Some(card.id) == focus && !self.board_card_collapsed(card.id)) {
+                self.paint_native_board_card(dc, area, card);
+            }
             RestoreDC(dc, saved);
+        }
+    }
+
+    unsafe fn paint_native_board_card(&self, dc: HDC, area: RECT, card: &crate::store::Card) {
+        unsafe {
+            let left = self.board_screen_x(area, card.x);
+            let top = area.top + self.scaled(card.y - self.extras.scroll);
+            let size = card.size();
+            let rect = RECT {
+                left,
+                top,
+                right: left + self.scaled(size.width),
+                bottom: top + self.scaled(size.height),
+            };
+            if rect.bottom <= area.top || rect.top >= area.bottom
+                || rect.right <= area.left || rect.left >= area.right
+            {
+                return;
+            }
+            fill(dc, &rect, PAPER);
+            if self.paint_board_image(dc, rect, card) {
+                self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+                return;
+            }
+            self.paint_board_item_frame(dc, rect, BoardItem::Card(card.id));
+            let mut title = RECT {
+                left: left + self.scaled(13),
+                top: top + self.scaled(10),
+                right: rect.right - self.scaled(12),
+                bottom: top + self.scaled(37),
+            };
+            draw_text(
+                dc,
+                self.fonts[0],
+                TEAL,
+                &card.title,
+                &mut title,
+                DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let mut excerpt = RECT {
+                top: top + self.scaled(40),
+                bottom: rect.bottom - self.scaled(10),
+                ..title
+            };
+            draw_text(
+                dc,
+                self.fonts[3],
+                SOFT,
+                &card.excerpt,
+                &mut excerpt,
+                DT_WORDBREAK | DT_END_ELLIPSIS,
+            );
         }
     }
 
@@ -2834,6 +3126,7 @@ mod tests {
             4
         }).is_err());
         assert!(check_workspace_volume(Path::new(r"\\?\C:\notes"), |_| 3).is_ok());
+        assert!(check_workspace_volume(Path::new(r"C:\notes"), |_| 0).is_err());
     }
 
     #[test]
@@ -2859,6 +3152,32 @@ mod tests {
         assert_eq!(workspace_directory(&exe, false, Some(local))?, adjacent);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn workspace_uses_resolved_local_directory_and_rejects_nonfile_members() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("paperroom-resolved-paths-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            let workspace = root.join("本機資料").join("nested");
+            let resolved = prepare_workspace_directory(&workspace)?;
+            assert_eq!(resolved, std::fs::canonicalize(&workspace)?);
+            let db = workspace.join("notes.sqlite3");
+            drop(Notebook::open(&resolved.join("notes.sqlite3"), true)?);
+            assert!(db.is_file());
+            assert_eq!(prepare_workspace_directory(&workspace)?, resolved);
+            let original = std::fs::read(&db)?;
+            std::fs::create_dir(workspace.join("notes.sqlite3-wal"))?;
+            assert!(prepare_workspace_directory(&workspace).is_err());
+            assert_eq!(std::fs::read(&db)?, original);
+            let deep = (0..15).fold(root.clone(), |path, _| path.join("深層工作區資料目錄驗證長路徑"));
+            let long = prepare_workspace_directory(&deep)?;
+            assert_eq!(long, std::fs::canonicalize(deep)?);
+            drop(Notebook::open(&long.join("notes.sqlite3"), true)?);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]

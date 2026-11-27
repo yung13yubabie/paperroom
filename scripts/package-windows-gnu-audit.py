@@ -11,8 +11,11 @@ import struct
 import subprocess
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from windows_gnu_dependency_evidence import INDEX as DEPENDENCY_INDEX, live_rust_members, make_evidence
+
 TARGET = "x86_64-pc-windows-gnu"
 EXE = "Paperroom.exe"
+MAX_EXE_BYTES = 24 << 20
 INDEX = "evidence/gnu-candidate.json"
 ROOT = Path(__file__).resolve().parents[1]
 KNOWN_DLLS = {
@@ -24,6 +27,12 @@ KNOWN_DLLS = {
 MAP_INPUT = re.compile(r"\b0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(/[^\r\n]+)$", re.I)
 INPUT_NAME = re.compile(r"[A-Za-z0-9_.+-]{1,200}\Z", re.ASCII)
 HEX64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+AUDITED_RUNTIME_NOTICES = ROOT / "docs/third-party/windows-gnu-0118861"
+RUST_RUNTIME_NOTICES = (
+    "Apache-2.0.txt", "BSD-2-Clause.txt", "LLVM-exception.txt", "MIT.txt", "Unicode-3.0.txt",
+)
+MINGW_RUNTIME_NOTICE = "COPYING.MinGW-w64-runtime.txt"
+MINGW_RUNTIME_NOTICE_SHA256 = "e9b2dc02451ea29092a1f25fa0f3c07207ed421f1807dffb0c4e6dce69dee7bd"
 
 
 def digest(data):
@@ -34,9 +43,15 @@ def json_bytes(value):
     return (json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode()
 
 
+def check_exe_size(size):
+    if not 0 < size <= MAX_EXE_BYTES:
+        raise ValueError(f"GNU candidate EXE size {size} exceeds the allowed range of 1–{MAX_EXE_BYTES} bytes")
+
+
 def pe(exe, path):
-    if len(exe) > 16 << 20 or not exe.startswith(b"MZ"):
-        raise ValueError("Expected bounded Windows executable")
+    check_exe_size(len(exe))
+    if not exe.startswith(b"MZ"):
+        raise ValueError("Expected the Windows executable MZ signature")
     offset = struct.unpack_from("<I", exe, 0x3C)[0]
     header = offset + 24
     if exe[offset:offset+4] != b"PE\0\0" or struct.unpack_from("<H", exe, offset+4)[0] != 0x8664:
@@ -120,6 +135,11 @@ def rust_licenses(entries, sysroot):
     entries["licenses/rust-toolchain/COPYRIGHT-library.html"] = standard
     for name in parser.relative_links(standard):
         entries[f"licenses/rust-toolchain/{name}"] = (docs / name).read_bytes()
+    for name in RUST_RUNTIME_NOTICES:
+        original = (docs / "licenses" / name).read_bytes()
+        if original != (AUDITED_RUNTIME_NOTICES / name).read_bytes():
+            raise ValueError(f"Rust runtime license differs from the audited toolchain: {name}")
+        entries[f"licenses/rust-toolchain/licenses/{name}"] = original
 
 
 def build(work, sysroot, commit, output, permit_different_rebuild):
@@ -156,6 +176,10 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
 
     vendors = vendor / "usr/share/doc"
     entries["licenses/gnu/mingw-w64-copyright.txt"] = (vendors / "mingw-w64-common/copyright").read_bytes()
+    mingw_runtime = (AUDITED_RUNTIME_NOTICES / MINGW_RUNTIME_NOTICE).read_bytes()
+    if digest(mingw_runtime) != MINGW_RUNTIME_NOTICE_SHA256:
+        raise ValueError("MinGW runtime license differs from the audited 12.0.0 source")
+    entries[f"licenses/gnu/{MINGW_RUNTIME_NOTICE}"] = mingw_runtime
     entries["licenses/gnu/gcc-mingw-w64-copyright.txt"] = (vendors / "gcc-mingw-w64-base/copyright").read_bytes()
     known = ROOT / "docs/third-party/gnu-runtime"
     for name in ("GCC-exception-3.1.txt", "GPL-3.0-or-later.txt"):
@@ -168,7 +192,17 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
     exe_sha = digest(binary)
     if registry["target"] != TARGET or receipt["target"] != TARGET or registry["exe_sha256"] != exe_sha or receipt["exe_sha256"] != exe_sha:
         raise ValueError("Dependency evidence does not apply to this GNU EXE")
-    entries["GNU-AUDIT.md"] = (ROOT / "docs/WINDOWS-GNU-AUDIT.md").read_bytes()
+    draft_notes = ROOT / "docs/WINDOWS-GNU-DRAFT.md"
+    audit_notes = draft_notes if draft_notes.is_file() else ROOT / "docs/WINDOWS-GNU-AUDIT.md"
+    entries["GNU-AUDIT.md"] = audit_notes.read_bytes()
+    observations = live_rust_members((work / "proof_a/final.map").read_text(encoding="utf-8"), exe_path.parent)
+    artifact_messages = (work / "proof_a/cargo-artifacts.jsonl").read_text(encoding="utf-8")
+    cargo_metadata = json.loads((work / "metadata/cargo.json").read_bytes())
+    lock_raw = (work / "proof_a/src/Cargo.lock").read_bytes()
+    evidence = make_evidence(entries, cargo_metadata, lock_raw, observations, artifact_messages,
+                             commit, TARGET, exe_sha,
+                             stamp["direct_dll_imports"])
+    entries[DEPENDENCY_INDEX] = json_bytes(evidence)
     details = {
         "source_commit": commit, "target": TARGET, "exe_sha256": exe_sha,
         "independent_builds_match": 2 if is_identical else 0,
@@ -190,11 +224,11 @@ def build(work, sysroot, commit, output, permit_different_rebuild):
             info.external_attr = 0o100644 << 16
             archive.writestr(info, entries[name], compress_type=ZIP_DEFLATED, compresslevel=9)
     zip_sha = digest(output.read_bytes())
-    verify(output, commit, exe_sha, zip_sha)
+    verify(output, commit, exe_sha, zip_sha, require_dependency_evidence=True)
     print(f"GNU candidate EXE {exe_sha} ZIP {zip_sha}")
 
 
-def verify(path, commit, exe_sha, zip_sha):
+def verify(path, commit, exe_sha, zip_sha, require_dependency_evidence=False):
     if not HEX64.fullmatch(exe_sha) or not HEX64.fullmatch(zip_sha):
         raise ValueError("Expected SHA-256 digests")
     if path.stat().st_size > 48 << 20 or digest(path.read_bytes()) != zip_sha:
@@ -211,6 +245,10 @@ def verify(path, commit, exe_sha, zip_sha):
             raise ValueError("The package contains an unsafe or ambiguous path")
         if any(re.search(r"(?i)\.(?:dll|lib|pdb|a|deb)$", n) for n in names):
             raise ValueError("The package contains a raw toolchain or runtime file")
+        if EXE not in names:
+            raise ValueError("The package does not contain Paperroom.exe")
+        exe_size = archive.getinfo(EXE).file_size
+        check_exe_size(exe_size)
         if archive.testzip() is not None:
             raise ValueError("A ZIP member has a CRC error")
         index = json.loads(archive.read(INDEX))
@@ -230,7 +268,17 @@ def verify(path, commit, exe_sha, zip_sha):
         for name, value in expected.items():
             if digest(archive.read(name)) != value:
                 raise ValueError("File SHA-256 differs: " + name)
-    print(f"Verified GNU ZIP readback, including all {len(names)} members.")
+        if DEPENDENCY_INDEX in names:
+            evidence = json.loads(archive.read(DEPENDENCY_INDEX))
+            if (evidence["source_commit"], evidence["target"], evidence["exe_sha256"]) != (commit, TARGET, exe_sha):
+                raise ValueError("Dependency evidence has a different source or EXE identity")
+            if (evidence["cargo_provenance_sha256"] != expected["evidence/cargo-provenance.json"]
+                    or evidence["registry_notices_sha256"] != expected["evidence/registry-notices.json"]
+                    or evidence["runtime_link_inventory"]["sha256"] != expected["evidence/gnu-runtime-members.json"]):
+                raise ValueError("Dependency evidence references different underlying receipts")
+        elif require_dependency_evidence:
+            raise ValueError("The package has no per-dependency redistribution evidence")
+    print(f"Verified GNU ZIP readback, including all {len(names)} members and the {exe_size}-byte EXE.")
 
 
 def describe_difference(first, second):
@@ -284,13 +332,14 @@ def main():
     v.add_argument("--commit", required=True)
     v.add_argument("--exe-sha256", required=True)
     v.add_argument("--zip-sha256", required=True)
+    v.add_argument("--require-dependency-evidence", action="store_true")
     a = parser.parse_args()
     if a.mode == "build":
         build(a.work, a.sysroot, a.commit, a.output, a.permit_different_rebuild)
     elif a.mode == "compare":
         describe_difference(a.first, a.second)
     else:
-        verify(a.package, a.commit, a.exe_sha256, a.zip_sha256)
+        verify(a.package, a.commit, a.exe_sha256, a.zip_sha256, a.require_dependency_evidence)
 
 
 if __name__ == "__main__":

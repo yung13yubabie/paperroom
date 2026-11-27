@@ -27,6 +27,12 @@ pub struct Attachment {
     pub size: i64,
 }
 
+#[cfg(any(windows, test))]
+pub(crate) struct CollectionAttachments {
+    pub owner_token: String,
+    pub files: Vec<Attachment>,
+}
+
 pub struct PdfAnnotation {
     pub id: i64,
     pub page: u32,
@@ -37,6 +43,7 @@ pub struct PdfAnnotation {
 pub const MAX_PDF_SEARCH_QUERY: usize = 256;
 const MAX_PDF_SEARCH_HITS: usize = 100;
 
+#[derive(PartialEq,Eq)]
 pub struct PdfAnnotationHit {
     pub id: i64,
     pub note_id: i64,
@@ -92,7 +99,7 @@ pub(super) fn file_kind(path: &Path) -> Result<&'static str> {
         "pdf" => Ok("pdf"),
         "png" => Ok("png"),
         "jpg" | "jpeg" => Ok("jpeg"),
-        "txt" | "csv" => Ok("text"),
+        "txt" | "csv" | "base" => Ok("text"),
         "md" | "markdown" => Ok("markdown"),
         _ => Err("支援的附件格式為 PDF、PNG、JPEG、文字或 Markdown。".into()),
     }
@@ -168,7 +175,7 @@ fn open_checked(path: &Path, directory: bool) -> Result<File> {
 // Hold non-delete/non-write-shared handles for each directory before opening
 // the next component to avoid a directory being replaced with a reparse point.
 #[cfg(windows)]
-fn pin_local_parents(path: &Path) -> Result<(std::path::PathBuf, Vec<File>)> {
+pub(super) fn pin_local_parents(path: &Path) -> Result<(std::path::PathBuf, Vec<File>)> {
     use std::path::Component;
 
     if path.components().any(|part| part == Component::ParentDir) {
@@ -208,6 +215,29 @@ pub(super) fn read_local_attachment_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(content)
 }
 
+pub(super) fn publish_attachment(path: &Path, content: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let (absolute, parents) = pin_local_parents(path)?;
+        let parent = parents.last().ok_or("找不到目標資料夾。")?;
+        let leaf = absolute.file_name().ok_or("找不到目標檔名。")?;
+        win_attachment_publish::publish(parent, leaf, content)
+    }
+    #[cfg(not(windows))]
+    crate::output::publish_new(path, |file, _| {
+        file.write_all(content)?;
+        Ok(())
+    })
+}
+
+fn protect_base_source(db: &rusqlite::Connection, attachment: i64) -> Result<()> {
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM base_card_receipts WHERE attachment=?1)", [attachment], |r| r.get(0),
+    )?;
+    if protected { return Err(super::note_history::BASE_SOURCE_GUIDANCE.into()); }
+    Ok(())
+}
+
 impl Notebook {
     pub fn list_attachments(&self, note: i64) -> Result<Vec<Attachment>> {
         let mut query = self.connection.prepare(
@@ -224,6 +254,51 @@ impl Notebook {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn collection_attachments(&self, collection: i64) -> Result<std::collections::HashMap<i64, CollectionAttachments>> {
+        let mut query = self.connection.prepare(
+            "SELECT a.note_id,i.token,a.id,a.name,a.kind,length(a.content)
+             FROM collection_notes c JOIN notes n ON n.id=c.note_id
+             JOIN note_link_identities i ON i.note_id=n.id JOIN attachments a ON a.note_id=n.id
+             WHERE c.collection_id=?1 AND n.trash_root IS NULL ORDER BY a.id",
+        )?;
+        let mut files = std::collections::HashMap::<i64, CollectionAttachments>::new();
+        let rows = query.query_map([collection], |row| Ok((row.get(0)?, row.get(1)?, Attachment {
+            id: row.get(2)?,
+            name: row.get(3)?,
+            kind: row.get(4)?,
+            size: row.get(5)?,
+        })))?;
+        for entry in rows {
+            let (note, owner_token, file) = entry?;
+            files.entry(note).or_insert_with(|| CollectionAttachments { owner_token, files: Vec::new() })
+                .files.push(file);
+        }
+        Ok(files)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn collection_attachment_bytes(&self, collection: i64, note: i64, owner: &str, file: &Attachment) -> Result<Vec<u8>> {
+        self.connection.query_row(
+            "SELECT a.content FROM collection_notes c JOIN notes n ON n.id=c.note_id
+             JOIN note_link_identities i ON i.note_id=n.id JOIN attachments a ON a.note_id=n.id
+             WHERE c.collection_id=?1 AND n.id=?2 AND i.token=?3 AND n.trash_root IS NULL
+               AND a.id=?4 AND a.name=?5 COLLATE BINARY AND a.kind=?6 AND length(a.content)=?7",
+            params![collection, note, owner, file.id, file.name, file.kind, file.size], |row| row.get(0),
+        ).optional()?.ok_or_else(|| "資料列、筆記或附件已變更，請重新選取。".into())
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn save_collection_attachment(
+        &self, collection: i64, note: i64, owner: &str, file: &Attachment, expected: &[u8], path: &Path,
+    ) -> Result<()> {
+        let actual = self.collection_attachment_bytes(collection, note, owner, file)?;
+        if actual != expected {
+            return Err("附件內容已變更，請重新選取。".into());
+        }
+        publish_attachment(path, &actual)
     }
 
     pub fn import_attachment(&mut self, note: i64, path: &Path) -> Result<i64> {
@@ -277,18 +352,11 @@ impl Notebook {
             [attachment],
             |row| row.get(0),
         ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
-        #[cfg(windows)]
-        {
-            let (absolute, parents) = pin_local_parents(path)?;
-            let parent = parents.last().ok_or("找不到目標資料夾。")?;
-            let leaf = absolute.file_name().ok_or("找不到目標檔名。")?;
-            win_attachment_publish::publish(parent, leaf, &content)
-        }
-        #[cfg(not(windows))]
-        crate::output::publish_new(path, |file, _| {
-            file.write_all(&content)?;
-            Ok(())
-        })
+        publish_attachment(path, &content)
+    }
+
+    pub(crate) fn check_attachment_removal(&self, attachment: i64) -> Result<()> {
+        protect_base_source(&self.connection, attachment)
     }
 
     pub fn remove_attachment(&self, attachment: i64) -> Result<()> {
@@ -298,6 +366,7 @@ impl Notebook {
              WHERE a.id=?1 AND n.trash_root IS NULL",
             [attachment], |row| row.get(0),
         ).optional()?.ok_or("找不到附件，或所屬筆記已移到垃圾桶。")?;
+        protect_base_source(&tx, attachment)?;
         super::note_history_state::checkpoint(&tx, note)?;
         tx.execute("DELETE FROM attachments WHERE id=?1", [attachment])?;
         tx.commit()?;
@@ -357,6 +426,13 @@ impl Notebook {
             [annotation],
             pdf_hit,
         ).optional()?)
+    }
+
+    pub(crate) fn require_pdf_search_hit(&self, shown: &PdfAnnotationHit) -> Result<()> {
+        if self.pdf_annotation_hit(shown.id)?.as_ref() != Some(shown) {
+            return Err("這筆 PDF 標註或來源已變更，請重新搜尋。".into());
+        }
+        Ok(())
     }
 
     pub fn add_pdf_annotation(&self, attachment: i64, page: u32, quote: &str, comment: &str) -> Result<i64> {
@@ -438,12 +514,21 @@ mod tests {
             assert_eq!((legacy[0].id, legacy[0].note_id,legacy[0].attachment_id), (old, old_note, old_file));
             assert_eq!(db.pdf_region(legacy[0].id)?, None);
             assert_eq!(db.pdf_region(page[0].id)?, Some(region));
+            db.require_pdf_search_hit(&both[0])?;
+            db.require_pdf_search_hit(&both[1])?;
+            let mut mismatched=db.pdf_annotation_hit(new)?.unwrap();
+            mismatched.attachment_id=old_file;
+            assert!(db.require_pdf_search_hit(&mismatched).is_err());
             db.trash(new_note)?;
+            assert!(db.require_pdf_search_hit(&both[0]).is_err());
+            db.require_pdf_search_hit(&both[1])?;
             assert!(db.pdf_annotation_hit(new)?.is_none());
             assert!(db.search_pdf_annotations("", Some(2))?.0.is_empty());
             db.restore(new_note)?;
             assert_eq!(db.pdf_annotation_hit(new)?.unwrap().id, new);
+            db.require_pdf_search_hit(&both[0])?;
             db.remove_attachment(new_file)?;
+            assert!(db.require_pdf_search_hit(&both[0]).is_err());
             assert!(db.pdf_annotation_hit(new)?.is_none());
             assert_eq!(db.pdf_annotation_hit(old)?.unwrap().note_id, old_note);
         }
@@ -531,4 +616,44 @@ mod tests {
         fs::remove_dir_all(dir)?;
         Ok(())
     }
+    #[test]
+    fn collection_export_checks_exact_bytes_and_membership_before_creating_a_copy() -> Result<()> {
+        let dir = super::super::tests::data_dir();
+        let path = dir.join("workspace.sqlite3");
+        let mut notebook = Notebook::open(&path, false)?;
+        let writer = Notebook::open(&path, false)?;
+        let collection = notebook.create_collection("Sources")?;
+        let a = notebook.add(None, "同名", "Current")?;
+        let b = notebook.add(None, "同名", "Other")?;
+        notebook.add_to_collection(collection, a, "保留")?;
+        notebook.add_to_collection(collection, b, "保留")?;
+        let source = dir.join("same.txt");
+        fs::write(&source, b"first file")?;
+        notebook.import_attachment(a, &source)?;
+        fs::write(&source, b"other file")?;
+        notebook.import_attachment(b, &source)?;
+        let receipts = notebook.collection_attachments(collection)?;
+        let receipt = &receipts[&a];
+        let file = &receipt.files[0];
+        let data = notebook.collection_attachment_bytes(collection, a, &receipt.owner_token, file)?;
+        assert_eq!(data, b"first file");
+        let destination = dir.join("copy.txt");
+        assert!(notebook.save_collection_attachment(collection, b, &receipts[&b].owner_token, file, &data, &destination).is_err());
+        assert!(!destination.exists());
+        writer.connection.execute("UPDATE attachments SET content=?2 WHERE id=?1", params![file.id,b"newer file"])?;
+        assert!(notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &destination).is_err());
+        assert!(!destination.exists());
+        let data = notebook.collection_attachment_bytes(collection, a, &receipt.owner_token, file)?;
+        notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &destination)?;
+        assert_eq!(fs::read(destination)?, b"newer file");
+        writer.remove_from_collection(collection, a, "保留")?;
+        let missing = dir.join("removed.txt");
+        assert!(notebook.save_collection_attachment(collection, a, &receipt.owner_token, file, &data, &missing).is_err());
+        assert!(!missing.exists());
+        drop(writer);
+        drop(notebook);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
 }

@@ -40,7 +40,7 @@
 | 垃圾桶 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 還原筆記 | 已驗證 | 保留子樹、標星及板上位置。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [store.rs](../src/store.rs) |
 | 整頁複製 | 部分 | 可複製單篇或使用中的子頁，保留正文、屬性和附件。關聯、白板、PDF 標註及版本歷史仍留在原筆記。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [duplicate_note.rs](../src/duplicate_note.rs) |
-| 頁面歷史版本還原 | 部分 | 可逐行比較標題／正文，也可預覽及還原新版快照的屬性值、附件清單與原始檔。頁面配置、關聯及 PDF 標註的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
+| 頁面歷史版本還原 | 部分 | 可逐行比較標題／正文，也可預覽及還原新版快照的屬性值、附件清單與原始檔。已綁定的 Bases 來源附件會保護原檔，涉及改動該附件的整次還原會停止。頁面配置、關聯及 PDF 標註的歷史仍待做。 | [官方](https://www.notion.com/help/duplicate-delete-and-restore-content) · [操作步驟](UI-ACCEPTANCE.md#筆記版本差異與還原) |
 | 區塊編輯 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 斜線選單 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
 | 文字樣式 | 部分 | Markdown 原稿與獨立閱讀檢視；僅部分格式及命令。 | [官方](https://www.notion.com/help/customize-and-style-your-content) · [markdown.rs](../src/markdown.rs) |
@@ -59,7 +59,7 @@
 | 音訊播放 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
 | 影片播放器 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
 | 網頁嵌入 | 未實作 | 沒有媒體播放器或內嵌瀏覽器入口。 | [官方](https://www.notion.com/help/images-files-and-media) · [window.rs](../src/window.rs) |
-| 工作區搜尋 | 部分 | 標題與原始正文可用關鍵字、標籤與 Vault 資料夾交集搜尋，有上下文及精確命中跳轉。已移到垃圾桶或刪除的筆記不進入結果。附件與外部來源由其他入口或服務管理。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
+| 工作區搜尋 | 部分 | 標題與原始正文可用關鍵字、標籤與 Vault 資料夾交集搜尋，有上下文及精確命中跳轉。已移到垃圾桶或刪除的筆記不進入結果。同一視窗可切換查找 PDF 標註；其他附件內容與外部來源不在此範圍。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
 | 側欄捷徑 | 部分 | 標題／正文搜尋、標星和頁樹。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [store.rs](../src/store.rs) |
 | 收藏 | 部分 | 標題／正文搜尋、標星和頁樹。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [store.rs](../src/store.rs) |
 | 最近瀏覽 | 未實作 | 未見對應瀏覽歷程或首頁設定。 | [官方](https://www.notion.com/help/navigate-with-the-sidebar) · [window.rs](../src/window.rs) |
@@ -69,12 +69,12 @@
 | 資料來源 | 部分 | 具名集合、成員與狀態，並非任意資料來源。 | [官方](https://www.notion.com/help/intro-to-databases) · [collections.rs](../src/collections.rs) |
 | 屬性模型 | 部分 | 集合內可寫入或清除已宣告的數字、核取方塊與日期，其他檢視會讀到相同的值。日期編輯會檢查既有起訖設定，下拉選項等型別仍待做。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
 | 文字欄位 | 已驗證 | 中文值可寫入、查詢、重開。 | [官方](https://www.notion.com/help/database-properties) · [properties.rs](../src/properties.rs) |
-| 關聯 | 部分 | 從集合的可見資料列新增、移除或開啟同集合內的具名關聯。使用穩定筆記 ID，可辨認不同路徑的同名筆記。跨集合關聯欄位配置仍待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
+| 關聯 | 部分 | 可在同集合或不同集合間新增、移除或開啟具名關聯。從筆記的「連結」可看傳入及傳出方向。以穩定筆記 ID 區分同名筆記。固定目標集合的欄位配置及可雙向編輯的配對欄位待做。 | [官方](https://www.notion.com/help/relations-and-rollups) · [跨視圖導覽](UNIFIED-WORKSPACE.md) |
 | 彙總 | 部分 | 集合內可從同一資料列操作入口查看關聯和彙總。公式可依具名關聯計數或合計最新欄位值，顯示來源有問題的筆記 ID。 | [官方](https://www.notion.com/help/relations-and-rollups) · [rollups.rs](../src/rollups.rs) |
 | 公式運算 | 部分 | 可編輯既有集合公式並在保存後重算。支援數字／布林／日期型別值、條件和關聯計數／加總。錯誤顯示在結果，完整語法待做。 | [官方](https://www.notion.com/help/formulas) · [formula.rs](../src/formula.rs) |
 | 看板 | 部分 | 具名看板可按條件篩選並在同一集合內移欄。可改名、複製檢視規則及編輯共用欄位。卡片欄位的自由排列待做。 | [官方](https://www.notion.com/help/boards) · [workspace_ui.rs](../src/workspace_ui.rs) |
 | 分組 | 部分 | 集合表格與看板可依單一欄位分組。具名看板和依屬性分組的表格可收合群組並保存狀態。多層分組待做。 | [官方](https://www.notion.com/help/boards) · [操作](UI-ACCEPTANCE.md#具名集合檢視的分組收合) |
-| 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可從同一視圖編輯已宣告的型別欄位。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
+| 表格 | 部分 | 集合表格可命名、複製檢視、保存篩選條件及從資料列開啟筆記。可在集合中編輯已宣告的型別欄位，或從具名表格檢視確認多筆可見資料列後，一次設定或清空同一欄。行內任意欄位配置待做。 | [官方](https://www.notion.com/help/tables) · [集合檢視](../src/collection_views.rs) |
 | 篩選 | 部分 | 具名檢視支援三層 AND／OR、關聯與彙總。日期欄及日期公式可依本機日期篩選本週、未來七天、逾期，也可選其他週月或前後日數。條件和群組可在同層複製或移動。時間戳及其他欄位型別待做。 | [官方](https://developers.notion.com/reference/filter-data-source-entries) · [日期篩選操作](UI-ACCEPTANCE.md#集合相對日期篩選) |
 | 排序 | 部分 | 可保存最多 8 個排序欄及各自方向，依優先順序套用，支援屬性、公式結果、具名關聯的彙總筆數及加總。空值和無效值置後，關聯目標清單與自訂選項排序仍待做。 | [官方](https://www.notion.com/help/views-filters-and-sorts) · [collection_views.rs](../src/collection_views.rs) |
 | 資料庫範本 | 部分 | 可從現有列或空白建立範本，修改型別預設並撰寫多層 Markdown 子頁。可選根頁的關聯和附件。嵌入、子頁專屬資源與從現有筆記整棵擷取待做。 | [規格與文件](https://www.notion.com/help/database-templates) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
@@ -153,7 +153,7 @@
 | Markdown 摺疊 | 未實作 | 未核得等效操作。 | [官方](https://obsidian.md/help/advanced-syntax) · [markdown.rs](../src/markdown.rs) |
 | 自訂圖示 | 未實作 | 未核得等效操作。 | [官方](https://obsidian.md/help/advanced-syntax) · [markdown.rs](../src/markdown.rs) |
 | WikiLinks | 部分 | 外部工具已搬移的 Vault 筆記，若相對路徑改寫後仍唯一指向同一個筆記，可在備份後採用。保留別名和區塊 ID。多義連結、正文不同或無法核對時會停止。自動原地維護待做。 | [官方](https://obsidian.md/help/links) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
-| 標題跳轉 | 部分 | 可從同篇或指定 Vault 路徑的連結跳到標題。父子標題鏈可區分同名小節。Markdown 支援百分比編碼。重名無法唯一定位時會提示。原廠桌面對照待完成。 | [官方](https://obsidian.md/help/links) · [筆記連結](../src/note_links.rs) |
+| 標題跳轉 | 部分 | 可從同篇或指定 Vault 路徑的連結跳到標題。父子標題鏈可區分同名小節。Markdown 支援百分比編碼。重名無法唯一定位時會提示。已匯入 Vault 可預覽並重新命名唯一的純文字小節，同批可明確解析的 Markdown 和 Wiki 引用會一起維護。 | [官方](https://obsidian.md/help/links) · [筆記連結](../src/note_links.rs) |
 | 顯示別名 | 部分 | Vault 路徑消歧、別名及唯一標題段落；選單呈現段落。 | [官方](https://obsidian.md/help/links) · [note_links.rs](../src/note_links.rs) |
 | YAML aliases 作為查找索引 | 部分 | 匯入 Vault 的來源搜尋可比對常見 YAML 別名。可用唯一別名找未連結提及，原始碼編輯器的自動連結建議仍待做。 | [官方](https://obsidian.md/help/aliases) · [vault_search.rs](../src/vault_search.rs) |
 | 區塊引用 | 部分 | 可搜尋並複製唯一區塊的工作區連結，預覽後跳到區塊，再按 F9 返回。傳入連結報告可檢視同批次來源與重複或遺失的 ID。已支援同一批次內的文字區塊嵌入和反向追查。自動產生區塊 ID 及原 Vault 檔的即時偵測仍待做。 | [官方](https://obsidian.md/help/links) · [第 20 版操作](UI-ACCEPTANCE.md#第-20-版候選) |
@@ -162,7 +162,7 @@
 | 明確傳出連結 | 已驗證 | 可開啟匯入 Vault 的相對 Markdown 連結、WikiLinks 及紙間連結。新插入的紙間連結可搜尋路徑或別名，並在改名後指向同一筆記。 | [官方](https://obsidian.md/help/plugins/outgoing-links) · [紙間操作](UI-ACCEPTANCE.md#markdown-筆記連結與反向連結) |
 | 圖譜 | 部分 | 局部、工作區和匯入 Vault 三種範圍，已解析的邊可查有向最短路徑，並以節點返回筆記。 | [官方](https://obsidian.md/help/plugins/graph) · [note_links.rs](../src/note_links.rs) |
 | 未連結提及 | 部分 | 可在同一匯入批次用唯一名稱或別名找未連結提及，可加來源完整標籤，確認後建立工作區連結。持續顯示、文字篩選、排序及外部 Vault 連結格式待做。 | [官方](https://obsidian.md/help/plugins/backlinks) · [本輪操作](UI-ACCEPTANCE.md#第-22-版候選) |
-| 搜尋 | 部分 | 全域標題／正文片語可用標籤及 Vault 來源資料夾篩選，預覽上下文並跳到命中位置。原有 Vault 的別名、資料夾及標籤搜尋仍可用。完整查詢語言待做。 | [官方](https://obsidian.md/help/plugins/search) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
+| 搜尋 | 部分 | 全域標題／正文片語可用標籤及 Vault 來源資料夾篩選，預覽上下文並跳到命中位置。同一視窗可切換查找 PDF 標註。原有 Vault 的別名、資料夾及標籤搜尋仍可用。完整查詢語言待做。 | [官方](https://obsidian.md/help/plugins/search) · [紙間操作](UI-ACCEPTANCE.md#全域搜尋筆記) |
 | 書籤 | 部分 | 標題／正文搜尋與標星；無完整查詢語言。 | [官方](https://obsidian.md/help/plugins/bookmarks) · [store.rs](../src/store.rs) |
 | 快捷鍵 | 部分 | 標題／正文搜尋與標星；無完整查詢語言。 | [官方](https://obsidian.md/help/plugins/search) · [store.rs](../src/store.rs) |
 | 命令面板 | 部分 | F6 搜尋並執行五項內建導覽命令。全應用程式命令、可設定或擴充命令待做。 | [官方](https://obsidian.md/help/plugins/command-palette) · [navigation_ui.rs](../src/navigation_ui.rs) |
@@ -181,9 +181,9 @@
 | 屬性檢視 | 部分 | 本機文字屬性；匯入的 YAML 保留在原文。 | [官方](https://obsidian.md/help/plugins/properties) · [properties.rs](../src/properties.rs) |
 | 標籤面板 | 已驗證 | 可按名稱或頻率排序並切換平面或樹狀。可展開或收合單一分支及全部分支。可從標籤選單切換查詢條件並開啟正確來源，已驗同名筆記及離線重開。 | [規格與文件](https://obsidian.md/help/plugins/tags) · [本輪操作](UI-ACCEPTANCE.md#第-21-版候選) |
 | 巢狀標籤 | 已驗證 | 匯入 Vault 可查完全相符或含子層的標籤，能辨識內文與常見 YAML tags 欄，並從標籤樹開到原筆記。其他 YAML 語法及原廠完整查詢語言另見搜尋列。 | [官方](https://obsidian.md/help/plugins/tags) · [vault_search.rs](../src/vault_search.rs) |
-| .base 格式 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 視圖 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
-| Bases 公式語法 | 未實作 | 本機集合、公式與看板不讀寫 .base。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| .base 格式 | 未實作 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 視圖 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
+| Bases 公式語法 | 部分 | 支援選取的表格與清單，以及部分檔案欄位、比較式和動態來源。完整原廠視圖與語法仍缺。 | [官方](https://obsidian.md/help/bases) · [collections.rs](../src/collections.rs) |
 | 每日筆記 | 已驗證 | 日期識別碼跨改名、關閉、備份維持。 | [官方](https://obsidian.md/help/plugins/daily-notes) · [store.rs](../src/store.rs) |
 | Templates | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/web-clipper/templates) · [window.rs](../src/window.rs) |
 | Random Note | 未實作 | 沒有相應核心外掛入口。 | [官方](https://obsidian.md/help/plugins/random-note) · [window.rs](../src/window.rs) |
@@ -222,9 +222,9 @@
 | 檔案格式與附件放置位置 | 部分 | 支援限定匯入及附件副本，資料庫位置由紙間選擇。 | [官方](https://obsidian.md/help/file-formats) · [介面驗收](UI-ACCEPTANCE.md) |
 | Web Clipper 樣板 | 未實作 | 未提供可安裝的擷取擴充套件。 | [官方](https://obsidian.md/help/web-clipper) · [介面驗收](UI-ACCEPTANCE.md) |
 | 尋找與取代 | 部分 | 可在目前筆記區分大小寫循環尋找，預覽並確認全部取代。逐筆取代與正規表示式待做。 | [官方](https://obsidian.md/help/find-and-replace) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 卡片視圖 | 未實作 | 紙間檔案交換不支援 .base。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 卡片視圖 | 未實作 | Canvas 可開啟釘選的具名 Bases 檢視；原廠 Cards 版型仍缺。 | [官方](https://obsidian.md/help/bases/views/cards) · [介面驗收](UI-ACCEPTANCE.md) |
 | Bases 地圖視圖 | 未實作 | 未實作地理位置欄位。 | [官方](https://obsidian.md/help/bases/views/map) · [介面驗收](UI-ACCEPTANCE.md) |
-| Bases 清單視圖 | 未實作 | 未讀取或呈現 .base 清單。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
+| Bases 清單視圖 | 部分 | 可匯入支援的 .base 清單；完整選項未實作。 | [官方](https://obsidian.md/help/bases/views/list) · [介面驗收](UI-ACCEPTANCE.md) |
 
 ## Heptabase
 
@@ -238,7 +238,7 @@
 | 白板獨立矩形與橢圓 | 部分 | 草稿版可新增、直接拖曳移動、以數值調整位置與尺寸，以及刪除指定形狀。原生 Windows 介面驗收及原廠手勢、樣式與匯入相容仍待核對。研究 ZIP 會拒絕匯出含形狀的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_shape_tag_ui.rs](../src/board_shape_tag_ui.rs) |
 | 白板標籤 | 部分 | 草稿版可新增、移除白板本身的標籤，並以完整標籤找白板，或一併找指定 Vault 的筆記。原生 Windows 介面驗收及原廠匯出匯入仍待核對。研究 ZIP 會拒絕匯出含白板標籤的白板，請用工作區備份。 | [官方 v1.118.0](https://wiki.heptabase.com/changelog#v11180) · [board_tags.rs](../src/board_tags.rs) |
 | 分區 | 部分 | 可重新命名、整組移動可見成員、收合及展開，並打開來源筆記或 PDF。自由分區幾何待做。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
-| 連線 | 部分 | 同白板連線連到卡片 ID，分區平移後端點仍連到原卡片。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
+| 連線 | 部分 | 同白板連線連到筆記卡 ID，分區平移後端點仍連到原卡片。可依筆記編號選取同名端點、增刪連線或定位另一端。 | [官方](https://wiki.heptabase.com/organize-knowledge-and-projects) · [boards.rs](../src/boards.rs) |
 | 卡片拖曳 | 部分 | 同板可拖曳多選物件。跨板可把選取的筆記或 PDF 摘錄卡拖至已指定的目的區，再確認位移。保留相對位置、組內連線及完整分區。文字方塊與子白板尚不支援跨板。 | [官方](https://support.heptabase.com/en/articles/17060792-heptabase-mcp-tool-reference) · [白板操作](UI-ACCEPTANCE.md#第-18-版的資料列範本區塊返回與跨板拖曳) |
 | 跨白板重用卡片 | 已驗證 | 可將多張現有筆記卡及 PDF 摘錄卡一起放到另一張白板。兩張板共用原卡片內容和來源，位置各自保存。重複放入保留原位。離線重開後，從兩張板都能看到同一次編輯。 | [官方](https://wiki.heptabase.com/how-Heptabases-founder-use-Heptabase-for-learning) · [白板操作](UI-ACCEPTANCE.md#第-16-版的篩選標題與跨板卡片) |
 | 巢狀子白板 | 已驗證 | 白板可建立、拖曳並開啟子白板，顯示並跳至目前板的任一上層。變更上層後仍保存內容。會拒絕循環與超過 16 層。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |
@@ -246,9 +246,9 @@
 | 卡片內嵌 | 未實作 | 本機筆記白板不提供這些物件，JSON Canvas 為獨立視圖。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [boards.rs](../src/boards.rs) |
 | 自由文字物件 | 已驗證 | 白板可新增、移動、編輯及移除獨立文字方塊。重開後可復原最近移除的一個，原位有重疊時改放空位。每個物件限 4,096 字。 | [官方](https://wiki.heptabase.com/fundamental-elements) · [board_objects.rs](../src/board_objects.rs) |
 | 內部連結 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
-| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。原生筆記白板的跨板定位與其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [Canvas 位置](UI-ACCEPTANCE.md#從筆記定位-canvas-節點) |
+| 反向連結 | 部分 | 可從 Vault 筆記查看它在已綁定 JSON Canvas 的各個出現位置，跳到指定節點，再從該節點開回來源筆記。也可從紙間筆記跨板定位同一張原生卡片，雙擊回到原筆記。其他來源類型待做。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [原生白板與 Canvas 位置](UNIFIED-WORKSPACE.md) |
 | 快捷鍵 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/keyboard-shortcuts) · [note_links.rs](../src/note_links.rs) |
-| 全域搜尋 | 部分 | 可跨工作區搜尋 PDF 引文、註解、來源名稱與頁碼，也可依摘錄卡名稱、原引文或原註解開啟卡片，或將同一張卡加入目前白板。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [pdf_search_ui.rs](../src/pdf_search_ui.rs) |
+| 全域搜尋 | 部分 | 可在全域搜尋視窗切換至 PDF 標註，查找引文、註解、附件名或筆記標題。可開啟命中並定位來源頁；摘錄卡另可依名稱、引文或註解查找。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [pdf_search_ui.rs](../src/pdf_search_ui.rs) |
 | 側欄工具 | 部分 | 紙間有限的固定命令與筆記導覽。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [note_links.rs](../src/note_links.rs) |
 | 並排窗格 | 未實作 | 尚無對應操作。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [window.rs](../src/window.rs) |
 | 多分頁 | 未實作 | 尚無對應操作。 | [官方](https://wiki.heptabase.com/user-interface-logic) · [window.rs](../src/window.rs) |

@@ -345,6 +345,11 @@ impl<'a> NoteLinkPaths<'a> {
         }
     }
 
+    pub(crate) fn exact_markdown_target(&self, source: &[String], path: &str) -> Option<i64> {
+        let exact = crate::store::migration_media::source_relative(source, path)?;
+        self.markdown.get(exact.as_str()).copied()
+    }
+
     pub(crate) fn markdown_target(&self, source: &[String], path: &str) -> Option<i64> {
         match self.markdown_resolution(source, path) {
             MarkdownTarget::Found(id) => Some(id),

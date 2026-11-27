@@ -168,6 +168,7 @@ pub(crate) struct NoteReference {
     pub label: String,
     pub syntax: AnchorSyntax,
     pub offset: usize,
+    pub end: usize,
 }
 
 /// Return parsed WikiLinks and Markdown links, excluding literal code.
@@ -183,7 +184,7 @@ pub(crate) fn note_references(body: &str) -> Vec<NoteReference> {
                     AnchorSyntax::Markdown
                 };
                 active = Some(NoteReference {
-                    destination: dest_url.trim().to_owned(), label: String::new(), syntax, offset: range.start,
+                    destination: dest_url.trim().to_owned(), label: String::new(), syntax, offset: range.start, end: range.end,
                 });
             }
             Event::Text(text) | Event::Code(text) => {
@@ -285,11 +286,14 @@ fn find_heading(headings: &[(usize, u8, String)], levels: &[String], slugs: bool
 }
 
 pub(crate) fn resolve_heading(body: &str, anchor: &str, syntax: AnchorSyntax) -> HeadingLookup {
+    lookup_headings(&source_headings(body), body.len(), anchor, syntax)
+}
+
+pub(crate) fn lookup_headings(headings:&[(usize,u8,String)], bytes:usize, anchor:&str, syntax:AnchorSyntax)->HeadingLookup {
     let Some(levels) = heading_levels(anchor, syntax) else { return HeadingLookup::Unsupported; };
-    let headings = source_headings(body);
-    let exact = find_heading(&headings, &levels, false, body.len());
+    let exact = find_heading(headings, &levels, false, bytes);
     if exact == HeadingLookup::Missing && syntax == AnchorSyntax::Markdown {
-        find_heading(&headings, &levels, true, body.len())
+        find_heading(headings, &levels, true, bytes)
     } else {
         exact
     }

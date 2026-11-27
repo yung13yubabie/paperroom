@@ -1075,6 +1075,10 @@ impl Notebook {
             "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)", [destination], |row| row.get(0),
         )?;
         if !exists { return Err("找不到目標集合。".into()); }
+        let base_group:Option<(String,String)>=tx.query_row("SELECT label,kind FROM obsidian_base_typed_groups WHERE view_id=?1",
+            [source.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if destination!=origin && tx.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([origin])?{return Err("動態檢視使用此集合的來源候選，無法套用到其他集合。".into());}
+        if base_group.is_some() && destination!=origin {return Err("Bases 型別分組使用這個集合的來源欄位，只能在同一集合複製。".into());}
         if destination != origin {
             for rule in source.sort_rules() {
                 if matches!(rule.source, SortSource::Formula(_)) {
@@ -1096,6 +1100,11 @@ impl Notebook {
         )?;
         if changed != 1 { return Err("每個集合最多可儲存 64 個檢視。".into()); }
         let id = tx.last_insert_rowid();
+        if let Some((label,kind))=base_group{
+            tx.execute("INSERT INTO obsidian_base_typed_groups(view_id,label,kind) VALUES(?1,?2,?3)",params![id,label,kind])?;
+            tx.execute("INSERT INTO obsidian_base_descending_groups(view_id)
+                        SELECT ?1 FROM obsidian_base_descending_groups WHERE view_id=?2",params![id,source.id])?;
+        }
         tx.commit()?;
         Ok(id)
     }
@@ -1103,14 +1112,20 @@ impl Notebook {
     pub(crate) fn edit_collection_field(
         &self, collection: i64, note_id: i64, status: &str, edit: FieldEdit<'_>,
     ) -> Result<()> {
-        let key = key_checked(edit.key)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Self::write_member_field(&tx,collection,note_id,status,edit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_member_field(tx:&Transaction<'_>, collection:i64, note_id:i64, status:&str, edit:FieldEdit<'_>)->Result<()> {
+        let key=key_checked(edit.key)?;
         let member: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM collection_notes c JOIN notes n ON n.id=c.note_id
                 WHERE c.collection_id=?1 AND c.note_id=?2 AND c.status=?3 AND n.trash_root IS NULL)",
             params![collection, note_id, status], |row| row.get(0),
         )?;
-        if !member || lookup(&tx, key)? != Some(edit.kind) {
+        if !member || lookup(tx, key)? != Some(edit.kind) {
             return Err("資料列或欄位型別已變更，請重新整理。".into());
         }
         let previous: Option<String> = tx.query_row(
@@ -1127,15 +1142,14 @@ impl Notebook {
             return Err(format!("「{key}」需要輸入{}。", edit.kind.hint()).into());
         }
         if edit.kind == PropertyType::Date {
-            validate_collection_field_dates(&tx, note_id, [(key, edit.value.and_then(CalendarDay::parse)), ("", None)])?;
+            validate_collection_field_dates(tx, note_id, [(key, edit.value.and_then(CalendarDay::parse)), ("", None)])?;
         }
-        super::note_history_state::checkpoint(&tx, note_id)?;
+        super::note_history_state::checkpoint(tx, note_id)?;
         if let Some(value) = edit.value {
-            write_value(&tx, note_id, key, value, previous.is_none())?;
+            write_value(tx, note_id, key, value, previous.is_none())?;
         } else {
-            super::properties::delete_value(&tx, note_id, key)?;
+            super::properties::delete_value(tx, note_id, key)?;
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -1299,7 +1313,7 @@ impl Notebook {
             Some((item, values))
         }).collect::<Vec<_>>();
         if let Some(snapshot) = snapshot { snapshot.commit()?; }
-        if rules.sorts.is_empty() && view.presentation.group_key.is_none() {
+        if rules.sorts.is_empty() && (view.presentation.group_key.is_none() || self.connection.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([collection])?) {
             return Ok(ordered.into_iter().map(|(item, _)| item).collect());
         }
         ordered.sort_by(|((left, _), a), ((right, _), b)| {
@@ -1334,9 +1348,27 @@ impl Notebook {
     ) -> Result<Vec<(GroupValue,Vec<Row>)>> {
         let rows = self.filtered_collection_rows(collection, view)?;
         let group_key = view.and_then(|view| view.presentation.group_key.as_deref());
+        if let (Some(key),Some(view))=(group_key,view){
+            let group:Option<(String,bool)>=self.connection.query_row(
+                "SELECT g.kind,d.view_id IS NOT NULL FROM obsidian_base_typed_groups g
+                 LEFT JOIN obsidian_base_descending_groups d ON d.view_id=g.view_id
+                 WHERE g.view_id=?1 AND g.label=?2",params![view.id,key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((kind,descending))=group{
+                let values=self.collection_display_values(collection,key)?;
+                let mut lanes=BTreeMap::<(u8,i128),(GroupValue,Vec<Row>)>::new();
+                for (row,_) in rows{
+                    let ((class,value),caption)=super::obsidian_base_typed::group(values.get(&row.id),&kind);
+                    // Complement reverses the full signed ordering without overflowing at i128::MIN.
+                    // Missing, null and invalid groups keep their separate trailing classes.
+                    let order=(class,if descending { !value } else { value });
+                    lanes.entry(order).or_insert_with(||(GroupValue(Some(caption)),Vec::new())).1.push(row);
+                }
+                return Ok(lanes.into_values().collect())
+            }
+        }
         let group = group_key.map(|key| self.collection_values(collection,key)).transpose()?;
-        if group.is_none() && view.is_some_and(|view| view.layout == CollectionLayout::Table && view.rules.as_ref()
-            .is_some_and(|rules| !rules.sorts.is_empty()))
+        let dynamic=self.connection.prepare_cached("SELECT 1 FROM obsidian_base_dynamic WHERE collection_id=?1")?.exists([collection])?;
+        if group.is_none() && view.is_some_and(|view| view.layout == CollectionLayout::Table && (view.rules.as_ref().is_some_and(|rules| !rules.sorts.is_empty()) || dynamic))
         {
             // Tables and lists preserve global sort order while still displaying the real status.
             let mut ordered = Vec::<(GroupValue, Vec<Row>)>::new();
@@ -2682,3 +2714,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[path = "collection_bulk_edit.rs"]
+pub(crate) mod bulk_edit;

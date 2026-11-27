@@ -184,7 +184,7 @@ impl App {
             let next = ImageSize { width, height };
             next.validate()?;
             let area = self.board_area();
-            let available = (area.right - area.left) * 96 / self.dpi as i32 - expected_at.0;
+            let available = self.extras.board_scroll_x + (area.right - area.left) * 96 / self.dpi as i32 - expected_at.0;
             if width > expected.width && width > available {
                 return Err("目前位置的可見寬度不足。請先把圖片卡移到左側或放大視窗。".into());
             }
@@ -221,7 +221,7 @@ impl App {
         let mut wanted = self.extras.cards.iter().filter_map(|card| {
             let size = card.image?;
             if self.board_card_collapsed(card.id) { return None }
-            let left = self.scaled(card.x);
+            let left = self.board_screen_x(area, card.x) - area.left;
             if left >= width || left + self.scaled(size.width) <= 0 { return None }
             let top = self.scaled(card.y - self.extras.scroll);
             let bottom = top + self.scaled(size.height);

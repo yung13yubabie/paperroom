@@ -76,10 +76,12 @@ pub(crate) struct CanvasNoteOccurrence {
 }
 
 #[cfg(any(windows, test))]
-fn file_nodes_for_path<'a>(doc: &'a crate::canvas::Document, path: &'a str) -> impl Iterator<Item = (usize, &'a Value)> {
+fn file_nodes_for_path<'a>(exact: &'a Option<HashMap<(String,String),i64>>, note: i64, doc: &'a crate::canvas::Document, path: &'a str) -> impl Iterator<Item = (usize, &'a Value)> {
     doc.json()["nodes"].as_array().into_iter().flatten().enumerate().filter(move |(_, node)| {
-        node["type"].as_str() == Some("file") && node["file"].as_str()
-            .and_then(relative_key).as_deref() == Some(path)
+        node["type"].as_str() == Some("file") && if let Some(map) = exact {
+            node["file"].as_str() == Some(path) && node["id"].as_str().is_some_and(|id| map.get(&(id.into(),path.into())) == Some(&note))
+        } else { node["file"].as_str()
+            .and_then(relative_key).as_deref() == Some(path) }
     })
 }
 
@@ -100,8 +102,8 @@ impl Notebook {
         let canvases = {
             let mut stmt = tx.prepare(
                 "SELECT c.id,c.title FROM saved_canvases c
-                 JOIN canvas_vault_bindings b ON b.canvas_id=c.id
-                 WHERE b.import_root=?1 ORDER BY c.title COLLATE BINARY,c.id",
+                 WHERE c.id IN (SELECT canvas_id FROM canvas_vault_bindings WHERE import_root=?1
+                   UNION ALL SELECT canvas_id FROM companion_canvases WHERE import_root=?1) ORDER BY c.title COLLATE BINARY,c.id",
             )?;
             stmt.query_map([import_root], |row| Ok((row.get(0)?,row.get(1)?)))?
                 .collect::<rusqlite::Result<Vec<(i64,String)>>>()?
@@ -109,7 +111,8 @@ impl Notebook {
         let mut placements = Vec::new();
         for (canvas_id, title) in canvases {
             let doc = self.read_canvas(canvas_id)?;
-            let occurrences = file_nodes_for_path(&doc, &path).count();
+            let exact = self.companion_sources(canvas_id)?;
+            let occurrences = file_nodes_for_path(&exact,note,&doc,&path).count();
             if occurrences != 0 {
                 placements.push(CanvasNotePlacement { canvas_id, title, occurrences, import_root });
             }
@@ -121,7 +124,8 @@ impl Notebook {
     fn current_placement_path(&self, note: i64, placement: &CanvasNotePlacement) -> Result<String> {
         let (root, path) = self.active_canvas_note_path(note)?
             .ok_or("找不到可用的來源筆記，請重新開啟。")?;
-        if root != placement.import_root || self.canvas_vault(placement.canvas_id)? != Some(root) {
+        let companion_root = self.connection.query_row("SELECT import_root FROM companion_canvases WHERE canvas_id=?1", [placement.canvas_id], |r| r.get::<_,Option<i64>>(0)).optional()?.flatten();
+        if root != placement.import_root || companion_root.or(self.canvas_vault(placement.canvas_id)?) != Some(root) {
             return Err("Canvas 的來源筆記庫已變更，請重新查看出現位置。".into());
         }
         Ok(path)
@@ -134,7 +138,8 @@ impl Notebook {
         let path = self.current_placement_path(note, placement)?;
         let doc = self.read_canvas(placement.canvas_id)?;
         let mut occurrences = Vec::new();
-        for (index, node) in file_nodes_for_path(&doc, &path) {
+        let exact = self.companion_sources(placement.canvas_id)?;
+        for (index, node) in file_nodes_for_path(&exact,note,&doc,&path) {
             let mut link = file_link(node)?;
             link.note_id = Some(note);
             occurrences.push(CanvasNoteOccurrence {
@@ -153,7 +158,8 @@ impl Notebook {
         let tx = self.connection.unchecked_transaction()?;
         let path = self.current_placement_path(note, placement)?;
         let doc = self.read_canvas(placement.canvas_id)?;
-        let (_, node) = file_nodes_for_path(&doc, &path)
+        let exact = self.companion_sources(placement.canvas_id)?;
+        let (_, node) = file_nodes_for_path(&exact,note,&doc,&path)
             .find(|(_, node)| node["id"].as_str() == Some(&occurrence.link.node_id))
             .ok_or("這個 Canvas 節點已移除或不再指向此筆記。請重新查看出現位置。")?;
         let mut link = file_link(node)?;
@@ -178,6 +184,55 @@ pub(super) struct CanvasRelocation {
     pub block_references: Vec<(String, String)>,
     pub original: String,
     pub revised: String,
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct CanvasHeadingEdit {
+    pub id:i64, pub title:String, pub nodes:Vec<String>, pub original:String, pub revised:String,
+}
+
+// Active non-companion Canvases resolve file nodes using the exact Vault-relative key.
+// Companion receipts follow a different identity contract and are deliberately excluded.
+pub(super) fn plan_heading_nodes(conn:&Connection, root:i64, target:i64,
+    mut change:impl FnMut(&str)->Result<Option<String>>)->Result<Vec<CanvasHeadingEdit>> {
+    let path:String=conn.query_row("SELECT relative_path FROM vault_paths WHERE import_root=? AND note_id=?",
+        params![root,target],|r|r.get(0))?;
+    let mut q=conn.prepare("SELECT c.id,c.title,c.source,bundle.canvas_id IS NOT NULL
+        FROM canvas_vault_bindings b JOIN saved_canvases c ON c.id=b.canvas_id
+        LEFT JOIN canvas_bundles bundle ON bundle.canvas_id=c.id
+        WHERE b.import_root=? AND NOT EXISTS(SELECT 1 FROM companion_canvases cc WHERE cc.canvas_id=c.id)
+        ORDER BY c.id")?;
+    let mut rows=q.query([root])?;
+    let mut edits=Vec::new();
+    let mut delta=0i64;
+    while let Some(row)=rows.next()? {
+        let id:i64=row.get(0)?;
+        let title:String=row.get(1)?;
+        let raw:String=row.get(2)?;
+        let doc=if row.get::<_,bool>(3)? {crate::canvas::parse_bundle(raw)?}else{crate::canvas::parse(raw)?};
+        let mut updates=Vec::new();
+        for (i,n) in doc.json()["nodes"].as_array().into_iter().flatten().enumerate() {
+            if n["type"].as_str()!=Some("file") {continue;}
+            let link=file_link(n)?;
+            if relative_key(&link.file).as_deref()!=Some(path.as_str()) {continue;}
+            let Some(anchor)=link.subpath.as_deref().filter(|a| !a.starts_with("#^")) else {continue};
+            let next=change(anchor).map_err(|e|format!("Canvas「{title}」[#{id}] 節點 {}：{e}",link.node_id))?;
+            if let Some(next)=next {updates.push((i,link.node_id,next));}
+        }
+        if updates.is_empty(){continue;}
+        let mut tree=doc.json().clone();
+        let mut nodes=Vec::new();
+        for (i,node,next) in updates {
+            tree["nodes"][i]["subpath"]=Value::String(next);
+            nodes.push(node);
+        }
+        let revised=super::canvas_edit::serialize_edit(&doc,tree)?;
+        delta+=revised.as_str().len() as i64-doc.as_str().len() as i64;
+        edits.push(CanvasHeadingEdit{id,title,nodes,original:doc.as_str().into(),revised:revised.as_str().into()});
+    }
+    if delta>0 && !conn.query_row("SELECT coalesce(sum(length(CAST(source AS BLOB))),0)+?1<=?2 FROM saved_canvases",
+        [delta,super::workspace::MAX_CANVAS_STORAGE_BYTES],|r|r.get::<_,bool>(0))? {return Err("更新後會超過工作區 Canvas 容量。".into());}
+    Ok(edits)
 }
 
 pub(super) fn plan_vault_relocation(
@@ -268,6 +323,7 @@ impl Notebook {
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         self.check_canvas_vault(canvas_id, expected)?;
+        if self.is_companion_canvas(canvas_id)? { return Err("此圖的來源固定為原始匯入批次。".into()); }
         if let Some(root) = next {
             let changed = tx.execute(
                 "INSERT INTO canvas_vault_bindings(canvas_id, import_root)
@@ -302,6 +358,21 @@ impl Notebook {
         ).optional()?.ok_or_else(|| "找不到 Canvas。".into())
     }
 
+    pub(crate) fn is_companion_canvas(&self, id: i64) -> Result<bool> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM companion_canvases WHERE canvas_id=?1)", [id], |r| r.get(0))?)
+    }
+
+    fn companion_sources(&self, id: i64) -> Result<Option<HashMap<(String,String),i64>>> {
+        if !self.is_companion_canvas(id)? { return Ok(None); }
+        let mut stmt = self.connection.prepare(
+            "SELECT s.node_id,s.path,s.note_id FROM companion_node_sources s
+             JOIN companion_canvases c ON c.canvas_id=s.canvas_id
+             JOIN vault_paths p ON p.import_root=c.import_root AND p.note_id=s.note_id AND p.relative_path=s.path COLLATE BINARY
+             JOIN notes n ON n.id=p.note_id JOIN notes r ON r.id=p.import_root
+             WHERE s.canvas_id=?1 AND n.trash_root IS NULL AND r.trash_root IS NULL")?;
+        Ok(Some(stmt.query_map([id], |r| Ok(((r.get(0)?,r.get(1)?),r.get(2)?)))?.collect::<rusqlite::Result<_>>()?))
+    }
+
     pub fn canvas_file_links(&self, canvas_id: i64) -> Result<Vec<CanvasFileLink>> {
         Ok(self.canvas_file_link_snapshot(canvas_id)?.1)
     }
@@ -315,11 +386,15 @@ impl Notebook {
             let rows = stmt.query_map([canvas_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
         };
+        let exact = self.companion_sources(canvas_id)?;
         let mut links = Vec::new();
         for node in doc.json()["nodes"].as_array().into_iter().flatten() {
             if node["type"].as_str() != Some("file") { continue; }
             let mut link = file_link(node)?;
-            link.note_id = relative_key(&link.file).and_then(|key| notes.get(&key).copied());
+            link.note_id = match &exact {
+                Some(map) => map.get(&(link.node_id.clone(),link.file.clone())).copied(),
+                None => relative_key(&link.file).and_then(|key| notes.get(&key).copied()),
+            };
             links.push(link);
         }
         tx.commit()?;
@@ -336,7 +411,9 @@ impl Notebook {
             node["type"].as_str() == Some("file") && node["id"].as_str() == Some(node_id)
         }).ok_or("找不到選取的 Canvas 檔案節點，請重新開啟選單。")?;
         let mut link = file_link(selected)?;
-        if let Some(path) = relative_key(&link.file) {
+        if let Some(map) = self.companion_sources(canvas_id)? {
+            link.note_id = map.get(&(link.node_id.clone(),link.file.clone())).copied();
+        } else if let Some(path) = relative_key(&link.file) {
             let lookup = format!("{ACTIVE_FILES} AND p.relative_path=?2");
             link.note_id = tx.query_row(&lookup, params![canvas_id, path], |r| r.get(1)).optional()?;
         }

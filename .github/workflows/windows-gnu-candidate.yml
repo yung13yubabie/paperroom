@@ -1,0 +1,236 @@
+name: Windows GNU draft verification
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+env:
+  PAPERROOM_BASE: ${{ github.event.pull_request.base.sha }}
+  PAPERROOM_SOURCE: ${{ github.event.pull_request.head.sha }}
+  PAPERROOM_NAME: Paperroom-windows-x64-gnu-draft
+
+jobs:
+  build:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    name: Rebuild twice and verify the GNU draft package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      check_vendor_heading: ${{ steps.vendor_scope.outputs.check }}
+      exe_sha: ${{ steps.package.outputs.exe_sha }}
+      zip_sha: ${{ steps.package.outputs.zip_sha }}
+      product_version: ${{ steps.package.outputs.product_version }}
+      package_artifact: ${{ steps.package.outputs.package_artifact }}
+      standalone_artifact: ${{ steps.package.outputs.standalone_artifact }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Identify changes that need an official heading observation
+        id: vendor_scope
+        run: |
+          changed="$(git diff --name-only "$PAPERROOM_BASE" "$PAPERROOM_SOURCE" -- src/vault_heading_rename.rs scripts/windows-obsidian-move-fixture.ps1)"
+          if [[ -n "$changed" ]]; then echo 'check=true' >> "$GITHUB_OUTPUT"; else echo 'check=false' >> "$GITHUB_OUTPUT"; fi
+      - name: Install the fixed Rust target and check packaging tools
+        run: |
+          test "$(git rev-parse HEAD)" = "$PAPERROOM_SOURCE"
+          rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-gnu
+          python3 --version
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Independently build, package and read back the candidate
+        id: package
+        run: |
+          package="$RUNNER_TEMP/$PAPERROOM_NAME.zip"
+          export PAPERROOM_REPRO_EVIDENCE_DIR="$RUNNER_TEMP/gnu-originals"
+          bash scripts/build-windows-gnu-audit.sh "$package" "$PAPERROOM_SOURCE"
+          cmp "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-b.exe"
+          exe_sha="$(sha256sum "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" | cut -d ' ' -f 1)"
+          zip_sha="$(sha256sum "$package" | cut -d ' ' -f 1)"
+          python3 -B scripts/package-windows-gnu-audit.py verify --require-dependency-evidence \
+            --package "$package" --commit "$PAPERROOM_SOURCE" --exe-sha256 "$exe_sha" --zip-sha256 "$zip_sha"
+          install -m 0644 "$PAPERROOM_REPRO_EVIDENCE_DIR/rebuild-a.exe" "$RUNNER_TEMP/Paperroom.exe"
+          (cd "$RUNNER_TEMP" && sha256sum Paperroom.exe "$PAPERROOM_NAME.zip" > SHA256SUMS.txt)
+          product_version="$(python3 -B -c 'import re, tomllib; from pathlib import Path; version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?", version); print(version)')"
+          printf 'exe_sha=%s\nzip_sha=%s\nproduct_version=%s\n' "$exe_sha" "$zip_sha" "$product_version" >> "$GITHUB_OUTPUT"
+          printf 'package_artifact=%s-a%s\nstandalone_artifact=Paperroom-GNU-draft-exe-a%s\n' \
+            "$PAPERROOM_NAME" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Retain the notice-inclusive unsigned draft
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.package.outputs.package_artifact }}
+          path: ${{ runner.temp }}/${{ env.PAPERROOM_NAME }}.zip
+          if-no-files-found: error
+          compression-level: 0
+      - name: Retain the standalone executable and checksum list
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.package.outputs.standalone_artifact }}
+          path: |
+            ${{ runner.temp }}/Paperroom.exe
+            ${{ runner.temp }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    name: Test the pinned Linux source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          persist-credentials: false
+      - name: Run the locked Rust suite
+        run: |
+          test "$(git rev-parse HEAD)" = "$PAPERROOM_SOURCE"
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc +1.100.0 -vV | grep -Fx 'commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a'
+          cargo +1.100.0 test --locked 2>&1 | tee "$RUNNER_TEMP/linux-source-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/linux-source-tests.log"
+          if grep -Eq '^test result: .*; [1-9][0-9]* ignored' "$RUNNER_TEMP/linux-source-tests.log"; then exit 1; fi
+
+  native:
+    name: Replay ${{ matrix.flow }} on downloaded GNU EXE (Windows Server 2022)
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        flow: [shared-workflow, vault-heading, receipt-history, collection-bulk-edit, native-board-edge-navigation, native-board-transfer, notion-reverse-rows, pdf-history-text, vault-deep-backlinks, history-attachment-export, board-card-collection-row, workspace-restore, workspace-pdf-search]
+    env:
+      EXPECTED_EXE: ${{ needs.build.outputs.exe_sha }}
+      EXPECTED_ZIP: ${{ needs.build.outputs.zip_sha }}
+      EXPECTED_VERSION: ${{ needs.build.outputs.product_version }}
+      FLOW: ${{ matrix.flow }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ needs.build.outputs.package_artifact }}
+          path: ${{ runner.temp }}/gnu-package
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ needs.build.outputs.standalone_artifact }}
+          path: ${{ runner.temp }}/gnu-standalone
+      - name: Verify the same-run downloads and launch the reviewed scenario
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:PAPERROOM_SOURCE) { throw 'Candidate checkout differs.' }
+          $package = Join-Path $env:RUNNER_TEMP "gnu-package/$env:PAPERROOM_NAME.zip"
+          $standalone = Join-Path $env:RUNNER_TEMP 'gnu-standalone/Paperroom.exe'
+          $manifest = Join-Path $env:RUNNER_TEMP 'gnu-standalone/SHA256SUMS.txt'
+          python --version
+          python -B scripts/package-windows-gnu-audit.py verify --require-dependency-evidence --package $package --commit $env:PAPERROOM_SOURCE --exe-sha256 $env:EXPECTED_EXE --zip-sha256 $env:EXPECTED_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'The downloaded GNU package failed verification.' }
+          $root = Join-Path $env:RUNNER_TEMP 'candidate-verification'
+          Expand-Archive -LiteralPath $package -DestinationPath $root
+          $exe = Join-Path $root 'Paperroom.exe'
+          $checksums = Get-Content -LiteralPath $manifest
+          if ($checksums.Count -ne 2 -or $checksums[0] -cne "$env:EXPECTED_EXE  Paperroom.exe" -or
+              $checksums[1] -cne "$env:EXPECTED_ZIP  $env:PAPERROOM_NAME.zip" -or
+              (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-FileHash -LiteralPath $standalone -Algorithm SHA256).Hash -ine $env:EXPECTED_EXE -or
+              (Get-AuthenticodeSignature -LiteralPath $exe).Status -ne 'NotSigned' -or
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne $env:EXPECTED_VERSION) {
+            throw 'The executable, checksum file, version, or unsigned identity differs.'
+          }
+          $receipt = Join-Path $env:RUNNER_TEMP 'candidate-native-receipt.json'
+          ./scripts/windows-native-draft.ps1 -Exe $exe -ExeSha256 $env:EXPECTED_EXE -Scenario $env:FLOW -Receipt $receipt
+          if (!(Test-Path -LiteralPath $receipt -PathType Leaf)) { throw 'The native receipt is missing.' }
+          $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+          if ($result.exe_sha256 -cne $env:EXPECTED_EXE) { throw 'The native receipt refers to a different EXE.' }
+      - name: Retain native synthetic evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Paperroom-GNU-native-${{ matrix.flow }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-native-receipt.json
+          if-no-files-found: error
+
+  vendor-heading:
+    name: Observe the official Obsidian heading command (Windows Server 2022)
+    needs: build
+    if: needs.build.outputs.check_vendor_heading == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.PAPERROOM_SOURCE }}
+          persist-credentials: false
+      - name: Run the signed vendor application on a fresh synthetic Vault
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:PAPERROOM_SOURCE) { throw 'Candidate checkout differs.' }
+          $probe = Join-Path ([IO.Path]::GetTempPath()) 'paperroom-heading-vendor'
+          $vault = Join-Path $probe 'PaperroomHeadingProbe'
+          if (Test-Path -LiteralPath $probe) { throw 'A fresh vendor evidence directory is required.' }
+          [void][IO.Directory]::CreateDirectory($vault)
+          "PAPERROOM_VENDOR_EVIDENCE=$probe" >> $env:GITHUB_ENV
+          pwsh -STA -NoProfile -File ./scripts/windows-obsidian-move-fixture.ps1 -Vault $vault -HeadingProbe -Initialize
+          if ($LASTEXITCODE -ne 0) { throw 'The official desktop observation did not complete.' }
+      - name: Retain synthetic notes and the observation receipt
+        if: always() && env.PAPERROOM_VENDOR_EVIDENCE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Obsidian-heading-observation-a${{ github.run_attempt }}
+          path: |
+            ${{ env.PAPERROOM_VENDOR_EVIDENCE }}/obsidian-heading-receipt.json
+            ${{ env.PAPERROOM_VENDOR_EVIDENCE }}/PaperroomHeadingProbe/*.md
+          if-no-files-found: ignore
+
+  windows-source:
+    name: Confirm the existing Windows source suite on this exact head
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - name: Match the completed storage job to the exact push candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The independent exact-SHA push job can outlast a short GUI flow.
+          for attempt in {1..22}; do
+            runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/windows.yml/runs" \
+              -f event=push -f head_sha="$PAPERROOM_SOURCE" -f branch="$HEAD_BRANCH" -f per_page=30)"
+            run="$(jq -c --arg sha "$PAPERROOM_SOURCE" --arg repo "$GITHUB_REPOSITORY" --arg branch "$HEAD_BRANCH" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_branch == $branch and
+                .head_repository.full_name == $repo and .event == "push" and .path == ".github/workflows/windows.yml")]
+                | max_by(.id)' <<< "$runs")"
+            if jq -e '.status == "completed"' <<< "$run" > /dev/null; then break; fi
+            sleep 20
+          done
+          if ! jq -e '.status == "completed" and .conclusion == "success"' <<< "$run" > /dev/null; then
+            echo 'The exact push has no completed, successful Windows storage check.' >&2
+            exit 1
+          fi
+          run_id="$(jq -er '.id | numbers' <<< "$run")"
+          attempt="$(jq -er '.run_attempt | numbers' <<< "$run")"
+          jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt/jobs")"
+          job="$(jq -ce --arg sha "$PAPERROOM_SOURCE" '[.jobs[] | select(.name == "storage" and .head_sha == $sha and
+            .conclusion == "success" and (.labels | index("windows-2022")) and
+            any(.steps[]; .name == "Run native Rust tests" and .conclusion == "success"))]
+            | if length == 1 then .[0] else error("Expected exactly one successful native storage source job") end' <<< "$jobs")"
+          job_id="$(jq -er '.id | numbers' <<< "$job")"
+          printf 'Windows source suite for `%s` passed. [Storage job](%s/%s/actions/runs/%s/job/%s)\n' \
+            "$PAPERROOM_SOURCE" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$run_id" "$job_id" >> "$GITHUB_STEP_SUMMARY"

@@ -151,7 +151,7 @@ fn restore_refuses_to_remove_a_pdf_used_by_a_current_annotation() -> Result<()> 
         let attachment = db.import_attachment(note, &path)?;
         let annotation = db.add_pdf_annotation(attachment, 1, "摘錄", "")?;
         let error = db.restore_note_revision(note, version, selected, None).unwrap_err();
-        assert!(error.to_string().contains("仍被標註"));
+        assert!(error.to_string().contains("PDF 標註"));
         assert_eq!(db.note(note)?.unwrap().body, "現文");
         assert_eq!(payload(&db, attachment)?, fs::read(path)?);
         let stored: i64 = db.connection.query_row(
@@ -162,4 +162,113 @@ fn restore_refuses_to_remove_a_pdf_used_by_a_current_annotation() -> Result<()> 
     })();
     let _ = fs::remove_dir_all(dir);
     result
+}
+
+#[test]
+fn text_only_restore_preserves_pinned_excerpt_and_properties_across_backup() -> Result<()> {
+    let dir=super::super::tests::data_dir();
+    let path=dir.join("live.db");
+    let backup=dir.join("saved.db");
+    let mut db=Notebook::open(&path,false)?;
+    let note=db.add(None,"初稿","早期正文")?;
+    let version=db.save(note,1,"定稿","目前正文")?;
+    let revision=db.note_revisions(note)?[0].id;
+    let file=dir.join("鏡頭.pdf");
+    let bytes=include_bytes!("../tests/fixtures/storyboard-zh/剪輯範圍.pdf");
+    fs::write(&file,bytes)?;
+    let attachment=db.import_attachment(note,&file)?;
+    let mark=db.add_pdf_annotation(attachment,1,"底片","保留註解")?;
+    let board=db.create_board("拍攝")?;
+    let excerpt=db.create_pdf_excerpt_card(board,mark)?;
+    let group=db.create_board_group(board,"出處")?;
+    db.add_card_on(board,note)?;
+    db.set_board_group(board,note,None,Some(group))?;
+    db.set_board_group_source(board,group,None,Some(mark))?;
+    let preview=db.preview_note_revision(note,revision)?;
+    let blocked=preview.protected_files.join("\n");
+    for label in ["鏡頭.pdf","PDF 標註","PDF 摘錄卡","白板分區釘選"] {assert!(blocked.contains(label),"{blocked}");}
+    let writer=Notebook::open(&path,false)?;
+    writer.set_property(note,"審稿",Some("另一視窗確認"))?;
+    assert!(db.restore_revision_text(note,version,revision,preview.data_version).is_err());
+    assert_eq!(db.note(note)?.unwrap().body,"目前正文");
+    let current=db.preview_note_revision(note,revision)?;
+    let before=db.note_revisions(note)?.len();
+    assert!(db.restore_note_revision(note,version,revision,Some(current.data_version)).is_err());
+    assert_eq!(db.note_revisions(note)?.len(),before);
+    // Reject at the actual save step without an extra checkpoint or partial changes.
+    db.connection.execute_batch("CREATE TEMP TRIGGER decline_text BEFORE UPDATE OF body ON notes
+        BEGIN SELECT RAISE(ABORT,'synthetic rejected write'); END")?;
+    assert!(db.restore_revision_text(note,version,revision,current.data_version).is_err());
+    db.connection.execute_batch("DROP TRIGGER decline_text")?;
+    assert_eq!(db.note_revisions(note)?.len(),before);
+    assert!(db.restore_revision_text(note,version,revision,current.data_version)?);
+    assert_eq!(db.note_revisions(note)?.len(),before+1);
+    let after=db.preview_note_revision(note,revision)?;
+    assert!(!db.restore_revision_text(note,version+1,revision,after.data_version)?);
+    db.backup(&backup)?;
+    drop(writer); drop(db);
+    let isolated=dir.join("isolated.db");
+    fs::copy(backup, &isolated)?;
+    for path in [&path,&isolated] {
+        let db=Notebook::open(path,false)?;
+        let restored=db.note(note)?.unwrap();
+        assert_eq!((restored.row.title.as_str(),restored.body.as_str()),("初稿","早期正文"));
+        assert_eq!(db.properties(note)?,[("審稿".into(),"另一視窗確認".into())]);
+        assert_eq!(payload(&db,attachment)?,bytes.as_slice());
+        assert_eq!(db.pdf_excerpt_source(excerpt)?.unwrap().attachment_id,attachment);
+        assert_eq!(db.live_board_group_source(board,group,mark)?.unwrap().attachment_id,attachment);
+        assert_eq!(db.note_revision(note,db.note_revisions(note)?[0].id)?.1,"目前正文");
+    }
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn protected_base_source_survives_history_and_backup_but_other_receipt_files_remain_editable() -> Result<()> {
+    use crate::archive::ImportedPage;
+    let dir = super::super::tests::data_dir();
+    let live = dir.join("live.db");
+    let backup = dir.join("backup.db");
+    let mut db = Notebook::open(&live,false)?;
+    let root = db.import_vault("合成",vec![ImportedPage {
+        parts:vec!["A.md".into()], title:"A".into(), body:"正文".into(),
+    }])?;
+    let raw = b"views:\n  - type: table\n    name: Pin\n    order: [file.path]\n";
+    let (receipt,_) = db.import_obsidian_base(root,"Shipping.base",raw.to_vec())?;
+    let original = db.list_attachments(receipt)?[0].id;
+    let doc = crate::canvas::parse(r##"{"nodes":[{"id":"p","type":"file","file":"Shipping.base","subpath":"#Pin","x":0,"y":0,"width":232,"height":114}]}"##.to_owned())?;
+    let canvas = db.save_canvas("合成圖",&doc)?;
+    db.set_canvas_vault(canvas,Some(root))?;
+    db.bind_base_card(canvas,&doc,root,"p",receipt,None)?;
+    let start = db.note_revisions(receipt)?.len();
+    let other = Notebook::open(&live,false)?;
+    assert!(other.remove_attachment(original).unwrap_err().to_string().contains("Bases 來源收據"));
+    assert_eq!(db.note_revisions(receipt)?.len(),start);
+    let extra = add_file(&mut db,receipt,&dir,b"independent")?;
+    let revision = db.note_revisions(receipt)?[0].id;
+    let preview = db.preview_note_revision(receipt,revision)?;
+    assert!(!preview.base_source_blocked);
+    let version = db.note(receipt)?.unwrap().version;
+    assert!(db.restore_note_revision(receipt,version,revision,Some(preview.data_version))?);
+    assert_eq!(db.list_attachments(receipt)?.len(),1);
+    assert!(payload(&db,extra).is_err());
+    // Model an imported old snapshot with different source bytes. Refusing this
+    // operation must preserve the current note and all of its live source links.
+    db.connection.execute("UPDATE note_revision_attachments SET content=?1 WHERE revision_id=?2 AND original_id=?3",
+        params![b"historical different source".to_vec(),revision,original])?;
+    let preview=db.preview_note_revision(receipt,revision)?;
+    assert!(preview.base_source_blocked);
+    let latest=db.note(receipt)?.unwrap().version;
+    assert!(db.restore_note_revision(receipt,latest,revision,Some(preview.data_version)).is_err());
+    db.backup(&backup)?;
+    drop(other);drop(db);
+    for path in [&live,&backup] {
+        let db=Notebook::open(path,false)?;
+        assert_eq!(payload(&db,original)?,raw);
+        assert_eq!(db.base_path_receipt(canvas,root,"Shipping.base")?,Some(receipt));
+        assert_eq!(db.resolve_base_card(canvas,&doc,root,"p")?.3.name,"Pin");
+        assert_eq!(db.note(receipt)?.unwrap().version,latest);
+    }
+    fs::remove_dir_all(dir)?;
+    Ok(())
 }
